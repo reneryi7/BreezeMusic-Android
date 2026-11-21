@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 允许酷狗各音频流媒体 CDN 子域（如 fs.youthandroid2.kugou.com）、二级子域登录通道（login.user.kugou.com，因 *.kugou.com 通配符证书不匹配二级子域）及运营商动态边缘缓存 IP 的 HTTP 访问与 302 跳转 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <!-- 核心网关、账号登录、用户资料、VIP 权益、安全验证及 GitHub 在线更新域名强制走 TLS，严禁明文 HTTP 传输敏感凭证 -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">gateway.kugou.com</domain>
+        <domain includeSubdomains="true">gatewayretry.kugou.com</domain>
+        <domain includeSubdomains="true">userservice.kugou.com</domain>
+        <domain includeSubdomains="true">usersdfid.kugou.com</domain>
+        <domain includeSubdomains="true">userinfoservice.kugou.com</domain>
+        <domain includeSubdomains="true">vip.kugou.com</domain>
+        <domain includeSubdomains="true">kugouvip.kugou.com</domain>
+        <domain includeSubdomains="true">login-user.kugou.com</domain>
+        <domain includeSubdomains="true">loginserviceretry.kugou.com</domain>
+        <domain includeSubdomains="true">verifyservice.kugou.com</domain>
+        <domain includeSubdomains="true">d.kugou.com</domain>
+        <domain includeSubdomains="true">user.kugou.com</domain>
+        <domain includeSubdomains="true">usercenter.kugou.com</domain>
+        <domain includeSubdomains="false">login.user.kugou.com</domain>
+        <domain includeSubdomains="false">userinfo.user.kugou.com</domain>
+        <domain includeSubdomains="false">relation.user.kugou.com</domain>
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubusercontent.com</domain>
+        <domain includeSubdomains="true">ghfast.top</domain>
+        <domain includeSubdomains="true">gh-proxy.com</domain>
+        <domain includeSubdomains="true">jsdelivr.net</domain>
+        <domain includeSubdomains="true">qcloud.com</domain>
+        <domain includeSubdomains="true">qq.com</domain>
+        <domain includeSubdomains="true">gtimg.com</domain>
+    </domain-config>
+    <!-- 仅在 Debug 构建中信任用户抓包证书 -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

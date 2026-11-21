@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 默认启动窗口底色（对齐默认暗色主题「幽邃微蓝」） -->
+    <item android:drawable="@color/concept_window_bg_dark" />
+
+    <!-- 中心展示微风音乐深色品牌圆角卡片图标（96dp） -->
+    <item
+        android:width="96dp"
+        android:height="96dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_launcher_concept" />
+</layer-list>

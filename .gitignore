@@ -1,0 +1,46 @@
+# Android & Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# Module build directories
+app/build/
+app/concept_audio_stream_cache/
+
+# Reference sub-repos (cloned for study, keep outside git)
+repo_kgka/
+repo_kugou_api/
+repo_md3/
+repo_ecells/
+
+# Keystore & signing (keep secure - never commit private keys or credentials)
+*.jks
+*.keystore
+*.p12
+*.pfx
+app/keystore/
+keystore.properties
+app/keystore.properties
+
+# Google Services & secrets
+google-services.json
+
+# Local AI agent rules & skills
+.agents/
+
+# OS specific
+Thumbs.db
+
+# Patch & diff files
+*.patch
+*.diff
+*stream_cache*/
+
+# APK binaries
+*.apk
