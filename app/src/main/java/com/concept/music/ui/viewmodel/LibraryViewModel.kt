@@ -4,16 +4,25 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.concept.music.data.kugou.*
 import com.concept.music.data.model.AlbumItem
+import com.concept.music.data.model.BlacklistEntry
+import com.concept.music.data.model.CloudDiskSummary
+import com.concept.music.data.model.CloudSongItem
 import com.concept.music.data.model.FollowedArtist
+import com.concept.music.data.model.FollowedArtistNewRelease
+import com.concept.music.data.model.ListenRankItem
+import com.concept.music.data.model.LoginDeviceItem
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.PurchasedAlbumItem
 import com.concept.music.data.model.PurchasedSongItem
 import com.concept.music.data.model.Song
 import com.concept.music.data.model.UserGradeInfo
+import com.concept.music.data.model.UserListeningPreference
 import com.concept.music.data.repository.deduplicateAndMergeSongs
 import com.concept.music.data.repository.isSameMusicTrack
 import com.concept.music.data.vip.ListeningGradeManager
 import com.concept.music.data.vip.VipManager
+import com.concept.music.service.AppPermissionManager
+import com.concept.music.service.AppPermissionType
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,6 +87,49 @@ class LibraryViewModel(
     private val _followedArtists = MutableStateFlow<List<FollowedArtist>>(emptyList())
     val followedArtists = _followedArtists.asStateFlow()
 
+    private val _followedArtistNewReleases = MutableStateFlow<List<FollowedArtistNewRelease>>(emptyList())
+    val followedArtistNewReleases = _followedArtistNewReleases.asStateFlow()
+
+    private val _followedNewReleasesLoading = MutableStateFlow(false)
+    val followedNewReleasesLoading = _followedNewReleasesLoading.asStateFlow()
+
+    // 个人音乐云盘 (Tier 2 #7)
+    private val _cloudDiskSummary = MutableStateFlow(CloudDiskSummary())
+    val cloudDiskSummary = _cloudDiskSummary.asStateFlow()
+
+    private val _cloudDiskLoading = MutableStateFlow(false)
+    val cloudDiskLoading = _cloudDiskLoading.asStateFlow()
+
+    // 个人听歌排行 (Tier 2 #8)
+    private val _listenRankWeek = MutableStateFlow<List<ListenRankItem>>(emptyList())
+    val listenRankWeek = _listenRankWeek.asStateFlow()
+
+    private val _listenRankAll = MutableStateFlow<List<ListenRankItem>>(emptyList())
+    val listenRankAll = _listenRankAll.asStateFlow()
+
+    private val _listenRankLoading = MutableStateFlow(false)
+    val listenRankLoading = _listenRankLoading.asStateFlow()
+
+    // 听歌偏好与内容黑名单 (Tier 2 #9)
+    private val _listeningPreference = MutableStateFlow<UserListeningPreference?>(null)
+    val listeningPreference = _listeningPreference.asStateFlow()
+
+    private val _blacklistedSongs = MutableStateFlow<List<BlacklistEntry>>(emptyList())
+    val blacklistedSongs = _blacklistedSongs.asStateFlow()
+
+    private val _blacklistedSingers = MutableStateFlow<List<BlacklistEntry>>(emptyList())
+    val blacklistedSingers = _blacklistedSingers.asStateFlow()
+
+    private val _preferenceLoading = MutableStateFlow(false)
+    val preferenceLoading = _preferenceLoading.asStateFlow()
+
+    // 登录设备管理 (Tier 2 #11)
+    private val _loginDevices = MutableStateFlow<List<LoginDeviceItem>>(emptyList())
+    val loginDevices = _loginDevices.asStateFlow()
+
+    private val _loginDevicesLoading = MutableStateFlow(false)
+    val loginDevicesLoading = _loginDevicesLoading.asStateFlow()
+
     private val _favoriteAlbums = MutableStateFlow<List<AlbumItem>>(emptyList())
     val favoriteAlbums = _favoriteAlbums.asStateFlow()
     private var accountJob: Job? = null
@@ -104,8 +156,19 @@ class LibraryViewModel(
             accountState.collect { state ->
                 if (state.auth != AuthState.RESTORING) {
                     if (state.currentId != loadedLibraryUserId || state.auth != loadedLibraryAuth) {
+                        val userChanged = state.currentId != loadedLibraryUserId
                         loadedLibraryUserId = state.currentId
                         loadedLibraryAuth = state.auth
+                        if (userChanged) {
+                            _followedArtistNewReleases.value = emptyList()
+                            _cloudDiskSummary.value = CloudDiskSummary()
+                            _listenRankWeek.value = emptyList()
+                            _listenRankAll.value = emptyList()
+                            _listeningPreference.value = null
+                            _blacklistedSongs.value = emptyList()
+                            _blacklistedSingers.value = emptyList()
+                            _loginDevices.value = emptyList()
+                        }
                         hydrateLibraryFromLocalCache(state.currentId)
                         val hasCached = _playlists.value.isNotEmpty() || _likedSongs.value.isNotEmpty()
                         if (hasCached) {
@@ -114,7 +177,8 @@ class LibraryViewModel(
                         }
                         loadMusicLibrary()
                         val curAcc = state.current
-                        if (foreground && state.auth == AuthState.READY &&
+                        val bgGuardianAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.BACKGROUND_GUARDIAN)
+                        if (foreground && state.auth == AuthState.READY && bgGuardianAllowed &&
                             curAcc != null && curAcc.autoClaim && curAcc.completedDay != today() &&
                             accountJob?.isActive != true && claimJob?.isActive != true
                         ) {
@@ -1230,7 +1294,8 @@ class LibraryViewModel(
             val key = "${current.userId}@$todayStr"
             val now = System.currentTimeMillis()
             val needsDailyAutoClaim = current.completedDay != todayStr || !vip.state.value.snapshot.active("svip")
-            if (foreground && current.autoClaim && needsDailyAutoClaim &&
+            val bgGuardianAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.BACKGROUND_GUARDIAN)
+            if (foreground && bgGuardianAllowed && current.autoClaim && needsDailyAutoClaim &&
                 now - (autoAttempts[key] ?: 0) > 45_000 && accountState.value.auth == AuthState.READY) {
                 autoAttempts[key] = now
                 var res = vip.claim(context, automatic = true)
@@ -1380,5 +1445,313 @@ class LibraryViewModel(
         }
     }
     fun verificationAnswer(id: String, answer: VerificationAnswer?) = verification.complete(id, answer)
+
+    // ==================== Tier 1 #2: 歌单编辑与云端排序 ====================
+
+    fun updatePlaylistMeta(
+        playlist: Playlist,
+        newName: String,
+        newIntro: String,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        val trimmedName = newName.trim()
+        if (trimmedName.isBlank()) {
+            onResult(false, "歌单名称不能为空")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                VipManager.music.updatePlaylistInfo(
+                    playlist = playlist,
+                    newName = trimmedName,
+                    newIntro = newIntro.trim()
+                )
+            }.getOrDefault(false)
+            if (ok) {
+                val updated = _playlists.value.map { pl ->
+                    if (pl.isSamePlaylistAs(playlist)) {
+                        pl.copy(title = trimmedName, description = newIntro.trim())
+                    } else pl
+                }
+                _playlists.value = updated
+                VipManager.discoverCache.saveUserPlaylists(accountState.value.currentId, updated)
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "歌单信息已更新" else "更新歌单信息失败，请稍后重试")
+            }
+        }
+    }
+
+    fun reorderPlaylistSongs(
+        playlist: Playlist,
+        orderedSongs: List<Song>,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (orderedSongs.size < 2) {
+            onResult(false, "曲目数量不足，无需排序")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                VipManager.music.sortPlaylistTracks(playlist, orderedSongs)
+            }.getOrDefault(false)
+            if (ok) {
+                if (_librarySection.value == "歌单:${playlist.id}" || (playlist.isLiked && _librarySection.value == "我喜欢")) {
+                    _librarySongs.value = orderedSongs
+                }
+                if (playlist.isLiked) {
+                    _likedSongs.value = orderedSongs
+                    VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, orderedSongs)
+                } else {
+                    VipManager.discoverCache.savePlaylistSongs(playlist.id, orderedSongs)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "歌单歌曲顺序已同步云端" else "云端保存顺序失败，请稍后重试")
+            }
+        }
+    }
+
+    fun reorderUserPlaylists(
+        isCreatedByMe: Boolean,
+        orderedSubset: List<Playlist>,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (orderedSubset.size < 2) {
+            onResult(false, "歌单数量不足，无需排序")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                VipManager.music.sortUserPlaylists(orderedSubset, isCreatedByMe = isCreatedByMe)
+            }.getOrDefault(false)
+            if (ok) {
+                val subsetIds = orderedSubset.map { it.id }.toSet()
+                val others = _playlists.value.filterNot { it.id in subsetIds }
+                val merged = if (isCreatedByMe) {
+                    val liked = others.filter { it.isLiked }
+                    val rest = others.filterNot { it.isLiked }
+                    liked + orderedSubset + rest
+                } else {
+                    others + orderedSubset
+                }
+                _playlists.value = merged
+                VipManager.discoverCache.saveUserPlaylists(accountState.value.currentId, merged)
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "歌单排序已同步云端" else "歌单排序失败，请稍后重试")
+            }
+        }
+    }
+
+    // ==================== Tier 1 #5: 已关注歌手新歌动态 ====================
+
+    fun loadFollowedArtistNewReleases(force: Boolean = false) {
+        if (accountState.value.auth != AuthState.READY) return
+        if (!force && _followedArtistNewReleases.value.isNotEmpty()) return
+        if (_followedNewReleasesLoading.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _followedNewReleasesLoading.value = true
+            val list = runCatching {
+                VipManager.music.fetchFollowedArtistNewSongs(pageSize = 40, sort = 1)
+            }.getOrDefault(emptyList())
+            if (list.isNotEmpty() || force) {
+                _followedArtistNewReleases.value = list
+            }
+            _followedNewReleasesLoading.value = false
+        }
+    }
+
+    // ==================== Tier 2 #7: 个人音乐云盘 ====================
+
+    fun loadCloudDisk(force: Boolean = false) {
+        if (accountState.value.auth != AuthState.READY) return
+        if (!force && _cloudDiskSummary.value.songs.isNotEmpty()) return
+        if (_cloudDiskLoading.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _cloudDiskLoading.value = true
+            val summary = runCatching {
+                VipManager.music.fetchUserCloudDisk(page = 1, pageSize = 80)
+            }.getOrDefault(CloudDiskSummary())
+            _cloudDiskSummary.value = summary
+            _cloudDiskLoading.value = false
+        }
+    }
+
+    fun deleteCloudSong(
+        item: CloudSongItem,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching { VipManager.music.deleteUserCloudSongs(listOf(item)) }.getOrDefault(false)
+            if (ok) {
+                val cur = _cloudDiskSummary.value
+                val remaining = cur.songs.filterNot { it.kvId == item.kvId }
+                _cloudDiskSummary.value = cur.copy(
+                    songs = remaining,
+                    totalCount = (cur.totalCount - 1).coerceAtLeast(remaining.size),
+                    usedBytes = (cur.usedBytes - item.fileSize).coerceAtLeast(0L)
+                )
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "已从个人云盘删除《${item.title}》" else "删除云盘文件失败，请稍后重试")
+            }
+        }
+    }
+
+    // ==================== Tier 2 #8: 个人听歌排行 ====================
+
+    fun loadListenRank(type: Int = 0, force: Boolean = false) {
+        if (accountState.value.auth != AuthState.READY) return
+        val existing = if (type == 0) _listenRankWeek.value else _listenRankAll.value
+        if (!force && existing.isNotEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _listenRankLoading.value = true
+            val list = runCatching { VipManager.music.fetchUserListenRank(type = type) }.getOrDefault(emptyList())
+            if (type == 0) {
+                _listenRankWeek.value = list
+            } else {
+                _listenRankAll.value = list
+            }
+            _listenRankLoading.value = false
+        }
+    }
+
+    // ==================== Tier 2 #9: 听歌偏好与内容黑名单 ====================
+
+    fun loadListeningPreferenceAndBlacklist() {
+        if (accountState.value.auth != AuthState.READY) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _preferenceLoading.value = true
+            supervisorScope {
+                val prefJob = launch {
+                    val pref = runCatching { VipManager.music.fetchUserListeningPreference() }.getOrNull()
+                    if (pref != null) _listeningPreference.value = pref
+                }
+                val songBlackJob = launch {
+                    _blacklistedSongs.value = runCatching { VipManager.music.fetchContentBlacklist("song") }.getOrDefault(emptyList())
+                }
+                val singerBlackJob = launch {
+                    _blacklistedSingers.value = runCatching { VipManager.music.fetchContentBlacklist("singer") }.getOrDefault(emptyList())
+                }
+                prefJob.join()
+                songBlackJob.join()
+                singerBlackJob.join()
+            }
+            _preferenceLoading.value = false
+        }
+    }
+
+    fun updateListeningMode(
+        mode: Int,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching { VipManager.music.updateUserListeningPreference(mode = mode) }.getOrDefault(false)
+            if (ok) {
+                _listeningPreference.value = (_listeningPreference.value ?: UserListeningPreference()).copy(mode = mode)
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "推荐听歌偏好已同步云端" else "更新推荐偏好失败，请稍后重试")
+            }
+        }
+    }
+
+    fun blockSongInRecommendations(
+        song: Song,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (accountState.value.auth != AuthState.READY) {
+            onResult(false, "请先登录酷狗账号后再屏蔽推荐内容")
+            return
+        }
+        val key = song.mixSongId.ifBlank { song.hash }
+        if (key.isBlank()) {
+            onResult(false, "当前歌曲缺少标识，无法屏蔽")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                VipManager.music.editContentBlacklist(
+                    label = "song",
+                    key = key,
+                    name = "${song.artist} - ${song.title}",
+                    mixSongId = song.mixSongId,
+                    isDelete = false
+                )
+            }.getOrDefault(false)
+            if (ok) {
+                val entry = BlacklistEntry(
+                    key = key,
+                    label = "song",
+                    name = "${song.artist} - ${song.title}",
+                    mixSongId = song.mixSongId
+                )
+                _blacklistedSongs.value = (listOf(entry) + _blacklistedSongs.value).distinctBy { it.key }
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "已屏蔽《${song.title}》，后续将减少推荐" else "屏蔽失败，请稍后重试")
+            }
+        }
+    }
+
+    fun removeFromBlacklist(
+        entry: BlacklistEntry,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                VipManager.music.editContentBlacklist(
+                    label = entry.label,
+                    key = entry.key,
+                    name = entry.name,
+                    mixSongId = entry.mixSongId,
+                    isDelete = true
+                )
+            }.getOrDefault(false)
+            if (ok) {
+                if (entry.label == "singer") {
+                    _blacklistedSingers.value = _blacklistedSingers.value.filterNot { it.key == entry.key }
+                } else {
+                    _blacklistedSongs.value = _blacklistedSongs.value.filterNot { it.key == entry.key }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "已移出屏蔽名单" else "移除失败，请稍后重试")
+            }
+        }
+    }
+
+    // ==================== Tier 2 #11: 已登录设备管理 ====================
+
+    fun loadLoginDevices() {
+        if (accountState.value.auth != AuthState.READY) {
+            _loginDevices.value = emptyList()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _loginDevicesLoading.value = true
+            _loginDevices.value = runCatching { VipManager.music.fetchLoginDevices() }.getOrDefault(emptyList())
+            _loginDevicesLoading.value = false
+        }
+    }
+
+    fun kickLoginDevice(
+        device: LoginDeviceItem,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching { VipManager.music.kickLoginDevice(device) }.getOrDefault(false)
+            if (ok) {
+                _loginDevices.value = _loginDevices.value.filterNot {
+                    it.mid.isNotBlank() && it.mid == device.mid && it.t == device.t
+                }
+            }
+            withContext(Dispatchers.Main) {
+                onResult(ok, if (ok) "已将「${device.deviceName.ifBlank { device.mid }}」移出登录状态" else "踢出设备失败，请稍后重试")
+            }
+        }
+    }
+
     override fun onCleared() { verification.cancel(); super.onCleared() }
 }

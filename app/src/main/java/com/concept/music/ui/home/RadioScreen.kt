@@ -99,12 +99,19 @@ fun RadioScreen(
     val fmChannels by viewModel.fmChannels.collectAsState()
     val dailySongs by viewModel.dailyRecommendSongs.collectAsState()
 
-    var selectedChannelId by remember(initialChannelId, fmChannels) {
+    var selectedChannelId by remember(initialChannelId) {
         mutableStateOf(
             initialChannelId.takeIf { it.isNotBlank() && it != "all" }
                 ?: fmChannels.firstOrNull()?.id
                 ?: "hot"
         )
+    }
+    LaunchedEffect(fmChannels) {
+        if (fmChannels.isNotEmpty() && fmChannels.none { it.id == selectedChannelId }) {
+            if (initialChannelId.isBlank() || initialChannelId == "all") {
+                selectedChannelId = fmChannels.first().id
+            }
+        }
     }
 
     val currentChannel = remember(fmChannels, selectedChannelId) {

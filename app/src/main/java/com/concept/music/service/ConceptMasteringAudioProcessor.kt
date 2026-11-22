@@ -497,7 +497,10 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
                     if (dspActive) eqFilters[i].configureNotch(freq, sr, gainDb, q = qVal)
                     else eqFilters[i].setBypass()
                 }
-                PeqFilterType.BAND_PASS -> eqFilters[i].configurePeaking(freq, sr, gainDb.coerceIn(-8.0, 8.0), q = (qVal * 1.35).coerceIn(0.5, 8.0))
+                PeqFilterType.BAND_PASS -> {
+                    val focusDb = if (abs(gainDb) >= 0.5) gainDb.coerceIn(-8.0, 8.0) else 3.0
+                    eqFilters[i].configurePeaking(freq, sr, focusDb, q = (qVal * 1.35).coerceIn(0.5, 8.0))
+                }
             }
         }
 
@@ -507,7 +510,7 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         } else {
             hpfFilter.setBypass()
         }
-        if (dspActive && state.lowPassCutoffHz in 8000..19500) {
+        if (dspActive && state.lowPassCutoffHz in 8000 until 19500) {
             lpfFilter.configureLowPass(state.lowPassCutoffHz.toDouble(), sr, q = 0.7071)
         } else {
             lpfFilter.setBypass()
@@ -609,7 +612,11 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             reverbInputHpf.configureHighPass(185.0, sr, q = 0.7071)
             reverbInputLpf.configureLowPass(6200.0, sr, q = 0.7071)
             val userWet = (state.reverbWetMix / 1000f).coerceIn(0f, 1f)
-            cachedReverbWet = (newReverb.wetMix * 0.55f + userWet * 0.45f).coerceIn(0.04f, 0.48f)
+            cachedReverbWet = if (userWet <= 0.001f) {
+                0f
+            } else {
+                (newReverb.wetMix * 0.55f + userWet * 0.45f).coerceIn(0.04f, 0.48f)
+            }
             val userDamp = (state.reverbDamping / 1000f).coerceIn(0.05f, 0.90f)
             cachedReverbDamping = (newReverb.damping * 0.4f + userDamp * 0.6f).coerceIn(0.10f, 0.85f)
             val preDelaySamples = ((state.reverbPreDelayMs.coerceIn(0, 80) / 1000f) * sr).toInt()
@@ -829,8 +836,8 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         val state = AudioEffectManager.state.value
         val balance = state.channelBalance.coerceIn(-1f, 1f)
         val dspActive = state.isEnabled && state.currentPreset != EffectPreset.OFF && !state.isAbBypassActive
-        val eqLoudnessComp = state.isEnabled && state.equalLoudnessCompensation && !state.isAbBypassActive
-        val volNorm = state.isEnabled && state.volumeNormalizationEnabled && !state.isAbBypassActive
+        val eqLoudnessComp = state.equalLoudnessCompensation && !state.isAbBypassActive
+        val volNorm = state.volumeNormalizationEnabled && !state.isAbBypassActive
         val antiClip = state.antiClippingEnabled && (dspActive || eqLoudnessComp || volNorm)
         val focusDuckGain = PlaybackService.audioFocusDuckGain.coerceIn(0.15f, 1.0f)
 
@@ -889,13 +896,14 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
 
             val normGain = if (volNorm) {
                 val frameEnergy = (abs(rawL) + abs(rawR)) * 0.5f
-                if (frameEnergy > 0.015f) {
-                    val alpha = if (frameEnergy > smoothedEnvelope) 0.0004f else 0.00012f
+                if (frameEnergy > 0.012f) {
+                    val alpha = if (frameEnergy > smoothedEnvelope) 0.0005f else 0.00014f
                     smoothedEnvelope += alpha * (frameEnergy - smoothedEnvelope)
                     val targetEnv = 0.24f
-                    val minClamp = if (dspActive) 0.96f else 0.88f
-                    val desiredGain = (targetEnv / smoothedEnvelope.coerceAtLeast(0.06f)).coerceIn(minClamp, 1.14f)
-                    currentNormGain += 0.0003f * (desiredGain - currentNormGain)
+                    val minClamp = if (dspActive) 0.78f else 0.65f
+                    val maxClamp = if (dspActive) 1.24f else 1.45f
+                    val desiredGain = (targetEnv / smoothedEnvelope.coerceAtLeast(0.05f)).coerceIn(minClamp, maxClamp)
+                    currentNormGain += 0.0004f * (desiredGain - currentNormGain)
                 }
                 currentNormGain
             } else 1.0f
@@ -1033,7 +1041,7 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             // 8. 双声道耦合真包络峰值限制器 (True Stereo-Linked Envelope Peak Limiter)
             var outL = sL
             var outR = sR
-            if (antiClip || dspActive || volNorm) {
+            if (antiClip) {
                 val peak = maxOf(abs(outL), abs(outR))
                 val coeff = if (peak > limiterEnvelope) limAttackCoeff else limReleaseCoeff
                 limiterEnvelope += coeff * (peak - limiterEnvelope)

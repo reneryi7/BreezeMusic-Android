@@ -39,6 +39,15 @@ import com.concept.music.MainActivity
 import com.concept.music.R
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
@@ -91,7 +100,9 @@ class HeadsetMediaButtonController(
     private val cancelScheduled: () -> Unit,
     private val onTogglePlay: () -> Unit,
     private val onSkipToNext: () -> Unit,
-    private val onSkipToPrevious: () -> Unit
+    private val onSkipToPrevious: () -> Unit,
+    private val onExplicitPlay: (() -> Unit)? = null,
+    private val onExplicitPause: (() -> Unit)? = null
 ) {
     @Volatile
     var multiClickTimeoutMs: Long = multiClickTimeoutMs
@@ -120,9 +131,7 @@ class HeadsetMediaButtonController(
 
     private fun isToggleOrHookKey(keyCode: Int): Boolean = when (keyCode) {
         KeyEvent.KEYCODE_HEADSETHOOK,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-        KeyEvent.KEYCODE_MEDIA_PLAY,
-        KeyEvent.KEYCODE_MEDIA_PAUSE -> true
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> true
         else -> false
     }
 
@@ -168,6 +177,18 @@ class HeadsetMediaButtonController(
         lastHandledAtMs = now
 
         when (keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                cancelScheduled()
+                pendingClickCount = 0
+                (onExplicitPlay ?: onTogglePlay).invoke()
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                cancelScheduled()
+                pendingClickCount = 0
+                (onExplicitPause ?: onTogglePlay).invoke()
+                return true
+            }
             KeyEvent.KEYCODE_MEDIA_NEXT -> {
                 cancelScheduled()
                 pendingClickCount = 0
@@ -249,10 +270,15 @@ class PlaybackService : MediaSessionService() {
             return@OnAudioFocusChangeListener
         }
         when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                // 永久失去焦点（如用户主动切到其他音乐/视频播放器）：平滑暂停并复位音量增益，避免卡死 30% 音量
+                audioFocusDuckGain = 1.0f
+                player?.pause()
+                abandonDuckAudioFocusRequest()
+            }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // 压低音量同播模式：不暂停音乐，平滑压低至 30% 音量
+                // 临时闪避（导航/语音/短通知）：不暂停音乐，平滑压低至 30% 音量
                 audioFocusDuckGain = 0.30f
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
@@ -261,7 +287,135 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    data class ServiceSleepTimerState(
+        val remainingSec: Long = 0L,
+        val stopAfterCurrentSong: Boolean = false,
+        val pendingStopAtTrackEnd: Boolean = false
+    ) {
+        val isInFinalFade: Boolean
+            get() = remainingSec in 1L..5L
+    }
+
     companion object {
+        @Volatile
+        var isAppPlaybackActive: Boolean = false
+
+        private val serviceSleepScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        private var serviceSleepJob: Job? = null
+        private val _sleepTimerState = MutableStateFlow(ServiceSleepTimerState())
+        val sleepTimerState: StateFlow<ServiceSleepTimerState> = _sleepTimerState.asStateFlow()
+
+        private fun safeServiceElapsedRealtime(): Long =
+            runCatching { SystemClock.elapsedRealtime() }.getOrDefault(0L).takeIf { it > 0L }
+                ?: System.currentTimeMillis()
+
+        fun startServiceSleepTimer(minutes: Int, stopAfterCurrentSong: Boolean) {
+            serviceSleepJob?.cancel()
+            serviceSleepJob = null
+            val mainLooper = runCatching { Looper.getMainLooper() }.getOrNull()
+            fun onPlayerMain(action: (ExoPlayer) -> Unit) {
+                val p = activeServiceInstance?.player ?: return
+                if (mainLooper == null || Looper.myLooper() == mainLooper) {
+                    runCatching { action(p) }
+                } else {
+                    Handler(mainLooper).post { runCatching { action(p) } }
+                }
+            }
+            if (minutes <= 0) {
+                onPlayerMain { p ->
+                    p.volume = 1f
+                    if (stopAfterCurrentSong) {
+                        while (p.mediaItemCount > p.currentMediaItemIndex + 1) {
+                            p.removeMediaItem(p.mediaItemCount - 1)
+                        }
+                    }
+                }
+                _sleepTimerState.value = ServiceSleepTimerState(
+                    remainingSec = 0L,
+                    stopAfterCurrentSong = stopAfterCurrentSong,
+                    pendingStopAtTrackEnd = stopAfterCurrentSong
+                )
+                return
+            }
+            val totalSec = minutes.toLong() * 60L
+            _sleepTimerState.value = ServiceSleepTimerState(
+                remainingSec = totalSec,
+                stopAfterCurrentSong = stopAfterCurrentSong,
+                pendingStopAtTrackEnd = stopAfterCurrentSong
+            )
+            serviceSleepJob = serviceSleepScope.launch {
+                val endElapsedMs = safeServiceElapsedRealtime() + totalSec * 1000L
+                while (true) {
+                    val remMs = (endElapsedMs - safeServiceElapsedRealtime()).coerceAtLeast(0L)
+                    val remSec = (remMs + 999L) / 1000L
+                    val cur = _sleepTimerState.value
+                    _sleepTimerState.value = cur.copy(remainingSec = remSec)
+                    if (remSec <= 0L) break
+                    if (remSec in 1L..5L && !cur.stopAfterCurrentSong) {
+                        val fadeVol = (remSec / 5f).coerceIn(0.10f, 1f)
+                        onPlayerMain { it.volume = fadeVol }
+                    }
+                    delay(1000L)
+                }
+                val latest = _sleepTimerState.value
+                val p = activeServiceInstance?.player
+                if (latest.stopAfterCurrentSong) {
+                    onPlayerMain { playerInst ->
+                        playerInst.volume = 1f
+                        while (playerInst.mediaItemCount > playerInst.currentMediaItemIndex + 1) {
+                            playerInst.removeMediaItem(playerInst.mediaItemCount - 1)
+                        }
+                    }
+                    _sleepTimerState.value = latest.copy(
+                        remainingSec = 0L,
+                        pendingStopAtTrackEnd = true
+                    )
+                } else {
+                    onPlayerMain { playerInst ->
+                        playerInst.pause()
+                        playerInst.volume = 1f
+                    }
+                    _sleepTimerState.value = latest.copy(
+                        remainingSec = 0L,
+                        pendingStopAtTrackEnd = false
+                    )
+                }
+            }
+        }
+
+        fun updateSleepStopAfterCurrentSongPref(stopAfter: Boolean) {
+            val cur = _sleepTimerState.value
+            val nextPending = if (cur.remainingSec > 0L) stopAfter else cur.pendingStopAtTrackEnd && stopAfter
+            _sleepTimerState.value = cur.copy(
+                stopAfterCurrentSong = stopAfter,
+                pendingStopAtTrackEnd = nextPending
+            )
+        }
+
+        fun cancelServiceSleepTimer() {
+            serviceSleepJob?.cancel()
+            serviceSleepJob = null
+            val mainLooper = runCatching { Looper.getMainLooper() }.getOrNull()
+            activeServiceInstance?.player?.let { p ->
+                if (mainLooper == null || Looper.myLooper() == mainLooper) {
+                    runCatching { p.volume = 1f }
+                } else {
+                    Handler(mainLooper).post { runCatching { p.volume = 1f } }
+                }
+            }
+            _sleepTimerState.value = _sleepTimerState.value.copy(
+                remainingSec = 0L,
+                pendingStopAtTrackEnd = false
+            )
+        }
+
+        fun consumePendingTrackEndStop(): Boolean {
+            val cur = _sleepTimerState.value
+            if (!cur.pendingStopAtTrackEnd || cur.remainingSec > 0L) return false
+            _sleepTimerState.value = cur.copy(pendingStopAtTrackEnd = false)
+            return true
+        }
+
         const val ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC = "com.concept.music.action.TOGGLE_DESKTOP_LYRIC"
         const val ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC_LOCK = "com.concept.music.action.TOGGLE_DESKTOP_LYRIC_LOCK"
 
@@ -279,6 +433,9 @@ class PlaybackService : MediaSessionService() {
             lyricEnabled: Boolean = SystemLyricBridge.state.value.floatingCapsuleEnabled,
             lyricLocked: Boolean = SystemLyricBridge.state.value.floatingCapsuleLocked
         ): List<CommandButton> {
+            if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.NOTIFICATION_MEDIA)) {
+                return emptyList()
+            }
             val toggleLyricBtn = CommandButton.Builder()
                 .setDisplayName(if (lyricEnabled) "关闭桌面歌词" else "开启桌面歌词")
                 .setSessionCommand(SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC)
@@ -405,6 +562,22 @@ class PlaybackService : MediaSessionService() {
                 } else {
                     PlaybackCoordinator.onSkipToPreviousDelegate?.invoke()
                 }
+            },
+            onExplicitPlay = {
+                val ctx = activeServiceInstance?.applicationContext ?: fallbackAppContext
+                if (ctx != null) {
+                    PlaybackCoordinator.handleExplicitPlay(ctx, activeServiceInstance?.player)
+                } else {
+                    PlaybackCoordinator.onResumePlayDelegate?.invoke()
+                }
+            },
+            onExplicitPause = {
+                val ctx = activeServiceInstance?.applicationContext ?: fallbackAppContext
+                if (ctx != null) {
+                    PlaybackCoordinator.handleExplicitPause(ctx, activeServiceInstance?.player)
+                } else {
+                    activeServiceInstance?.player?.pause()
+                }
             }
         )
 
@@ -427,14 +600,15 @@ class PlaybackService : MediaSessionService() {
         }
 
         fun updateHandleAudioBecomingNoisy(enabled: Boolean) {
+            val effectiveEnabled = enabled && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
             val svc = activeServiceInstance ?: return
             runCatching {
                 val mainLooper = Looper.getMainLooper()
                 if (mainLooper == null || Looper.myLooper() == mainLooper) {
-                    svc.player?.setHandleAudioBecomingNoisy(enabled)
+                    svc.player?.setHandleAudioBecomingNoisy(effectiveEnabled)
                 } else {
                     mainHandler?.post {
-                        svc.player?.setHandleAudioBecomingNoisy(enabled)
+                        svc.player?.setHandleAudioBecomingNoisy(effectiveEnabled)
                     }
                 }
             }
@@ -757,14 +931,18 @@ class PlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, initialFocusMode == AudioFocusMode.EXCLUSIVE)
-            .setHandleAudioBecomingNoisy(pauseOnHeadsetDisconnect)
+            .setHandleAudioBecomingNoisy(
+                pauseOnHeadsetDisconnect && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
+            )
             .setLoadControl(loadControl)
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
             .build()
         player = exoPlayer
 
+        var bgAutoAdvanceRunnable: Runnable? = null
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                isAppPlaybackActive = isPlaying
                 if (isPlaying) {
                     if (currentAudioFocusMode == AudioFocusMode.DUCK) {
                         audioFocusDuckGain = 1.0f
@@ -774,10 +952,48 @@ class PlaybackService : MediaSessionService() {
                     }
                     startBackgroundDesktopLyricProgressTicker()
                 } else {
+                    if (currentAudioFocusMode == AudioFocusMode.DUCK) {
+                        abandonDuckAudioFocusRequest()
+                    }
                     stopBackgroundDesktopLyricProgressTicker()
                     SystemLyricBridge.syncProgressFromService(exoPlayer.currentPosition, false)
                 }
                 refreshMediaSessionCustomLayoutInternal()
+            }
+
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                // 后台托管的「播完当前歌曲再停」在单曲循环或自动切歌时直接拦截停播
+                if ((reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                        reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) &&
+                    consumePendingTrackEndStop()
+                ) {
+                    exoPlayer.pause()
+                    exoPlayer.volume = 1f
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                bgAutoAdvanceRunnable?.let { mainHandler?.removeCallbacks(it) }
+                bgAutoAdvanceRunnable = null
+                if (playbackState == Player.STATE_ENDED) {
+                    if (consumePendingTrackEndStop()) {
+                        exoPlayer.pause()
+                        exoPlayer.volume = 1f
+                        return
+                    }
+                    // 当划卡保活或系统回收 Activity 后 ViewModel 已脱离，由 Service 兜底自动续播下一首
+                    if (PlaybackCoordinator.onSkipToNextDelegate == null && exoPlayer.playWhenReady) {
+                        val r = Runnable {
+                            if (exoPlayer.playbackState == Player.STATE_ENDED &&
+                                PlaybackCoordinator.onSkipToNextDelegate == null
+                            ) {
+                                PlaybackCoordinator.handleSkipToNext(applicationContext, exoPlayer)
+                            }
+                        }
+                        bgAutoAdvanceRunnable = r
+                        mainHandler?.postDelayed(r, 380L)
+                    }
+                }
             }
         })
 
@@ -967,8 +1183,14 @@ class PlaybackService : MediaSessionService() {
                     return false
                 }
                 val keyEvent = extractMediaKeyEvent(intent)
-                if (keyEvent != null && handleHeadsetKeyEvent(applicationContext, keyEvent)) {
-                    return true
+                if (keyEvent != null) {
+                    if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)) {
+                        // 关闭外设音频与耳机线控权限后，显式消费拦截事件，不再回落交由 Media3 默认响应
+                        return true
+                    }
+                    if (handleHeadsetKeyEvent(applicationContext, keyEvent)) {
+                        return true
+                    }
                 }
                 return super.onMediaButtonEvent(session, controllerInfo, intent)
             }

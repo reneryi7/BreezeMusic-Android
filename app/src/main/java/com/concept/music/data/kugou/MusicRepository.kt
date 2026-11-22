@@ -29,9 +29,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class MusicApiRepository(
-    private val transport: KugouTransport,
-    private val accounts: AccountRepository,
-    private val device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") }
+    internal val transport: KugouTransport,
+    internal val accounts: AccountRepository,
+    internal val device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") }
 ) {
     private val playbackResultCache = ConcurrentHashMap<String, PlaybackResult>()
     private val playbackResultCacheTimestamp = ConcurrentHashMap<String, Long>()
@@ -362,6 +362,23 @@ class MusicApiRepository(
                 playbackResultCacheTimestamp.remove(it)
             }
         }
+    }
+
+    /**
+     * 清理指定曲目全部音质档位（标准/高品/无损/Hi-Res/伴奏）的解析缓存，
+     * 避免切音质或错误重试时因仅清主 hash 导致高音质缓存命中失效链接。
+     */
+    fun clearSongPlaybackCache(song: Song) {
+        val allHashes = listOf(
+            song.hash,
+            song.hash128,
+            song.mp3Hash128,
+            song.hash320,
+            song.hashFlac,
+            song.hashHiRes,
+            song.accompanyHash
+        ).map { it.trim().lowercase() }.filter { it.isNotBlank() }.distinct()
+        allHashes.forEach { clearPlaybackCache(it) }
     }
 
     private fun getValidCachedPlayback(cacheKey: String, legacyKey: String? = null): PlaybackResult? {
@@ -2037,6 +2054,9 @@ class MusicApiRepository(
         preferredQuality: AudioQuality = song.highestQuality,
         useAccompaniment: Boolean = false
     ): PlaybackResult {
+        if (song.isCloudSong) {
+            return resolveUserCloudPlayback(song)
+        }
         val effectiveSong = if (useAccompaniment) {
             val accHash = song.accompanyHash.ifBlank { runCatching { matchAccompanyHash(song) }.getOrDefault("") }
             if (accHash.isNotBlank()) {
@@ -2686,7 +2706,10 @@ class MusicApiRepository(
                     }
                     val (q, kbps) = deduceQuality(url, bRate, fSize, effectiveDurMs, ext, reqTier, cachedSpecs)
                     val (cStart, cEnd) = extractClimaxRange(it.data)
-                    return PlaybackResult(url, q, kbps, fSize, cStart, cEnd, resolvedHash = hashLower)
+                    val isExplicitFreePart = (it.data.number("is_free_part") ?: it.data.number("IsFreePart") ?: 0) == 1 ||
+                        (it.data.number("priv_status") ?: 0) == 5 ||
+                        (respDurSec in 1L..65L && song.durationMs >= 100_000L && respDurSec * 1000L < song.durationMs / 2L)
+                    return PlaybackResult(url, q, kbps, fSize, cStart, cEnd, isFreePart = isExplicitFreePart, resolvedHash = hashLower)
                 }
             }
         }
@@ -7030,7 +7053,7 @@ class MusicApiRepository(
 
     private val songCommentCountCache = ConcurrentHashMap<String, Int>()
 
-    private suspend fun resolveCommentMixSongId(song: Song): Long {
+    internal suspend fun resolveCommentMixSongId(song: Song): Long {
         var mixSongId = song.albumAudioId.takeIf { it > 0 } ?: song.audioId.takeIf { it > 0 } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: 0L
         val cleanHash = song.hash.trim().lowercase()
         if (mixSongId <= 0 && cleanHash.isNotBlank()) {
@@ -7304,7 +7327,7 @@ class MusicApiRepository(
         }
     }
 
-    private val commentSpecialChildIdCache = ConcurrentHashMap<String, String>()
+    internal val commentSpecialChildIdCache = ConcurrentHashMap<String, String>()
     private val commentMixSongIdCache = ConcurrentHashMap<String, Long>()
 
     /**
@@ -7649,7 +7672,7 @@ class MusicApiRepository(
         }
     }
 
-    private fun parseCommentList(root: JsonObject, preferHotList: Boolean, page: Int = 1): List<SongComment> {
+    internal fun parseCommentList(root: JsonObject, preferHotList: Boolean, page: Int = 1): List<SongComment> {
         val dataObj = root.obj("data") ?: root
         // 关键修复：
         // 1. 当处于“最热”且 page == 1 时，同时合并 weight_list/hot_list 与常规 list；
@@ -8101,7 +8124,7 @@ class MusicApiRepository(
         // 实时热搜榜兜底热歌歌名（不显示写死的歌手名）
     )
 
-    private fun parseSongs(root: JsonObject): List<Song> {
+    internal fun parseSongs(root: JsonObject): List<Song> {
         val arrayKeys = listOf(
             "songs", "songlist", "song_list", "info", "data", "files", "lists", "list",
             "audio_list", "audios", "recommend_list", "song_info_list", "album_audio_list",

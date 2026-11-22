@@ -9,13 +9,17 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,11 +27,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.SavedAccount
+import com.concept.music.data.model.LoginDeviceItem
+import com.concept.music.ui.components.resolveDeviceIcon
+import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.viewmodel.LibraryViewModel
 import com.concept.music.util.SecurityGuards
 import kotlinx.coroutines.Dispatchers
@@ -174,8 +185,20 @@ private fun saveQr(context: Context, bitmap: Bitmap) {
 
 @Composable
 fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () -> Unit) {
+    val context = LocalContext.current
     val state by viewModel.accountState.collectAsState()
+    val loginDevices by viewModel.loginDevices.collectAsState()
+    val loginDevicesLoading by viewModel.loginDevicesLoading.collectAsState()
     var removing by remember { mutableStateOf<SavedAccount?>(null) }
+    var kickingDevice by remember { mutableStateOf<LoginDeviceItem?>(null) }
+    val isLoggedIn = state.auth == AuthState.READY && !state.currentId.isNullOrBlank()
+
+    LaunchedEffect(state.currentId, state.auth) {
+        if (isLoggedIn) {
+            viewModel.loadLoginDevices()
+        }
+    }
+
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) { LazyColumn(Modifier.widthIn(max = 640.dp).fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { TextButton(onClick = onBack) { Text("返回") }; Text("账号管理", style = MaterialTheme.typography.headlineMedium) }
         item { Button(onClick = onLogin) { Text("添加账号") } }
@@ -199,9 +222,141 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
                 }
             }
         }
+
+        if (isLoggedIn) {
+            item(key = "login_devices_header") {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "已登录设备管理",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Text(
+                            text = "支持查看同账号在线设备及跨设备续播来源，可安全移除非常用设备",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        enabled = !loginDevicesLoading,
+                        onClick = { viewModel.loadLoginDevices() }
+                    ) {
+                        if (loginDevicesLoading) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                        } else {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "刷新登录设备")
+                        }
+                    }
+                }
+            }
+
+            if (loginDevices.isEmpty() && !loginDevicesLoading) {
+                item(key = "login_devices_empty") {
+                    OutlinedCard(Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "暂未查询到其他已登录设备（可点击右上角刷新重试）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                }
+            } else {
+                items(
+                    items = loginDevices,
+                    key = { dev -> "dev_${dev.mid}_${dev.deviceName}_${dev.t}" }
+                ) { device ->
+                    OutlinedCard(Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = resolveDeviceIcon("${device.deviceName} ${device.platform}"),
+                                contentDescription = null,
+                                tint = if (device.isCurrentDevice) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = device.deviceName.ifBlank { "未知设备" },
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (device.isCurrentDevice) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = ConceptPrimary.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = "本机",
+                                                color = ConceptPrimary,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                val sub = listOfNotNull(
+                                    device.platform.takeIf { it.isNotBlank() },
+                                    device.loginTime.takeIf { it.isNotBlank() }?.let { "登录：$it" }
+                                ).joinToString(" · ").ifBlank { "MID: ${device.mid.take(12)}" }
+                                Text(
+                                    text = sub,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (!device.isCurrentDevice) {
+                                TextButton(onClick = { kickingDevice = device }) {
+                                    Text("移出", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            item(key = "login_devices_bottom_pad") { Spacer(Modifier.height(48.dp)) }
+        }
     } }
     removing?.let { account -> AlertDialog(onDismissRequest = { removing = null }, title = { Text("移除账号？") },
         text = { Text("清除本机保存的 ${account.nickname} 的登录凭证和设置，其他账号保留。") },
         confirmButton = { TextButton(onClick = { viewModel.removeAccount(account.userId); removing = null }) { Text("移除") } },
         dismissButton = { TextButton(onClick = { removing = null }) { Text("取消") } }) }
+    kickingDevice?.let { device ->
+        AlertDialog(
+            onDismissRequest = { kickingDevice = null },
+            title = { Text("移出登录设备？") },
+            text = { Text("确定将「${device.deviceName.ifBlank { device.mid }}」从当前账号登录态中下线吗？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = device
+                    kickingDevice = null
+                    viewModel.kickLoginDevice(target) { _, msg ->
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Text("确认移出", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { kickingDevice = null }) { Text("取消") } }
+        )
+    }
 }

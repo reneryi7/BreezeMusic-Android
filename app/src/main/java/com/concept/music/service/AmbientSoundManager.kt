@@ -71,14 +71,24 @@ object AmbientSoundManager {
     @Volatile
     private var focusDucked: Boolean = false
 
+    @Volatile
+    private var coexistWithAppMusic: Boolean = false
+
     private var audioFocusRequest: AudioFocusRequest? = null
 
     private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
-                focusPaused = true
-                focusDucked = false
-                setMasterEnabled(false)
+                // 若是本应用自身播放器启动抢焦（如心流舱双联动或独立开白噪音后播放音乐），不自杀关闭白噪音
+                if (coexistWithAppMusic || isMusicCurrentlyPlaying || PlaybackService.isAppPlaybackActive) {
+                    focusPaused = false
+                    focusDucked = false
+                    requestStandaloneAudioFocusIfNeeded(false)
+                } else {
+                    focusPaused = true
+                    focusDucked = false
+                    setMasterEnabled(false)
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 focusPaused = true
@@ -117,6 +127,11 @@ object AmbientSoundManager {
     fun onMusicPlayStateChanged(isPlaying: Boolean) {
         if (isMusicCurrentlyPlaying == isPlaying) return
         isMusicCurrentlyPlaying = isPlaying
+        evaluateEngineLoop()
+    }
+
+    fun setCoexistWithAppMusic(coexist: Boolean) {
+        coexistWithAppMusic = coexist
         evaluateEngineLoop()
     }
 
@@ -220,7 +235,8 @@ object AmbientSoundManager {
         val st = _state.value
         val shouldRun = st.masterEnabled && st.hasActiveChannel && (!st.syncWithMusic || isMusicCurrentlyPlaying)
         if (shouldRun) {
-            requestStandaloneAudioFocusIfNeeded(!st.syncWithMusic && !isMusicCurrentlyPlaying)
+            val needStandaloneFocus = !st.syncWithMusic && !isMusicCurrentlyPlaying && !coexistWithAppMusic && !PlaybackService.isAppPlaybackActive
+            requestStandaloneAudioFocusIfNeeded(needStandaloneFocus)
             if (synthJob?.isActive != true) {
                 startSynthLoop()
             }

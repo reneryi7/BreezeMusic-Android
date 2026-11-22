@@ -2,6 +2,7 @@ package com.concept.music.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.concept.music.data.kugou.searchByLyric
 import com.concept.music.data.model.AlbumItem
 import com.concept.music.data.model.ArtistItem
 import com.concept.music.data.model.ComplexSearchResult
@@ -57,6 +58,9 @@ class SearchViewModel(
 
     private val _artistResults = MutableStateFlow<List<ArtistItem>>(emptyList())
     val artistResults = _artistResults.asStateFlow()
+
+    private val _lyricResults = MutableStateFlow<List<Song>>(emptyList())
+    val lyricResults = _lyricResults.asStateFlow()
 
     private val _loading = MutableStateFlow(false)
     val loading = _loading.asStateFlow()
@@ -129,6 +133,7 @@ class SearchViewModel(
                 SearchTab.ARTIST -> _artistResults.value.isNotEmpty()
                 SearchTab.ALBUM -> _albumResults.value.isNotEmpty()
                 SearchTab.PLAYLIST -> _playlistResults.value.isNotEmpty()
+                SearchTab.LYRIC -> _lyricResults.value.isNotEmpty()
             }
             if (hasWarmCache) {
                 currentPage = 1
@@ -138,6 +143,7 @@ class SearchViewModel(
                     SearchTab.ARTIST -> if (_artistResults.value.size < 10) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.ALBUM -> if (_albumResults.value.size < 12) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.PLAYLIST -> if (_playlistResults.value.size < 12) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.LYRIC -> if (_lyricResults.value.size < pageSize) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.COMPLEX -> {}
                 }
             } else {
@@ -162,6 +168,7 @@ class SearchViewModel(
         _lastSearchedKeyword.value = trimmed
         // 每次发起新搜索时始终默认回归「综合」结果页，避免残留上一次的分类记忆
         _selectedTab.value = SearchTab.COMPLEX
+        _lyricResults.value = emptyList()
         _hasSearched.value = true
 
         // 加入历史记录并持久化（移除 15 条数量上限）
@@ -285,6 +292,11 @@ class SearchViewModel(
                         _playlistResults.value = res
                         _hasMore.value = res.size >= pageSize
                     }
+                    SearchTab.LYRIC -> {
+                        val res = VipManager.music.searchByLyric(keyword, page = 1, pageSize = pageSize)
+                        _lyricResults.value = res.songs
+                        _hasMore.value = res.hasMore || res.songs.size >= pageSize
+                    }
                 }
             } catch (_: Exception) {
             } finally {
@@ -348,6 +360,17 @@ class SearchViewModel(
                             _hasMore.value = false
                         }
                     }
+                    SearchTab.LYRIC -> {
+                        val res = VipManager.music.searchByLyric(currentQuery, page = nextPage, pageSize = pageSize)
+                        if (res.songs.isNotEmpty()) {
+                            currentPage = nextPage
+                            val existingHashes = _lyricResults.value.map { it.hash.lowercase() }.toSet()
+                            _lyricResults.value = _lyricResults.value + res.songs.filter { it.hash.lowercase() !in existingHashes }
+                            _hasMore.value = res.hasMore || res.songs.size >= pageSize
+                        } else {
+                            _hasMore.value = false
+                        }
+                    }
                     SearchTab.COMPLEX -> {
                         _hasMore.value = false
                     }
@@ -381,6 +404,7 @@ class SearchViewModel(
         _albumResults.value = emptyList()
         _playlistResults.value = emptyList()
         _artistResults.value = emptyList()
+        _lyricResults.value = emptyList()
     }
 
     fun removeHistoryItem(keyword: String) {

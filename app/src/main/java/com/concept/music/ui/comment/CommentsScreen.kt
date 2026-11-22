@@ -69,6 +69,10 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
+import com.concept.music.data.kugou.deleteComment
+import com.concept.music.data.kugou.fetchResourceComments
+import com.concept.music.data.kugou.postResourceComment
+import com.concept.music.data.model.CommentTargetType
 import com.concept.music.data.model.KugouCommentEmojiParser
 import com.concept.music.data.model.Song
 import com.concept.music.data.model.SongComment
@@ -445,6 +449,7 @@ fun CommentsScreen(
     currentType: String = "hot",
     hasMore: Boolean = true,
     currentUserAvatar: String = "",
+    currentUserId: String = VipManager.accounts.state.value.currentId.orEmpty(),
     onBack: () -> Unit,
     onTabSelected: (String) -> Unit = {},
     onLoadMore: () -> Unit = {},
@@ -452,7 +457,8 @@ fun CommentsScreen(
     onLoadReplies: (commentId: String) -> Unit = {},
     onSyncReplyCount: (commentId: String, actualCount: Int, latestReplies: List<SongComment>?) -> Unit = { _, _, _ -> },
     onPostComment: (content: String, replyToCommentId: String?, replyToUserName: String?, onResult: (Boolean, String) -> Unit) -> Unit = { _, _, _, cb -> cb(true, "评论已发布") },
-    onLikeComment: (commentId: String) -> Unit = {}
+    onLikeComment: (commentId: String) -> Unit = {},
+    onDeleteComment: ((commentId: String, tid: String?, onResult: (Boolean, String) -> Unit) -> Unit)? = null
 ) {
     // 独立楼中楼详情页目标根评论 ID（仅以 ID 驱动页面开关，杜绝因 replies 异步刷新导致切换动画重复触发卡顿）
     var activeFloorCommentId by remember { mutableStateOf<String?>(null) }
@@ -507,6 +513,7 @@ fun CommentsScreen(
     var replyTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var commentInputText by remember { mutableStateOf("") }
     var showEmojiBar by remember { mutableStateOf(false) }
+    var pendingDeleteComment by remember { mutableStateOf<SongComment?>(null) }
     // 持久保持主评论列表滚动状态，从「查看全部回复」返回时 0ms 恢复原位不重排
     val listState = rememberLazyListState()
 
@@ -659,10 +666,11 @@ fun CommentsScreen(
                         onInputChange = { commentInputText = it },
                         showEmojiBar = showEmojiBar,
                         onToggleEmojiBar = { showEmojiBar = !showEmojiBar },
-                        onSend = {
+                        onSend = { onFinished ->
                             val content = commentInputText.trim()
                             if (content.isNotBlank()) {
                                 onPostComment(content, replyTarget?.first, replyTarget?.second) { ok, msg ->
+                                    onFinished()
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                     if (ok) {
                                         commentInputText = ""
@@ -670,6 +678,8 @@ fun CommentsScreen(
                                         showEmojiBar = false
                                     }
                                 }
+                            } else {
+                                onFinished()
                             }
                         }
                     )
@@ -815,6 +825,10 @@ fun CommentsScreen(
                                     RootCommentCard(
                                         comment = comment,
                                         isDark = isDark,
+                                        canDelete = onDeleteComment != null &&
+                                            currentUserId.isNotBlank() &&
+                                            comment.userId.isNotBlank() &&
+                                            comment.userId == currentUserId,
                                         onOpenAllRepliesFloor = {
                                             lastOpenedFloorComment = comment
                                             activeFloorCommentId = comment.id
@@ -829,6 +843,7 @@ fun CommentsScreen(
                                             replyTarget = replyId to replyUserName
                                         },
                                         onLikeComment = onLikeComment,
+                                        onDeleteClick = { pendingDeleteComment = comment },
                                         onPreviewImage = { previewImageUrl = it }
                                     )
                                 }
@@ -987,6 +1002,36 @@ fun CommentsScreen(
                 )
             }
         }
+
+        // 删除自己评论的二次确认弹窗
+        pendingDeleteComment?.let { target ->
+            AlertDialog(
+                onDismissRequest = { pendingDeleteComment = null },
+                title = { Text("删除评论", fontWeight = FontWeight.Bold) },
+                text = { Text("确定要删除这条评论吗？删除后将无法恢复。") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val delTarget = target
+                            pendingDeleteComment = null
+                            onDeleteComment?.invoke(
+                                delTarget.id,
+                                delTarget.rootId?.takeIf { it.isNotBlank() && it != delTarget.id }
+                            ) { _, msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("确认删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingDeleteComment = null }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -1030,8 +1075,12 @@ fun CommentFloorDetailScreen(
 
     LaunchedEffect(rootComment.replies) {
         if (rootComment.replies.isNotEmpty()) {
-            val merged = (floorReplies + rootComment.replies).distinctBy { it.id }
-            if (merged.size != floorReplies.size) {
+            val incomingById = rootComment.replies.associateBy { it.id }
+            val updatedExisting = floorReplies.map { old -> incomingById[old.id] ?: old }
+            val existingIds = updatedExisting.map { it.id }.toHashSet()
+            val brandNew = rootComment.replies.filter { it.id !in existingIds }
+            val merged = updatedExisting + brandNew
+            if (merged != floorReplies) {
                 floorReplies = merged
             }
         }
@@ -1158,12 +1207,13 @@ fun CommentFloorDetailScreen(
                     showEmojiBar = showEmojiBar,
                     onToggleEmojiBar = { showEmojiBar = !showEmojiBar },
                     placeholderOverride = if (replyTarget != null) "回复 @${replyTarget?.second}..." else "回复楼主 @${rootComment.userName}...",
-                    onSend = {
+                    onSend = { onFinished ->
                         val content = inputText.trim()
                         if (content.isNotBlank()) {
                             val targetCommentId = replyTarget?.first ?: rootComment.id
                             val targetUserName = replyTarget?.second ?: rootComment.userName
                             onPostReply(content, targetCommentId, targetUserName) { ok, msg ->
+                                onFinished()
                                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 if (ok) {
                                     inputText = ""
@@ -1171,6 +1221,8 @@ fun CommentFloorDetailScreen(
                                     showEmojiBar = false
                                 }
                             }
+                        } else {
+                            onFinished()
                         }
                     }
                 )
@@ -1340,6 +1392,11 @@ private fun CommentConversationDetailScreen(
     var replyTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var inputText by remember { mutableStateOf("") }
     var showEmojiBar by remember { mutableStateOf(false) }
+    var localAppendedReplies by remember(conversation.id) { mutableStateOf<List<Pair<SongComment, Int>>>(emptyList()) }
+    val effectiveDialogueList = remember(conversation.dialogueList, localAppendedReplies) {
+        val baseIds = conversation.dialogueList.map { it.first.id }.toHashSet()
+        conversation.dialogueList + localAppendedReplies.filter { it.first.id !in baseIds }
+    }
 
     ConceptStageBackground(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -1355,7 +1412,7 @@ private fun CommentConversationDetailScreen(
                     title = {
                         Column {
                             Text(
-                                text = "查看对话 (${conversation.dialogueList.size})",
+                                text = "查看对话 (${effectiveDialogueList.size})",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.ExtraBold,
                                     color = primaryText,
@@ -1401,21 +1458,35 @@ private fun CommentConversationDetailScreen(
                     } else {
                         "回复对话发起人 @${conversation.rootClusterComment.userName}..."
                     },
-                    onSend = {
+                    onSend = { onFinished ->
                         val content = inputText.trim()
                         if (content.isNotBlank()) {
-                            onPostReply(
-                                content,
-                                replyTarget?.first ?: conversation.rootClusterComment.id,
-                                replyTarget?.second ?: conversation.rootClusterComment.userName
-                            ) { ok, msg ->
+                            val targetId = replyTarget?.first ?: conversation.rootClusterComment.id
+                            val targetUser = replyTarget?.second ?: conversation.rootClusterComment.userName
+                            onPostReply(content, targetId, targetUser) { ok, msg ->
+                                onFinished()
                                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 if (ok) {
+                                    val profile = VipManager.accounts.state.value.profile
+                                    val appended = SongComment(
+                                        id = "local_conv_${System.currentTimeMillis()}",
+                                        userId = VipManager.accounts.state.value.currentId.orEmpty(),
+                                        userName = profile?.nickname ?: "我",
+                                        userAvatar = currentUserAvatar.ifBlank { profile?.avatarUrl.orEmpty() },
+                                        content = content,
+                                        timeFormatted = "刚刚",
+                                        parentId = targetId,
+                                        replyUserName = targetUser
+                                    )
+                                    val nextLevel = (effectiveDialogueList.maxOfOrNull { it.second } ?: 1) + 1
+                                    localAppendedReplies = localAppendedReplies + (appended to nextLevel)
                                     inputText = ""
                                     replyTarget = null
                                     showEmojiBar = false
                                 }
                             }
+                        } else {
+                            onFinished()
                         }
                     }
                 )
@@ -1429,7 +1500,7 @@ private fun CommentConversationDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 itemsIndexed(
-                    items = conversation.dialogueList,
+                    items = effectiveDialogueList,
                     key = { idx, (cmt, _) -> "conv_item_${cmt.id}_$idx" },
                     contentType = { _, _ -> "conv_dialogue_item" }
                 ) { idx, (cmt, _) ->
@@ -1584,7 +1655,7 @@ private fun CommentConversationDetailScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "— 已展示完整对话 (${conversation.dialogueList.size} 条) —",
+                            text = "— 已展示完整对话 (${effectiveDialogueList.size} 条) —",
                             color = subText.copy(alpha = 0.5f),
                             fontSize = 12.sp
                         )
@@ -2016,10 +2087,12 @@ private fun MultiLevelDeepDialogueEntryNode(
 private fun RootCommentCard(
     comment: SongComment,
     isDark: Boolean,
+    canDelete: Boolean = false,
     onOpenAllRepliesFloor: () -> Unit,
     onReplyRoot: () -> Unit,
     onReplySub: (replyId: String, replyUserName: String) -> Unit,
     onLikeComment: (commentId: String) -> Unit,
+    onDeleteClick: (() -> Unit)? = null,
     onPreviewImage: (String) -> Unit
 ) {
     val primaryText = MaterialTheme.colorScheme.onSurface
@@ -2036,6 +2109,8 @@ private fun RootCommentCard(
                 comment = comment,
                 isDark = isDark,
                 isFloorOwner = false,
+                canDelete = canDelete,
+                onDeleteClick = onDeleteClick,
                 onLikeClick = { onLikeComment(comment.id) }
             )
 
@@ -2185,6 +2260,8 @@ private fun CommentUserHeaderRow(
     comment: SongComment,
     isDark: Boolean,
     isFloorOwner: Boolean,
+    canDelete: Boolean = false,
+    onDeleteClick: (() -> Unit)? = null,
     onLikeClick: () -> Unit
 ) {
     val primaryText = MaterialTheme.colorScheme.onSurface
@@ -2322,33 +2399,46 @@ private fun CommentUserHeaderRow(
             animationSpec = tween(200),
             label = "rootLikeTint"
         )
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .softClickable(onClick = onLikeClick)
-                .padding(horizontal = 6.dp, vertical = 3.dp)
-        ) {
-            Icon(
-                imageVector = if (comment.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                contentDescription = "点赞",
-                tint = likeTint,
-                modifier = Modifier
-                    .size(16.dp)
-                    .graphicsLayer {
-                        scaleX = likeScale
-                        scaleY = likeScale
-                    }
-            )
-            if (comment.likeCount > 0) {
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = formatCommentLikeCount(comment.likeCount),
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = if (comment.isLiked) Color(0xFFFF5252) else subText,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (canDelete && onDeleteClick != null) {
+                Icon(
+                    imageVector = Icons.Rounded.DeleteOutline,
+                    contentDescription = "删除评论",
+                    tint = subText.copy(alpha = 0.72f),
+                    modifier = Modifier
+                        .size(28.dp)
+                        .softClickable(onClick = onDeleteClick)
+                        .padding(5.dp)
                 )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .softClickable(onClick = onLikeClick)
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            ) {
+                Icon(
+                    imageVector = if (comment.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    contentDescription = "点赞",
+                    tint = likeTint,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer {
+                            scaleX = likeScale
+                            scaleY = likeScale
+                        }
+                )
+                if (comment.likeCount > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = formatCommentLikeCount(comment.likeCount),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = if (comment.isLiked) Color(0xFFFF5252) else subText,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    )
+                }
             }
         }
     }
@@ -2929,7 +3019,7 @@ private fun CommentComposerBottomBar(
     showEmojiBar: Boolean,
     onToggleEmojiBar: () -> Unit,
     placeholderOverride: String? = null,
-    onSend: () -> Unit
+    onSend: (onFinished: () -> Unit) -> Unit
 ) {
     val quickEmojis = remember {
         listOf("😊", "😂", "😭", "😍", "🥺", "👍", "❤️", "🌹", "🎧", "🎵", "🔥", "✨", "👏", "🥳", "😎", "🙏")
@@ -3090,30 +3180,169 @@ private fun CommentComposerBottomBar(
 
             var isSendingLocked by remember { mutableStateOf(false) }
             LaunchedEffect(commentInputText) {
-                if (commentInputText.isEmpty()) isSendingLocked = false
+                // 无论清空还是修改文本均解除发送锁，避免前一次异常残留锁死
+                isSendingLocked = false
             }
             IconButton(
                 onClick = {
                     if (!isSendingLocked && commentInputText.isNotBlank()) {
                         isSendingLocked = true
-                        onSend()
+                        onSend {
+                            isSendingLocked = false
+                        }
                     }
                 },
                 enabled = commentInputText.isNotBlank() && !isSendingLocked,
                 modifier = Modifier
                     .size(40.dp)
                     .background(
-                        color = if (commentInputText.isNotBlank()) ConceptPrimary else elevatedBg,
+                        color = if (commentInputText.isNotBlank() && !isSendingLocked) ConceptPrimary else elevatedBg,
                         shape = CircleShape
                     )
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.Send,
                     contentDescription = "发布",
-                    tint = if (commentInputText.isNotBlank()) Color.White else subText,
+                    tint = if (commentInputText.isNotBlank() && !isSendingLocked) Color.White else subText,
                     modifier = Modifier.size(18.dp)
                 )
             }
         }
     }
+}
+
+/**
+ * 歌单 / 专辑通用评论页 (Tier 1 #6)：
+ * 复用与歌曲评论完全一致的视觉排版、最热/最新切换、分页加载、发评论、回复以及删除自己评论能力。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ResourceCommentsScreen(
+    targetType: CommentTargetType,
+    resourceId: String,
+    resourceTitle: String,
+    resourceSubtitle: String = "",
+    resourceCoverUrl: String = "",
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val accountState by VipManager.accounts.state.collectAsState()
+    val currentUserId = accountState.currentId.orEmpty()
+    val currentUserAvatar = accountState.profile?.avatarUrl.orEmpty()
+
+    var commentType by remember(targetType, resourceId) { mutableStateOf("hot") }
+    var comments by remember(targetType, resourceId) { mutableStateOf<List<SongComment>>(emptyList()) }
+    var totalCount by remember(targetType, resourceId) { mutableIntStateOf(0) }
+    var loading by remember(targetType, resourceId) { mutableStateOf(false) }
+    var page by remember(targetType, resourceId) { mutableIntStateOf(1) }
+    var hasMore by remember(targetType, resourceId) { mutableStateOf(true) }
+
+    fun loadPage(targetPage: Int, reset: Boolean) {
+        if (loading && !reset) return
+        scope.launch {
+            loading = true
+            runCatching {
+                val (cnt, list) = VipManager.music.fetchResourceComments(
+                    targetType = targetType,
+                    resourceId = resourceId,
+                    type = commentType,
+                    page = targetPage,
+                    pageSize = 30
+                )
+                val merged = if (reset) list else (comments + list).distinctBy { it.id }
+                comments = merged
+                totalCount = maxOf(cnt, merged.size)
+                page = targetPage
+                hasMore = list.size >= 8 && (reset || merged.size > comments.size - list.size)
+            }.onFailure {
+                hasMore = false
+            }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(targetType, resourceId, commentType) {
+        loadPage(targetPage = 1, reset = true)
+    }
+
+    val pseudoSong = remember(targetType, resourceId, resourceTitle, resourceSubtitle, resourceCoverUrl) {
+        Song(
+            id = "${targetType.name.lowercase()}_$resourceId",
+            title = resourceTitle.ifBlank { if (targetType == CommentTargetType.ALBUM) "专辑评论" else "歌单评论" },
+            artist = resourceSubtitle.ifBlank { if (targetType == CommentTargetType.ALBUM) "专辑评论区" else "歌单评论区" },
+            coverUrl = resourceCoverUrl
+        )
+    }
+
+    CommentsScreen(
+        song = pseudoSong,
+        comments = comments,
+        totalCount = totalCount,
+        loading = loading,
+        currentType = commentType,
+        hasMore = hasMore,
+        currentUserAvatar = currentUserAvatar,
+        currentUserId = currentUserId,
+        onBack = onBack,
+        onTabSelected = { newType ->
+            if (commentType != newType) {
+                commentType = newType
+            }
+        },
+        onLoadMore = {
+            if (hasMore && !loading) {
+                loadPage(targetPage = page + 1, reset = false)
+            }
+        },
+        onRefresh = {
+            loadPage(targetPage = 1, reset = true)
+        },
+        onPostComment = { content, replyToId, replyToUser, onResult ->
+            scope.launch {
+                runCatching {
+                    val created = VipManager.music.postResourceComment(
+                        targetType = targetType,
+                        resourceId = resourceId,
+                        resourceName = resourceTitle,
+                        content = content,
+                        replyToCommentId = replyToId,
+                        replyToUserName = replyToUser
+                    )
+                    comments = listOf(created) + comments
+                    totalCount = maxOf(totalCount + 1, comments.size)
+                    onResult(true, if (replyToId != null) "回复已发布" else "评论已发布")
+                }.onFailure { err ->
+                    onResult(false, err.message ?: "发布失败，请稍后重试")
+                }
+            }
+        },
+        onLikeComment = { cid ->
+            comments = comments.map { c ->
+                if (c.id == cid) {
+                    val next = !c.isLiked
+                    c.copy(isLiked = next, likeCount = (c.likeCount + if (next) 1 else -1).coerceAtLeast(0))
+                } else c
+            }
+        },
+        onDeleteComment = { cid, tid, onResult ->
+            scope.launch {
+                val ok = runCatching {
+                    VipManager.music.deleteComment(
+                        targetType = targetType,
+                        targetId = resourceId,
+                        commentId = cid,
+                        tid = tid
+                    )
+                }.getOrDefault(false)
+                if (ok) {
+                    comments = comments.filterNot { it.id == cid }
+                    totalCount = (totalCount - 1).coerceAtLeast(comments.size)
+                    onResult(true, "评论已删除")
+                } else {
+                    onResult(false, "删除失败，请稍后重试")
+                }
+            }
+        }
+    )
 }

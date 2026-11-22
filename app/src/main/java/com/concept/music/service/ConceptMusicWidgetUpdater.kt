@@ -78,9 +78,9 @@ object ConceptMusicWidgetUpdater {
         isPlaying: Boolean? = null
     ) {
         ensureStateLoaded(context)
-        if (!songTitle.isNullOrBlank()) cachedTitle = songTitle
-        if (!artist.isNullOrBlank()) cachedArtist = artist
-        if (!lyricLine.isNullOrBlank()) cachedLyric = lyricLine
+        if (songTitle != null) cachedTitle = songTitle.ifBlank { "ConceptMusic 酷狗概念版" }
+        if (artist != null) cachedArtist = artist.ifBlank { "点击开启流光无损听歌体验" }
+        if (lyricLine != null) cachedLyric = lyricLine
         if (isPlaying != null) cachedPlaying = isPlaying
         runCatching {
             context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

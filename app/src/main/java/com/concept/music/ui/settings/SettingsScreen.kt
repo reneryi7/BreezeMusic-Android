@@ -286,8 +286,8 @@ internal fun openExternalUrl(context: Context, url: String) {
     }
 }
 
-internal fun copyTextToClipboard(context: Context, label: String, text: String) {
-    AppPermissionManager.copyTextToClipboard(context, label, text, toastMessage = null)
+internal fun copyTextToClipboard(context: Context, label: String, text: String): Boolean {
+    return AppPermissionManager.copyTextToClipboard(context, label, text, toastMessage = null)
 }
 
 internal fun resolveUpdateCheckFromApiOrRedirect(
@@ -759,9 +759,8 @@ private suspend fun checkGitHubLatestRelease(
         )
     }
 
-    evaluateUpdateProbeConsensus(collectedOutcomes.toList()) ?: UpdateCheckResult.UpToDate(
-        versionText = "v$cleanLocal",
-        message = "您正在使用最新正式版，暂无可用更新"
+    evaluateUpdateProbeConsensus(collectedOutcomes.toList()) ?: UpdateCheckResult.Error(
+        message = "检查更新通道暂时超时或受限，未能获取远程版本，请稍后重试或点击前往 Releases 查看"
     )
 }
 
@@ -783,6 +782,7 @@ fun SettingsScreen(
     val lyricFontSize = uiState.lyricFontSize
     val lyricTranslationScale = uiState.lyricTranslationScale
     val lyricAlignment = uiState.lyricAlignment
+    val lyricWordByWord = uiState.lyricWordByWord
     val lyricBlurEnabled = uiState.lyricBlurEnabled
     val lyricKeepScreenOn = uiState.lyricKeepScreenOn
     val playbackSpeed = uiState.playbackSpeed
@@ -983,7 +983,7 @@ fun SettingsScreen(
                             category = SettingsCategory.PLAYBACK_CONTROL,
                             icon = Icons.Rounded.Headphones,
                             accentColor = ConceptCoralAccent,
-                            statusText = if (allowPlayWithOtherApps) "混音同播" else audioFocusMode.label,
+                            statusText = audioFocusMode.label,
                             selected = highlightedCat == SettingsCategory.PLAYBACK_CONTROL,
                             onClick = { selectCategoryAction(SettingsCategory.PLAYBACK_CONTROL) }
                         )
@@ -1709,6 +1709,15 @@ fun SettingsScreen(
                                         )
 
                                         SettingToggleRow(
+                                            title = "逐字流光歌词",
+                                            subtitle = "开启 KRC 逐字渐变高亮，关闭则切换整行高亮更省电",
+                                            checked = lyricWordByWord,
+                                            onCheckedChange = { viewModel.setLyricWordByWord(it) }
+                                        )
+
+                                        Spacer(modifier = Modifier.height(10.dp))
+
+                                        SettingToggleRow(
                                             title = "阶梯景深模糊",
                                             subtitle = "非当前唱诵行随距离自然虚化",
                                             checked = lyricBlurEnabled,
@@ -1897,10 +1906,11 @@ fun SettingsScreen(
                                             ).show()
                                         },
                                         onEnableAll = {
-                                            AppPermissionType.entries.forEach { t ->
-                                                viewModel.setAppPermissionEnabled(t, true)
-                                            }
-                                            Toast.makeText(context, "已恢复开启全部应用权限", Toast.LENGTH_SHORT).show()
+                                            AppPermissionManager.restoreDefaultCorePermissions(context)
+                                            AppPermissionType.entries
+                                                .filter { it != AppPermissionType.MUSIC_DOWNLOAD }
+                                                .forEach { t -> viewModel.setAppPermissionEnabled(t, true) }
+                                            Toast.makeText(context, "已恢复开启全部默认核心权限", Toast.LENGTH_SHORT).show()
                                         }
                                     )
                                 }

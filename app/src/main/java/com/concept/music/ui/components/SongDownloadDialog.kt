@@ -352,16 +352,21 @@ fun SongDownloadDialog(
                         }
                         Button(
                             onClick = {
+                                var requestedPermission = false
                                 MusicDownloadManager.enqueueDownload(
                                     context = context,
                                     song = enrichedSong,
                                     quality = selectedQuality,
                                     onPermissionRequired = { perms ->
+                                        requestedPermission = true
                                         pendingQualityAfterPerm = selectedQuality
                                         storagePermLauncher.launch(perms)
                                     }
                                 )
-                                requestDismiss()
+                                // Android 9 及以下首次需要动态申请存储权限时暂不关闭弹窗，等待 storagePermLauncher 回调入队后再关闭
+                                if (!requestedPermission) {
+                                    requestDismiss()
+                                }
                             },
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(

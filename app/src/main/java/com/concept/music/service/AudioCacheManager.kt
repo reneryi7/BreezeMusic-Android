@@ -7,9 +7,12 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.CacheEvictor
+import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.SimpleCache
+import java.util.TreeSet
 import coil.imageLoader
 import com.concept.music.data.vip.VipManager
 import kotlinx.coroutines.CoroutineScope
@@ -95,8 +98,71 @@ object AudioCacheManager {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    /**
+     * 支持运行时热更新容量上限的 LRU 淘汰器：修改缓存上限后无需重启应用立即按新阈值淘汰。
+     */
+    private class DynamicLruCacheEvictor(initialMaxBytes: Long) : CacheEvictor {
+        @Volatile
+        var maxBytes: Long = initialMaxBytes.coerceAtLeast(64L * 1024L * 1024L)
+
+        private val leastRecentlyUsed = TreeSet<CacheSpan> { lhs, rhs ->
+            val d = lhs.lastTouchTimestamp - rhs.lastTouchTimestamp
+            when {
+                d == 0L -> lhs.compareTo(rhs)
+                d < 0L -> -1
+                else -> 1
+            }
+        }
+        private var currentSize: Long = 0L
+
+        override fun requiresCacheSpanTouches(): Boolean = true
+
+        override fun onCacheInitialized() = Unit
+
+        @Synchronized
+        override fun onStartFile(cache: Cache, key: String, position: Long, length: Long) {
+            if (length != androidx.media3.common.C.LENGTH_UNSET.toLong()) {
+                evictCache(cache, length)
+            }
+        }
+
+        @Synchronized
+        override fun onSpanAdded(cache: Cache, span: CacheSpan) {
+            leastRecentlyUsed.add(span)
+            currentSize += span.length
+            evictCache(cache, 0L)
+        }
+
+        @Synchronized
+        override fun onSpanRemoved(cache: Cache, span: CacheSpan) {
+            leastRecentlyUsed.remove(span)
+            currentSize = (currentSize - span.length).coerceAtLeast(0L)
+        }
+
+        @Synchronized
+        override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) {
+            onSpanRemoved(cache, oldSpan)
+            onSpanAdded(cache, newSpan)
+        }
+
+        @Synchronized
+        fun evictCache(cache: Cache, requiredSpace: Long) {
+            val limit = maxBytes
+            while (currentSize + requiredSpace > limit && leastRecentlyUsed.isNotEmpty()) {
+                val oldest = leastRecentlyUsed.first()
+                runCatching { cache.removeSpan(oldest) }
+                if (!leastRecentlyUsed.remove(oldest)) {
+                    break
+                }
+            }
+        }
+    }
+
     @Volatile
     private var simpleCache: SimpleCache? = null
+
+    @Volatile
+    private var activeEvictor: DynamicLruCacheEvictor? = null
 
     @Volatile
     private var cacheDir: File? = null
@@ -128,6 +194,8 @@ object AudioCacheManager {
         scope.launch {
             runCatching {
                 val cache = getCache(appCtx)
+                activeEvictor?.maxBytes = limit.maxBytes
+                activeEvictor?.evictCache(cache, 0L)
                 trimCacheToLimit(cache, limit.maxBytes)
             }
             refreshCacheSize(appCtx)
@@ -166,7 +234,7 @@ object AudioCacheManager {
             if (!exists()) mkdirs()
         }
         cacheDir = dir
-        val evictor = LeastRecentlyUsedCacheEvictor(configuredLimit.maxBytes)
+        val evictor = DynamicLruCacheEvictor(configuredLimit.maxBytes).also { activeEvictor = it }
         val dbProvider = StandaloneDatabaseProvider(appContext)
         return SimpleCache(dir, evictor, dbProvider).also { cache ->
             simpleCache = cache
@@ -506,6 +574,12 @@ object AudioCacheManager {
                 runCatching { VipManager.discoverCache.clearAll() }
                 runCatching { VipManager.lyric.clearCache() }
                 runCatching { VipManager.music.clearRuntimeMetadataCache() }
+                runCatching {
+                    val swrDir = File(appCtx.cacheDir, SWR_CACHE_DIR_NAME)
+                    if (swrDir.exists()) {
+                        swrDir.listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+                    }
+                }
                 appCtx.cacheDir.listFiles()?.forEach { child ->
                     if (child.name != CACHE_DIR_NAME &&
                         child.name != IMAGE_CACHE_DIR_NAME &&

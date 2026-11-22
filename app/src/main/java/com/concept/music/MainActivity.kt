@@ -51,6 +51,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.concept.music.data.kugou.AuthState
+import com.concept.music.data.model.CommentTargetType
 import com.concept.music.data.model.Song
 import com.concept.music.data.vip.VipManager
 import com.concept.music.service.SystemLyricBridge
@@ -58,6 +59,7 @@ import com.concept.music.ui.account.AccountsScreen
 import com.concept.music.ui.account.LoginScreen
 import com.concept.music.ui.account.VerificationDialog
 import com.concept.music.ui.comment.CommentsScreen
+import com.concept.music.ui.comment.ResourceCommentsScreen
 import com.concept.music.ui.components.AddToPlaylistDialog
 import com.concept.music.ui.components.CreatePlaylistDialog
 import com.concept.music.ui.components.FloatingLyricOverlay
@@ -66,6 +68,7 @@ import com.concept.music.ui.components.NowPlayingSheet
 import com.concept.music.ui.components.QueueBottomSheet
 import com.concept.music.ui.components.SongActionBottomSheet
 import com.concept.music.ui.components.SongDetailSheet
+import com.concept.music.ui.components.SongVersionsBottomSheet
 import com.concept.music.ui.components.VipCenterScreen
 import com.concept.music.ui.components.ViperSoundEffectScreen
 import com.concept.music.ui.home.DailyRecommendScreen
@@ -94,6 +97,14 @@ private fun mainTabIndex(route: String): Int = when (route) {
     Screen.Library.route -> 1
     else -> -1
 }
+
+private data class ResourceCommentOverlayTarget(
+    val targetType: CommentTargetType,
+    val resourceId: String,
+    val title: String,
+    val subtitle: String,
+    val coverUrl: String
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -241,10 +252,7 @@ fun MainContent(
     val currentRoute = navBackStackEntry?.destination?.route ?: Screen.Discover.route
 
     LaunchedEffect(currentRoute) {
-        when (currentRoute) {
-            "login" -> libraryViewModel.onLoginRoute(true)
-            "accounts", Screen.Library.route -> libraryViewModel.onLoginRoute(false)
-        }
+        libraryViewModel.onLoginRoute(currentRoute == "login")
     }
 
     // 独立叶子组件静默预热首页首屏封面图到 Coil 缓存，避免在根组件 MainContent 订阅高频列表引发整树重组
@@ -268,6 +276,7 @@ fun MainContent(
     var showNowPlaying by remember { mutableStateOf(false) }
     var showGlobalQueueSheet by remember { mutableStateOf(false) }
     var showCommentsScreen by remember { mutableStateOf(false) }
+    var activeResourceCommentTarget by remember { mutableStateOf<ResourceCommentOverlayTarget?>(null) }
     var showViperEffectOverlay by remember { mutableStateOf(false) }
 
     // 记录从全屏播放页跳转到子页面（如歌手主页/专辑详情）前的底层回退栈 Entry ID，
@@ -277,6 +286,7 @@ fun MainContent(
 
     var actionSheetSong by remember { mutableStateOf<Song?>(null) }
     var actionSheetRemoveCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var songForVersionsSheet by remember { mutableStateOf<Song?>(null) }
     var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
     var showCreatePlaylistFromGlobal by remember { mutableStateOf(false) }
     var detailSheetSong by remember { mutableStateOf<Song?>(null) }
@@ -287,7 +297,7 @@ fun MainContent(
     var multiArtistPickerSong by remember { mutableStateOf<Song?>(null) }
     var isHomeSubSheetOpen by remember { mutableStateOf(false) }
     var isLibrarySubSheetOpen by remember { mutableStateOf(false) }
-    val isMainSubSheetOpen = isHomeSubSheetOpen || isLibrarySubSheetOpen || actionSheetSong != null || songToShare != null || playlistToShare != null
+    val isMainSubSheetOpen = isHomeSubSheetOpen || isLibrarySubSheetOpen || actionSheetSong != null || songForVersionsSheet != null || songToShare != null || playlistToShare != null || activeResourceCommentTarget != null
     val mainScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val incomingIntentShareText by MainActivity.incomingSharedTextFlow.collectAsState()
@@ -486,6 +496,7 @@ fun MainContent(
                 Lifecycle.Event.ON_RESUME -> {
                     musicPlayerViewModel.onAppForegroundChanged(true)
                     libraryViewModel.onForeground(true)
+                    homeViewModel.refreshContinuePlay(force = false)
                 }
                 Lifecycle.Event.ON_PAUSE -> libraryViewModel.onForeground(false)
                 Lifecycle.Event.ON_STOP -> musicPlayerViewModel.onAppForegroundChanged(false)
@@ -740,7 +751,12 @@ fun MainContent(
                                     actionSheetSong = song
                                     actionSheetRemoveCallback = null
                                 },
-                                isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail,
+                                onSyncCurrentSongToCloud = {
+                                    musicPlayerViewModel.syncCurrentSongToCloudForHandoff { _, msg ->
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail || activeResourceCommentTarget != null,
                                 onSubSheetOpenChanged = { isHomeSubSheetOpen = it },
                                 modifier = Modifier
                                     .weight(0.53f)
@@ -818,7 +834,12 @@ fun MainContent(
                                 actionSheetSong = song
                                 actionSheetRemoveCallback = null
                             },
-                            isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail,
+                            onSyncCurrentSongToCloud = {
+                                musicPlayerViewModel.syncCurrentSongToCloudForHandoff { _, msg ->
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail || activeResourceCommentTarget != null,
                             onSubSheetOpenChanged = { isHomeSubSheetOpen = it }
                         )
                     }
@@ -979,6 +1000,22 @@ fun MainContent(
                         },
                         onSharePlaylist = { targetPlaylist ->
                             playlistToShare = targetPlaylist
+                        },
+                        onOpenPlaylistComments = { targetPlaylist ->
+                            val targetId = targetPlaylist.globalCollectionId
+                                .ifBlank { targetPlaylist.listCreateGid }
+                                .ifBlank { targetPlaylist.id }
+                            if (targetId.isNotBlank()) {
+                                activeResourceCommentTarget = ResourceCommentOverlayTarget(
+                                    targetType = CommentTargetType.PLAYLIST,
+                                    resourceId = targetId,
+                                    title = targetPlaylist.title,
+                                    subtitle = targetPlaylist.creatorName.ifBlank { "${targetPlaylist.trackCount} 首歌曲" },
+                                    coverUrl = targetPlaylist.coverUrl
+                                )
+                            } else {
+                                Toast.makeText(context, "该歌单暂不支持查看云端评论", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     )
                 }
@@ -996,6 +1033,15 @@ fun MainContent(
                         onSongMoreClick = { song ->
                             actionSheetSong = song
                             actionSheetRemoveCallback = null
+                        },
+                        onOpenAlbumComments = { targetAlbumId, title, subtitle, coverUrl ->
+                            activeResourceCommentTarget = ResourceCommentOverlayTarget(
+                                targetType = CommentTargetType.ALBUM,
+                                resourceId = targetAlbumId,
+                                title = title,
+                                subtitle = subtitle,
+                                coverUrl = coverUrl
+                            )
                         }
                     )
                 }
@@ -1264,6 +1310,7 @@ fun MainContent(
                 currentType = playerUiState.commentType,
                 hasMore = playerUiState.commentsHasMore,
                 currentUserAvatar = userAvatar,
+                currentUserId = accountSnapshot.currentId.orEmpty(),
                 onBack = {
                     showCommentsScreen = false
                     musicPlayerViewModel.closeCommentsForTargetSong()
@@ -1278,8 +1325,36 @@ fun MainContent(
                 onPostComment = { content, replyId, replyUser, onResult ->
                     musicPlayerViewModel.postComment(content, replyId, replyUser, onResult)
                 },
-                onLikeComment = { musicPlayerViewModel.likeComment(it) }
+                onLikeComment = { musicPlayerViewModel.likeComment(it) },
+                onDeleteComment = { commentId, tid, onResult ->
+                    musicPlayerViewModel.deleteSongComment(commentId, tid, onResult)
+                }
             )
+        }
+
+        // 独立歌单 / 专辑评论浮层
+        AnimatedVisibility(
+            visible = activeResourceCommentTarget != null,
+            enter = slideInVertically(
+                initialOffsetY = { it },
+                animationSpec = tween(durationMillis = 440, easing = ConceptMotion.GentleSpatialEnterEasing)
+            ) + fadeIn(tween(durationMillis = 360, easing = ConceptMotion.GentleSpatialEnterEasing)),
+            exit = slideOutVertically(
+                targetOffsetY = { it },
+                animationSpec = tween(durationMillis = 380, easing = ConceptMotion.GentleSpatialExitEasing)
+            ) + fadeOut(tween(durationMillis = 300, easing = ConceptMotion.GentleSpatialExitEasing))
+        ) {
+            val target = activeResourceCommentTarget
+            if (target != null) {
+                ResourceCommentsScreen(
+                    targetType = target.targetType,
+                    resourceId = target.resourceId,
+                    resourceTitle = target.title,
+                    resourceSubtitle = target.subtitle,
+                    resourceCoverUrl = target.coverUrl,
+                    onBack = { activeResourceCommentTarget = null }
+                )
+            }
         }
 
         if (actionSheetSong != null) {
@@ -1318,6 +1393,14 @@ fun MainContent(
                     musicPlayerViewModel.openCommentsForSong(targetSong)
                     showCommentsScreen = true
                 },
+                onOpenMoreVersions = {
+                    songForVersionsSheet = targetSong
+                },
+                onBlockSong = {
+                    libraryViewModel.blockSongInRecommendations(targetSong) { _, msg ->
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                },
                 onOpenArtist = if (targetSong.artist.isNotBlank()) {
                     { navigateToSongArtist(targetSong) }
                 } else null,
@@ -1326,6 +1409,22 @@ fun MainContent(
                     detailSheetSong = targetSong
                 },
                 onRemoveFromCurrentPlaylist = actionSheetRemoveCallback
+            )
+        }
+
+        if (songForVersionsSheet != null) {
+            val baseSong = songForVersionsSheet!!
+            SongVersionsBottomSheet(
+                song = baseSong,
+                onPlayVersion = { versionSong, versionList ->
+                    songForVersionsSheet = null
+                    musicPlayerViewModel.playSong(versionSong, versionList)
+                },
+                onAddToNext = { versionSong ->
+                    musicPlayerViewModel.playNext(versionSong)
+                    Toast.makeText(context, "已加入下一首播放：${versionSong.title}", Toast.LENGTH_SHORT).show()
+                },
+                onDismiss = { songForVersionsSheet = null }
             )
         }
 
@@ -1574,6 +1673,8 @@ private fun IsolatedNowPlayingHost(
         lyricBlurIntensity = playerUiState.lyricBlurIntensity,
         lyricLineSpacing = playerUiState.lyricLineSpacing,
         lyricOffsetMs = playerUiState.effectiveLyricOffsetMs,
+        manualLyricOffsetMs = playerUiState.lyricOffsetMs,
+        bluetoothLyricOffsetMs = playerUiState.effectiveLyricOffsetMs - playerUiState.lyricOffsetMs,
         lyricHighlightTheme = playerUiState.lyricHighlightTheme,
         lyricBackgroundDim = playerUiState.lyricBackgroundDim,
         lyricKeepScreenOn = playerUiState.lyricKeepScreenOn,
@@ -1635,6 +1736,18 @@ private fun IsolatedNowPlayingHost(
         onClearQueue = { musicPlayerViewModel.clearQueue() },
         onOpenArtist = { onOpenArtist(currentSong) },
         onOpenAlbum = { onOpenAlbum(currentSong) },
+        onPlayVersionSong = { versionSong, versionList ->
+            musicPlayerViewModel.playSong(versionSong, versionList)
+        },
+        onAddVersionToNext = { versionSong ->
+            musicPlayerViewModel.playNext(versionSong)
+            Toast.makeText(context, "已加入下一首播放：${versionSong.title}", Toast.LENGTH_SHORT).show()
+        },
+        onBlockSong = { targetSong ->
+            libraryViewModel.blockSongInRecommendations(targetSong) { _, msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
+        },
         motionOrientationPermissionEnabled = playerUiState.motionOrientationPermissionEnabled
     )
 }

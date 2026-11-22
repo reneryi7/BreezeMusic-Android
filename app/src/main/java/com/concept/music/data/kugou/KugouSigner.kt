@@ -64,6 +64,12 @@ object KugouSigner {
         return md5(salt + ordered + body + salt)
     }
     fun paramsKey(time: Long, extra: String = ""): String = md5("$APP_ID$ANDROID_SALT$CLIENT_VERSION$time$extra")
+    fun signCloudKey(hash: String, pid: Int = 20026): String =
+        md5("musicclound${hash.lowercase()}${pid}ebd1ac3134c880bda6a2194537843caa0162e2e7")
+    fun rsaNoPadLiteToken(rawToken: String): String {
+        val encrypted = rsa("moc.uoguk.59::$rawToken", useStandardKey = false).uppercase()
+        return "h5$encrypted"
+    }
     fun paramsKeyStandard(time: Long, appId: Int = 1005, clientVer: Int = 20489, extra: String = ""): String =
         md5("$appId$STANDARD_SALT$clientVer$time$extra")
     fun signatureStandard(params: Map<String, String>, body: String = ""): String {
@@ -103,9 +109,15 @@ object KugouSigner {
         return hex(cipher.doFinal(payload.toByteArray(Charsets.UTF_8)))
     }
     fun playlistAesEncrypt(data: String): Pair<String, String> {
+        val (key, encrypted) = playlistAesEncryptBytes(data)
+        return Pair(key, Base64.getEncoder().encodeToString(encrypted))
+    }
+
+    fun playlistAesEncryptBytes(data: String): Pair<String, ByteArray> {
+        val alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         val sr = SecureRandom()
         val key = buildString(6) {
-            repeat(6) { append(('a'.code + sr.nextInt(26)).toChar()) }
+            repeat(6) { append(alphabet[sr.nextInt(alphabet.length)]) }
         }
         val md = md5(key)
         val encKey = md.substring(0, 16)
@@ -113,7 +125,7 @@ object KugouSigner {
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(encKey.toByteArray(Charsets.UTF_8), "AES"), IvParameterSpec(iv.toByteArray(Charsets.UTF_8)))
         val encrypted = cipher.doFinal(data.toByteArray(Charsets.UTF_8))
-        return Pair(key, Base64.getEncoder().encodeToString(encrypted))
+        return Pair(key, encrypted)
     }
 
     fun playlistAesDecrypt(key: String, base64Cipher: String): String {

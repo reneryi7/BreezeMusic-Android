@@ -1343,6 +1343,8 @@ internal fun PermissionsSectionContent(
     val enabledCount = permissionState.enabledCount
     val totalCount = permissionState.totalCount
     val restrictedCount = (totalCount - enabledCount).coerceAtLeast(0)
+    val coreDisabledCount = AppPermissionType.entries
+        .count { it != AppPermissionType.MUSIC_DOWNLOAD && !permissionState.isEnabled(it) }
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         // 1. 顶部大气概览 Hero 卡片
@@ -1472,7 +1474,7 @@ internal fun PermissionsSectionContent(
                                 onClick = { AppPermissionManager.openAppDetailsSettings(context) }
                             )
 
-                            if (restrictedCount > 0) {
+                            if (coreDisabledCount > 0) {
                                 Button(
                                     onClick = onEnableAll,
                                     shape = RoundedCornerShape(13.dp),
@@ -1492,7 +1494,7 @@ internal fun PermissionsSectionContent(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "恢复开启全部",
+                                        text = "恢复默认权限",
                                         fontSize = 12.5.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         maxLines = 1,

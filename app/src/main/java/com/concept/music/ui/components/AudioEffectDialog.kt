@@ -11,6 +11,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,6 +38,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -1337,8 +1339,8 @@ private fun ProfessionalEqualizerPage(
                                 shape = RoundedCornerShape(10.dp),
                                 color = ConceptPrimary.copy(alpha = 0.14f),
                                 modifier = Modifier.softCardClickable(shape = RoundedCornerShape(10.dp)) {
-                                    AudioEffectManager.resetCurrentPresetToDefault()
-                                    Toast.makeText(context, "已重置参量均衡器全部参数", Toast.LENGTH_SHORT).show()
+                                    AudioEffectManager.resetPeqOnly()
+                                    Toast.makeText(context, "已归零 10 段参量均衡器参数（保留声场调音）", Toast.LENGTH_SHORT).show()
                                 }
                             ) {
                                 Text(
@@ -1971,7 +1973,7 @@ private fun ProfessionalEqualizerPage(
                         title = "高通亚音速滤波 (HPF)",
                         valueText = if (state.highPassCutoffHz < 20) "关闭 · 全频直通" else "${state.highPassCutoffHz} Hz (-12dB/oct)",
                         value = state.highPassCutoffHz.toFloat(),
-                        valueRange = 0f..100f,
+                        valueRange = 0f..120f,
                         enabled = true,
                         accentColor = ConceptCoralAccent,
                         onValueChange = { AudioEffectManager.setHighPassCutoffHz(it.toInt()) }
@@ -2072,6 +2074,9 @@ private fun EqFrequencyResponseCurveCanvas(
     val lineColor = if (enabled) ConceptPrimary else Color.Gray
     val glowColor = if (enabled) ConceptCyanAccent else Color.Gray
 
+    val latestState by rememberUpdatedState(state)
+    val latestOnSelectBand by rememberUpdatedState(onSelectBand)
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -2080,7 +2085,32 @@ private fun EqFrequencyResponseCurveCanvas(
             .background(elevatedBg)
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val minLogF = kotlin.math.ln(20.0)
+                        val maxLogF = kotlin.math.ln(20000.0)
+                        var nearestIdx = 0
+                        var minDist = Float.MAX_VALUE
+                        for (idx in 0 until 10) {
+                            val fc = latestState.tenBandCenterHz
+                                .getOrElse(idx) { AudioEffectManager.DEFAULT_TEN_BAND_HZ[idx] }
+                                .toDouble().coerceIn(20.0, 20000.0)
+                            val xFrac = ((kotlin.math.ln(fc) - minLogF) / (maxLogF - minLogF))
+                                .toFloat().coerceIn(0.02f, 0.98f)
+                            val dist = abs(offset.x - w * xFrac)
+                            if (dist < minDist) {
+                                minDist = dist
+                                nearestIdx = idx
+                            }
+                        }
+                        latestOnSelectBand(nearestIdx)
+                    }
+                }
+        ) {
             val w = size.width
             val h = size.height
             val midY = h / 2f
@@ -2161,7 +2191,7 @@ private fun EqFrequencyResponseCurveCanvas(
                 val nodeDb = if (enabled) {
                     AudioEffectManager.evaluatePeqMagnitudeDbAtFrequency(fc, state, 48000.0) + preampDb * 0.45f
                 } else {
-                    bands[idx] / 100f
+                    0f
                 }
                 val pt = Offset(
                     x = w * logXFrac,

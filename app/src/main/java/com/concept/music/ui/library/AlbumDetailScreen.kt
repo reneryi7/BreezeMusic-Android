@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Comment
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -66,6 +67,7 @@ fun AlbumDetailScreen(
     onSongClick: (Song, List<Song>) -> Unit,
     currentSong: Song? = null,
     onSongMoreClick: (Song) -> Unit = {},
+    onOpenAlbumComments: ((albumId: String, title: String, subtitle: String, coverUrl: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -177,6 +179,23 @@ fun AlbumDetailScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
+                        if (onOpenAlbumComments != null && albumId.isNotBlank()) {
+                            IconButton(onClick = {
+                                onOpenAlbumComments(
+                                    albumId,
+                                    album?.name ?: "专辑详情",
+                                    album?.artist.orEmpty(),
+                                    effectiveCoverUrl
+                                )
+                            }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Comment,
+                                    contentDescription = "专辑评论",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
                         var albumRefreshSpin by remember { mutableIntStateOf(0) }
                         IconButton(onClick = {
                             albumRefreshSpin += 1

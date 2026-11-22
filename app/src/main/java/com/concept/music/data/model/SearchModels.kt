@@ -7,7 +7,8 @@ enum class SearchTab(val label: String) {
     SONG("单曲"),
     ARTIST("歌手"),
     ALBUM("专辑"),
-    PLAYLIST("歌单")
+    PLAYLIST("歌单"),
+    LYRIC("歌词")
 }
 
 /**

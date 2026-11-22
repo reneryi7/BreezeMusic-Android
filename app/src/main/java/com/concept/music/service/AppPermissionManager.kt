@@ -268,6 +268,29 @@ object AppPermissionManager {
         onMotionPermissionSyncedCallback?.invoke(true)
     }
 
+    /**
+     * 恢复除「音乐下载」（默认关闭合规项）外的所有常规权限为开启状态，避免设置页一键恢复误开下载开关。
+     */
+    fun restoreDefaultCorePermissions(context: Context? = null) {
+        val keepDownload = _state.value.musicDownloadEnabled
+        val restored = AppPermissionState(musicDownloadEnabled = keepDownload)
+        _state.value = restored
+        prefs?.edit()?.apply {
+            AppPermissionType.entries.forEach { type ->
+                if (type != AppPermissionType.MUSIC_DOWNLOAD) {
+                    putBoolean(type.key, true)
+                }
+            }
+            apply()
+        }
+        context?.applicationContext
+            ?.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putBoolean("motion_orientation_sensor_enabled", true)
+            ?.apply()
+        onMotionPermissionSyncedCallback?.invoke(true)
+    }
+
     fun resetForTest() {
         _state.value = AppPermissionState()
         lastSelfCopiedSignature = 0

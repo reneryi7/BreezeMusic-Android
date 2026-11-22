@@ -65,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -83,6 +84,7 @@ import com.concept.music.ui.theme.rememberIsLifecycleStarted
 import com.concept.music.ui.theme.softCardClickable
 import com.concept.music.ui.theme.softClickable
 import com.concept.music.ui.viewmodel.CoverStyle
+import com.concept.music.ui.viewmodel.LyricAlignment
 import com.concept.music.ui.viewmodel.LyricHighlightTheme
 import com.concept.music.ui.viewmodel.PlayMode
 import com.concept.music.ui.viewmodel.PlayerBackgroundStyle
@@ -93,6 +95,49 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sin
+
+internal data class LandscapeLyricAlignmentLayout(
+    val columnAlignment: Alignment.Horizontal,
+    val textAlign: TextAlign,
+    val flowArrangement: Arrangement.Horizontal,
+    val transformOriginX: Float,
+    val listStartPaddingDp: Float,
+    val listEndPaddingDp: Float
+)
+
+internal fun resolveLandscapeLyricAlignmentLayout(
+    alignment: LyricAlignment,
+    isTabletLandscape: Boolean
+): LandscapeLyricAlignmentLayout {
+    val defaultEnd = if (isTabletLandscape) 44f else 36f
+    val rightActionReserve = if (isTabletLandscape) 48f else 40f
+    return when (alignment) {
+        LyricAlignment.LEFT -> LandscapeLyricAlignmentLayout(
+            columnAlignment = Alignment.Start,
+            textAlign = TextAlign.Start,
+            flowArrangement = Arrangement.Start,
+            transformOriginX = 0f,
+            listStartPaddingDp = 0f,
+            listEndPaddingDp = defaultEnd
+        )
+        LyricAlignment.CENTER -> LandscapeLyricAlignmentLayout(
+            columnAlignment = Alignment.CenterHorizontally,
+            textAlign = TextAlign.Center,
+            flowArrangement = Arrangement.Center,
+            transformOriginX = 0.5f,
+            listStartPaddingDp = defaultEnd,
+            listEndPaddingDp = defaultEnd
+        )
+        LyricAlignment.RIGHT -> LandscapeLyricAlignmentLayout(
+            columnAlignment = Alignment.End,
+            textAlign = TextAlign.End,
+            flowArrangement = Arrangement.End,
+            transformOriginX = 1f,
+            listStartPaddingDp = 0f,
+            listEndPaddingDp = rightActionReserve
+        )
+    }
+}
 
 /**
  * 现代沉浸式全屏横屏播放页面 (LandscapePlayerPage)：
@@ -126,6 +171,7 @@ internal fun LandscapePlayerPage(
     showPhoneticButton: Boolean,
     lyricFontSize: Float,
     lyricTranslationScale: Float,
+    lyricAlignment: LyricAlignment = LyricAlignment.LEFT,
     lyricWordByWord: Boolean,
     lyricBlurEnabled: Boolean,
     lyricBlurIntensity: Float,
@@ -555,12 +601,18 @@ internal fun LandscapePlayerPage(
                     }
 
                     val supportsHardwareBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    val alignLayout = remember(lyricAlignment, isTabletLandscape) {
+                        resolveLandscapeLyricAlignmentLayout(lyricAlignment, isTabletLandscape)
+                    }
 
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(end = if (isTabletLandscape) 44.dp else 36.dp)
+                            .padding(
+                                start = alignLayout.listStartPaddingDp.dp,
+                                end = alignLayout.listEndPaddingDp.dp
+                            )
                             .graphicsLayer { alpha = 0.99f }
                             .drawWithContent {
                                 drawContent()
@@ -588,7 +640,7 @@ internal fun LandscapePlayerPage(
                                 )
                             },
                         contentPadding = PaddingValues(vertical = dynamicVerticalPadDp),
-                        horizontalAlignment = Alignment.Start
+                        horizontalAlignment = alignLayout.columnAlignment
                     ) {
                         itemsIndexed(
                             items = lyricData.lines,
@@ -633,6 +685,13 @@ internal fun LandscapePlayerPage(
                                 animationSpec = tween(durationMillis = 360, easing = ConceptMotion.LyricSmoothScrollEasing),
                                 label = "landLyricDistanceAlpha"
                             )
+                            val fallbackBlurShadow = if (!supportsHardwareBlur && depthBlurVal >= 0.05f) {
+                                Shadow(
+                                    color = Color.White.copy(alpha = (distanceAlpha * 0.65f).coerceIn(0.08f, 0.45f)),
+                                    offset = Offset.Zero,
+                                    blurRadius = (depthBlurVal * 4.2f).coerceIn(2f, 18f)
+                                )
+                            } else null
 
                             Box(
                                 modifier = Modifier
@@ -641,7 +700,7 @@ internal fun LandscapePlayerPage(
                                         val s = lineScaleState.value
                                         scaleX = s
                                         scaleY = s
-                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(alignLayout.transformOriginX, 0.5f)
                                     }
                                     .then(
                                         if (supportsHardwareBlur && depthBlurVal >= 0.05f) {
@@ -661,7 +720,10 @@ internal fun LandscapePlayerPage(
                                     )
                                     .padding(vertical = (lyricLineSpacing * 0.85f).dp, horizontal = 8.dp)
                             ) {
-                                Column(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalAlignment = alignLayout.columnAlignment
+                                ) {
                                     if (index == 0 && currentLyricIndex <= 0) {
                                         LyricInterludeBreathingIndicator(
                                             lyricData = lyricData,
@@ -672,7 +734,7 @@ internal fun LandscapePlayerPage(
                                             lyricFontSize = effectiveLyricFontSize,
                                             accentPrimary = activePrimaryColor,
                                             accentSecondary = activeSecondaryColor,
-                                            horizontalAlignment = Alignment.Start,
+                                            horizontalAlignment = alignLayout.columnAlignment,
                                             modifier = Modifier.padding(bottom = 8.dp)
                                         )
                                     }
@@ -682,12 +744,15 @@ internal fun LandscapePlayerPage(
                                         val phoneticFontSize = (effectiveLyricFontSize * lyricTranslationScale * 0.85f).coerceAtLeast(11.5f)
                                         Text(
                                             text = phoneticText,
+                                            textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.labelSmall.copy(
                                                 color = if (isCurrent) activePrimaryColor.copy(alpha = 0.90f) else Color.White.copy(alpha = (distanceAlpha * 0.68f).coerceIn(0.12f, 0.55f)),
                                                 fontSize = phoneticFontSize.sp,
                                                 lineHeight = (phoneticFontSize * 1.38f).sp,
-                                                fontWeight = FontWeight.SemiBold
-                                            )
+                                                fontWeight = FontWeight.SemiBold,
+                                                shadow = if (isCurrent) null else fallbackBlurShadow
+                                            ),
+                                            modifier = Modifier.fillMaxWidth()
                                         )
                                         Spacer(modifier = Modifier.height(3.dp))
                                     }
@@ -699,17 +764,21 @@ internal fun LandscapePlayerPage(
                                             lyricPositionProvider = lyricPositionProvider,
                                             lyricFontSize = effectiveLyricFontSize,
                                             activePrimaryColor = activePrimaryColor,
-                                            activeSecondaryColor = activeSecondaryColor
+                                            activeSecondaryColor = activeSecondaryColor,
+                                            horizontalArrangement = alignLayout.flowArrangement
                                         )
                                     } else {
                                         Text(
                                             text = line.text,
+                                            textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.bodyLarge.copy(
                                                 fontWeight = FontWeight.ExtraBold,
                                                 color = if (isCurrent) activePrimaryColor else Color.White.copy(alpha = distanceAlpha),
                                                 fontSize = effectiveLyricFontSize.sp,
-                                                lineHeight = (effectiveLyricFontSize + 8f).sp
-                                            )
+                                                lineHeight = (effectiveLyricFontSize + 8f).sp,
+                                                shadow = if (isCurrent) null else fallbackBlurShadow
+                                            ),
+                                            modifier = Modifier.fillMaxWidth()
                                         )
                                     }
 
@@ -719,12 +788,15 @@ internal fun LandscapePlayerPage(
                                         Spacer(modifier = Modifier.height(5.dp))
                                         Text(
                                             text = trans,
+                                            textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.bodyMedium.copy(
                                                 color = if (isCurrent) activePrimaryColor.copy(alpha = 0.88f) else Color.White.copy(alpha = (distanceAlpha * 0.78f).coerceIn(0.14f, 0.58f)),
                                                 fontSize = transFontSize.sp,
                                                 lineHeight = (transFontSize * 1.42f).sp,
-                                                fontWeight = FontWeight.SemiBold
-                                            )
+                                                fontWeight = FontWeight.SemiBold,
+                                                shadow = if (isCurrent) null else fallbackBlurShadow
+                                            ),
+                                            modifier = Modifier.fillMaxWidth()
                                         )
                                     }
 
@@ -738,7 +810,7 @@ internal fun LandscapePlayerPage(
                                             lyricFontSize = effectiveLyricFontSize,
                                             accentPrimary = activePrimaryColor,
                                             accentSecondary = activeSecondaryColor,
-                                            horizontalAlignment = Alignment.Start,
+                                            horizontalAlignment = alignLayout.columnAlignment,
                                             modifier = Modifier.padding(top = 8.dp)
                                         )
                                     }
@@ -754,7 +826,10 @@ internal fun LandscapePlayerPage(
                         modifier = Modifier
                             .align(Alignment.Center)
                             .fillMaxWidth()
-                            .padding(end = if (isTabletLandscape) 44.dp else 36.dp)
+                            .padding(
+                                start = alignLayout.listStartPaddingDp.dp,
+                                end = alignLayout.listEndPaddingDp.dp
+                            )
                     ) {
                         val targetTimeMs = lyricData.lines.getOrNull(scrubLineIndex)?.startTimeMs ?: 0L
                         Row(
@@ -987,7 +1062,8 @@ private fun LandscapeActiveKaraokeWords(
     lyricPositionProvider: () -> Long,
     lyricFontSize: Float,
     activePrimaryColor: Color,
-    activeSecondaryColor: Color
+    activeSecondaryColor: Color,
+    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start
 ) {
     val isLifecycleStarted = rememberIsLifecycleStarted()
     var sampledPosMs by remember(line) { mutableLongStateOf(lyricPositionProvider()) }
@@ -1004,7 +1080,7 @@ private fun LandscapeActiveKaraokeWords(
 
     val dimColor = Color.White.copy(alpha = 0.40f)
     FlowRow(
-        horizontalArrangement = Arrangement.Start,
+        horizontalArrangement = horizontalArrangement,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier.fillMaxWidth()
     ) {

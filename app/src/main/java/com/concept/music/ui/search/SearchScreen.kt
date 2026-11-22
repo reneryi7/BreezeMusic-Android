@@ -47,6 +47,7 @@ import com.concept.music.ui.components.rememberProgressiveSongList
 import com.concept.music.ui.components.smoothFastScrollToItem
 import com.concept.music.ui.components.SongItemRow
 import com.concept.music.ui.theme.ConceptAmberAccent
+import com.concept.music.ui.theme.ConceptCyanAccent
 import com.concept.music.ui.theme.ConceptMintAccent
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptStageBackground
@@ -97,6 +98,7 @@ fun SearchScreen(
     val artistResults by viewModel.artistResults.collectAsState()
     val albumResults by viewModel.albumResults.collectAsState()
     val playlistResults by viewModel.playlistResults.collectAsState()
+    val lyricResults by viewModel.lyricResults.collectAsState()
 
     val loading by viewModel.loading.collectAsState()
     val loadingMore by viewModel.loadingMore.collectAsState()
@@ -107,11 +109,13 @@ fun SearchScreen(
     val artistListState = rememberLazyListState()
     val albumListState = rememberLazyListState()
     val playlistListState = rememberLazyListState()
+    val lyricListState = rememberLazyListState()
     val activeListState = when (selectedTab) {
         SearchTab.SONG -> songListState
         SearchTab.ARTIST -> artistListState
         SearchTab.ALBUM -> albumListState
         SearchTab.PLAYLIST -> playlistListState
+        SearchTab.LYRIC -> lyricListState
         SearchTab.COMPLEX -> songListState
     }
     val currentOnBack by rememberUpdatedState(onBack)
@@ -249,6 +253,7 @@ fun SearchScreen(
                             SearchTab.ARTIST -> ConceptPrimary
                             SearchTab.ALBUM -> ConceptAmberAccent
                             SearchTab.PLAYLIST -> ConceptVioletAccent
+                            SearchTab.LYRIC -> ConceptCyanAccent
                         }
                         ConceptCategoryTabItem(
                             key = tab.name,
@@ -622,6 +627,79 @@ fun SearchScreen(
                                                         contentAlignment = Alignment.Center
                                                     ) {
                                                         CircularProgressIndicator(color = ConceptVioletAccent, modifier = Modifier.size(24.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                SearchTab.LYRIC -> {
+                                    if (lyricResults.isEmpty()) {
+                                        EmptySearchState(message = "未找到包含歌词“$displayKw”的歌曲")
+                                    } else {
+                                        val latestLyricResults by rememberUpdatedState(lyricResults)
+                                        val curPlayingId = currentSong?.id
+                                        val curPlayingHash = currentSong?.hash.orEmpty()
+                                        LazyColumn(
+                                            state = lyricListState,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentPadding = PaddingValues(bottom = 112.dp)
+                                        ) {
+                                            itemsIndexed(
+                                                items = lyricResults,
+                                                key = { idx, s -> "search_lyric_${s.hash.ifBlank { s.id }}_$idx" },
+                                                contentType = { _, _ -> "lyric_song_row" }
+                                            ) { index, song ->
+                                                Column(modifier = Modifier.fillMaxWidth()) {
+                                                    SongItemRow(
+                                                        song = song,
+                                                        orderIndex = index + 1,
+                                                        isPlaying = curPlayingId != null && (curPlayingId == song.id || (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))),
+                                                        onClick = { onSongClick(song, latestLyricResults) },
+                                                        onMoreClick = { onSongMoreClick(song) }
+                                                    )
+                                                    if (song.matchedLyricSnippet.isNotBlank()) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(10.dp),
+                                                            color = ConceptCyanAccent.copy(alpha = 0.09f),
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(start = 52.dp, end = 16.dp, bottom = 8.dp)
+                                                                .softCardClickable(shape = RoundedCornerShape(10.dp)) {
+                                                                    onSongClick(song, latestLyricResults)
+                                                                }
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Rounded.FormatQuote,
+                                                                    contentDescription = null,
+                                                                    tint = ConceptCyanAccent,
+                                                                    modifier = Modifier.size(14.dp)
+                                                                )
+                                                                Text(
+                                                                    text = song.matchedLyricSnippet,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                    fontSize = 12.sp,
+                                                                    lineHeight = 16.sp,
+                                                                    maxLines = 2,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if (loadingMore) {
+                                                item {
+                                                    Box(
+                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        CircularProgressIndicator(color = ConceptCyanAccent, modifier = Modifier.size(24.dp))
                                                     }
                                                 }
                                             }

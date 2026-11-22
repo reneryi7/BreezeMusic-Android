@@ -173,6 +173,10 @@ interface KugouTransport {
         headers: Map<String, String> = emptyMap(), sign: Boolean = true, includeDefaultParams: Boolean = true,
         device: DeviceIdentity? = null): ByteArray =
         callRaw(path, session, query, rawBody, host, method, headers, sign, includeDefaultParams, device)
+    suspend fun requestBinaryBytes(path: String, session: KugouSession? = null, query: Map<String, String> = emptyMap(),
+        rawBodyBytes: ByteArray? = null, host: String = "https://gateway.kugou.com", method: String = "POST",
+        headers: Map<String, String> = emptyMap(), sign: Boolean = false, includeDefaultParams: Boolean = false,
+        device: DeviceIdentity? = null): ByteArray = ByteArray(0)
 }
 
 class DirectKugouTransport(
@@ -501,6 +505,72 @@ class DirectKugouTransport(
             .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
             .apply { effectiveHeaders.forEach { (key, value) -> header(key, value) } }
             .method(method, if (isBodylessMethod) null else payload.toRequestBody(contentType.toMediaType()))
+            .build()
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(IOException("网络连接失败，请检查网络后重试", e))
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        try {
+                            if (!it.isSuccessful) {
+                                throw IOException("HTTP ${it.code} for ${url.encodedPath}")
+                            }
+                            val bytes = SecurityGuards.readBoundedBytes(it.body, SecurityGuards.MAX_API_RESPONSE_BYTES)
+                            if (continuation.isActive) continuation.resume(bytes)
+                        } catch (e: Exception) {
+                            val ioEx = e as? IOException ?: IOException("酷狗响应读取失败", e)
+                            if (continuation.isActive) continuation.resumeWithException(ioEx)
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    override suspend fun requestBinaryBytes(path: String, session: KugouSession?, query: Map<String, String>,
+        rawBodyBytes: ByteArray?, host: String, method: String, headers: Map<String, String>,
+        sign: Boolean, includeDefaultParams: Boolean, device: DeviceIdentity?): ByteArray = withContext(Dispatchers.IO) {
+        if (!com.concept.music.service.AppPermissionManager.isPermissionEnabled(com.concept.music.service.AppPermissionType.NETWORK_ACCESS)) {
+            throw IOException("已关闭「网络访问与网络状态检测」权限，无法加载在线数据（可在设置-权限管理中重新开启）")
+        }
+        val d = device ?: identity()
+        val params = linkedMapOf<String, String>()
+        if (includeDefaultParams) {
+            params.putAll(mapOf("dfid" to d.dfid, "mid" to d.mid, "uuid" to "-", "appid" to "3116",
+                "clientver" to "11440", "clienttime" to clock.instant().epochSecond.toString()))
+            session?.let { params["token"] = it.token; params["userid"] = it.userId }
+        }
+        params.putAll(query)
+        val bodyBytes = rawBodyBytes ?: ByteArray(0)
+        if (sign) params["signature"] = KugouSigner.signature(params, "", false)
+        val originalHostName = runCatching { host.toHttpUrl().host.lowercase(Locale.ROOT) }.getOrDefault("")
+        val safeHost = enforceHttpsForSensitiveHost(host, session, params, if (bodyBytes.isNotEmpty()) JsonObject().apply { addProperty("params", "1") } else null)
+        val safeHostName = runCatching { safeHost.toHttpUrl().host.lowercase(Locale.ROOT) }.getOrDefault("")
+        val effectiveHeaders = if (safeHostName == "gateway.kugou.com" &&
+            originalHostName.isNotBlank() &&
+            originalHostName != "gateway.kugou.com" &&
+            headers.keys.none { it.equals("x-router", ignoreCase = true) }
+        ) {
+            LinkedHashMap(headers).apply { put("x-router", originalHostName) }
+        } else {
+            headers
+        }
+        val url = safeHost.toHttpUrl().newBuilder().addPathSegments(path.trimStart('/')).apply {
+            params.forEach { (key, value) -> addQueryParameter(key, value) }
+        }.build()
+        val contentType = effectiveHeaders.entries.firstOrNull { it.key.equals("content-type", ignoreCase = true) }?.value ?: "application/octet-stream"
+        val isBodylessMethod = method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
+        val request = Request.Builder().url(url)
+            .header("User-Agent", "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi")
+            .header("dfid", d.dfid).header("mid", d.mid).header("clienttime", params["clienttime"] ?: clock.instant().epochSecond.toString())
+            .header("kg-rc", "1").header("kg-thash", "5d816a0").header("kg-rec", "1")
+            .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
+            .apply { effectiveHeaders.forEach { (key, value) -> header(key, value) } }
+            .method(method, if (isBodylessMethod) null else bodyBytes.toRequestBody(contentType.toMediaType()))
             .build()
         suspendCancellableCoroutine { continuation ->
             val call = client.newCall(request)

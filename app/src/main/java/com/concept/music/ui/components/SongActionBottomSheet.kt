@@ -63,6 +63,8 @@ fun SongActionBottomSheet(
     onOpenArtist: (() -> Unit)? = null,
     onOpenAlbum: (() -> Unit)? = null,
     onOpenSongDetail: (() -> Unit)? = null,
+    onOpenMoreVersions: (() -> Unit)? = null,
+    onBlockSong: (() -> Unit)? = null,
     onRemoveFromCurrentPlaylist: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -372,11 +374,27 @@ fun SongActionBottomSheet(
                         )
                     }
 
+                    if (onOpenMoreVersions != null && !song.isCloudSong) {
+                        SongActionMenuItem(
+                            icon = Icons.Rounded.LibraryMusic,
+                            title = "更多版本 (Live / 翻唱 / 伴奏)",
+                            onClick = { dismissWithAction { onOpenMoreVersions() } }
+                        )
+                    }
+
                     if (onOpenSongDetail != null) {
                         SongActionMenuItem(
                             icon = Icons.Rounded.Info,
                             title = "音频技术参数与特征码",
                             onClick = { dismissWithAction { onOpenSongDetail() } }
+                        )
+                    }
+
+                    if (onBlockSong != null && !song.isCloudSong) {
+                        SongActionMenuItem(
+                            icon = Icons.Rounded.NotInterested,
+                            title = "屏蔽此曲，减少相似推荐",
+                            onClick = { dismissWithAction { onBlockSong() } }
                         )
                     }
 

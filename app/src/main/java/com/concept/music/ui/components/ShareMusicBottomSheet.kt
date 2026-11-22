@@ -338,6 +338,18 @@ fun ShareMusicBottomSheet(
                         }
                     )
 
+                    if (onOpenLyricPoster != null && !payload.isPlaylist) {
+                        ShareActionRowCard(
+                            icon = Icons.Rounded.AutoAwesome,
+                            title = "生成 2K 高清歌词海报",
+                            subtitle = "挑选精选歌词生成无损高定视觉卡片保存或分享",
+                            accentColor = ConceptVioletAccent,
+                            onClick = {
+                                dismissWithAction { onOpenLyricPoster() }
+                            }
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(6.dp))
                 }
             }

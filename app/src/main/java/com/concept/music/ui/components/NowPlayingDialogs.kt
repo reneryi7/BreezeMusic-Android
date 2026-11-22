@@ -104,6 +104,7 @@ internal fun LyricSettingsDialog(
     blurIntensity: Float,
     lineSpacing: Float,
     offsetMs: Long,
+    bluetoothOffsetMs: Long = 0L,
     highlightTheme: LyricHighlightTheme,
     backgroundDim: Float,
     keepScreenOn: Boolean,
@@ -273,9 +274,12 @@ internal fun LyricSettingsDialog(
                                     onSetTranslationScale(0.84f)
                                     onSetLineSpacing(14f)
                                     onSetAlignment(LyricAlignment.LEFT)
+                                    onSetWordByWord(true)
                                     onSetBlurEnabled(true)
                                     onSetBlurIntensity(1.0f)
+                                    onSetHighlightTheme(LyricHighlightTheme.ICE_BLUE)
                                     onSetBackgroundDim(0.72f)
+                                    onSetKeepScreenOn(true)
                                     onSetOffsetMs(0L)
                                 }
                             ) {
@@ -337,6 +341,7 @@ internal fun LyricSettingsDialog(
                                     highlightTheme = highlightTheme,
                                     alignment = alignment,
                                     offsetMs = offsetMs,
+                                    bluetoothOffsetMs = bluetoothOffsetMs,
                                     dynamicAccentColor = themeAccent,
                                     cardBg = glassCardBg,
                                     sheetBg = glassPillBg,
@@ -347,12 +352,14 @@ internal fun LyricSettingsDialog(
                                     onSetOffsetMs = onSetOffsetMs
                                 )
                                 LyricTogglesGridCard(
+                                    wordByWord = wordByWord,
                                     blurEnabled = blurEnabled,
                                     keepScreenOn = keepScreenOn,
                                     themeAccent = themeAccent,
                                     cardBg = glassCardBg,
                                     textPrimary = textPrimary,
                                     textSecondary = textSecondary,
+                                    onSetWordByWord = onSetWordByWord,
                                     onSetBlurEnabled = onSetBlurEnabled,
                                     onSetKeepScreenOn = onSetKeepScreenOn
                                 )
@@ -385,6 +392,7 @@ internal fun LyricSettingsDialog(
                             highlightTheme = highlightTheme,
                             alignment = alignment,
                             offsetMs = offsetMs,
+                            bluetoothOffsetMs = bluetoothOffsetMs,
                             dynamicAccentColor = themeAccent,
                             cardBg = glassCardBg,
                             sheetBg = glassPillBg,
@@ -413,12 +421,14 @@ internal fun LyricSettingsDialog(
                         )
 
                         LyricTogglesGridCard(
+                            wordByWord = wordByWord,
                             blurEnabled = blurEnabled,
                             keepScreenOn = keepScreenOn,
                             themeAccent = themeAccent,
                             cardBg = glassCardBg,
                             textPrimary = textPrimary,
                             textSecondary = textSecondary,
+                            onSetWordByWord = onSetWordByWord,
                             onSetBlurEnabled = onSetBlurEnabled,
                             onSetKeepScreenOn = onSetKeepScreenOn
                         )
@@ -434,6 +444,7 @@ private fun LyricThemeAndAlignCompactCard(
     highlightTheme: LyricHighlightTheme,
     alignment: LyricAlignment,
     offsetMs: Long,
+    bluetoothOffsetMs: Long = 0L,
     dynamicAccentColor: Color,
     cardBg: Color,
     sheetBg: Color,
@@ -577,14 +588,24 @@ private fun LyricThemeAndAlignCompactCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    text = "时长校准",
-                    color = textPrimary,
-                    fontSize = if (isTablet) 14.sp else 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    softWrap = false
-                )
+                Column {
+                    Text(
+                        text = "时长校准",
+                        color = textPrimary,
+                        fontSize = if (isTablet) 14.sp else 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    if (bluetoothOffsetMs != 0L) {
+                        Text(
+                            text = String.format(Locale.getDefault(), "含蓝牙补偿 %+.1fs", bluetoothOffsetMs / 1000f),
+                            color = roles.primary.copy(alpha = 0.85f),
+                            fontSize = if (isTablet) 11.sp else 9.5.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(if (isTablet) 8.dp else 6.dp)
@@ -807,44 +828,63 @@ private fun CompactInlineSliderRow(
 
 @Composable
 private fun LyricTogglesGridCard(
+    wordByWord: Boolean,
     blurEnabled: Boolean,
     keepScreenOn: Boolean,
     themeAccent: Color,
     cardBg: Color,
     textPrimary: Color,
     textSecondary: Color,
+    onSetWordByWord: (Boolean) -> Unit,
     onSetBlurEnabled: (Boolean) -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit
 ) {
     val isTablet = com.concept.music.ui.theme.LocalConceptAdaptiveInfo.current.isLargeScreenDevice
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(if (isTablet) 12.dp else 8.dp)
+        verticalArrangement = Arrangement.spacedBy(if (isTablet) 10.dp else 8.dp)
     ) {
         CompactTogglePillTile(
-            icon = Icons.Rounded.BlurOn,
-            title = "阶梯景深虚化",
-            subtitle = if (blurEnabled) "远端自然虚化" else "已关闭虚化",
-            checked = blurEnabled,
+            icon = Icons.Rounded.AutoAwesome,
+            title = "逐字流光歌词",
+            subtitle = if (wordByWord) "开启 KRC 逐字渐变渲染" else "整行高亮模式（省电）",
+            checked = wordByWord,
             accentColor = themeAccent,
             cardBg = cardBg,
             textPrimary = textPrimary,
             textSecondary = textSecondary,
-            onToggle = { onSetBlurEnabled(!blurEnabled) },
-            modifier = Modifier.weight(1f)
+            onToggle = { onSetWordByWord(!wordByWord) },
+            modifier = Modifier.fillMaxWidth()
         )
-        CompactTogglePillTile(
-            icon = Icons.Rounded.LightMode,
-            title = "歌词屏幕常亮",
-            subtitle = if (keepScreenOn) "播放不息屏" else "跟随系统",
-            checked = keepScreenOn,
-            accentColor = themeAccent,
-            cardBg = cardBg,
-            textPrimary = textPrimary,
-            textSecondary = textSecondary,
-            onToggle = { onSetKeepScreenOn(!keepScreenOn) },
-            modifier = Modifier.weight(1f)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(if (isTablet) 12.dp else 8.dp)
+        ) {
+            CompactTogglePillTile(
+                icon = Icons.Rounded.BlurOn,
+                title = "阶梯景深虚化",
+                subtitle = if (blurEnabled) "远端自然虚化" else "已关闭虚化",
+                checked = blurEnabled,
+                accentColor = themeAccent,
+                cardBg = cardBg,
+                textPrimary = textPrimary,
+                textSecondary = textSecondary,
+                onToggle = { onSetBlurEnabled(!blurEnabled) },
+                modifier = Modifier.weight(1f)
+            )
+            CompactTogglePillTile(
+                icon = Icons.Rounded.LightMode,
+                title = "歌词屏幕常亮",
+                subtitle = if (keepScreenOn) "播放不息屏" else "跟随系统",
+                checked = keepScreenOn,
+                accentColor = themeAccent,
+                cardBg = cardBg,
+                textPrimary = textPrimary,
+                textSecondary = textSecondary,
+                onToggle = { onSetKeepScreenOn(!keepScreenOn) },
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -944,6 +984,7 @@ internal fun PlayerMoreControlSheet(
     climaxModeEnabled: Boolean,
     accompanyModeEnabled: Boolean,
     playbackSpeed: Float,
+    playbackPitch: Float = 1.0f,
     sleepTimerRemainingSec: Long,
     sleepStopAfterCurrentSong: Boolean,
     sleepPendingStopAtTrackEnd: Boolean,
@@ -957,6 +998,8 @@ internal fun PlayerMoreControlSheet(
     onOpenSleepTimer: () -> Unit,
     onOpenQualitySelect: () -> Unit,
     onOpenSongDetail: () -> Unit,
+    onOpenMoreVersions: (() -> Unit)? = null,
+    onBlockSong: (() -> Unit)? = null,
     onOpenArtist: () -> Unit = {},
     onOpenAlbum: () -> Unit = {},
     onDownloadSong: () -> Unit = {},
@@ -1306,41 +1349,81 @@ internal fun PlayerMoreControlSheet(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        val speedPitchActive = abs(playbackSpeed - 1.0f) > 0.01f || abs(playbackPitch - 1.0f) > 0.01f
+                        val speedPitchSubtitle = when {
+                            abs(playbackPitch - 1.0f) > 0.01f && abs(playbackSpeed - 1.0f) > 0.01f ->
+                                String.format(Locale.getDefault(), "%.2fx·调%.2f", playbackSpeed, playbackPitch)
+                            abs(playbackPitch - 1.0f) > 0.01f ->
+                                String.format(Locale.getDefault(), "音调 %.2fx", playbackPitch)
+                            else -> String.format(Locale.getDefault(), "%.2fx 播放", playbackSpeed)
+                        }
                         BentoControlTile(
                             icon = Icons.Rounded.Speed,
                             title = "倍速与变调",
-                            subtitle = "${String.format(Locale.getDefault(), "%.2f", playbackSpeed)}x 播放",
-                            active = playbackSpeed != 1.0f,
+                            subtitle = speedPitchSubtitle,
+                            active = speedPitchActive,
                             activeColor = accentColor,
                             onClick = { dismissThen(onOpenSpeedPitch) },
                             modifier = Modifier.weight(1f)
                         )
+                        val sleepActive = sleepTimerRemainingSec > 0L || sleepPendingStopAtTrackEnd
                         val sleepDesc = when {
                             sleepTimerRemainingSec > 0L -> formatDialogDuration(sleepTimerRemainingSec * 1000L)
                             sleepPendingStopAtTrackEnd -> "播完本首停"
-                            sleepStopAfterCurrentSong -> "播完当前停"
                             else -> "定时关闭"
                         }
                         BentoControlTile(
                             icon = Icons.Rounded.Bedtime,
                             title = "睡眠定时",
                             subtitle = sleepDesc,
-                            active = sleepTimerRemainingSec > 0L || sleepPendingStopAtTrackEnd,
+                            active = sleepActive,
                             activeColor = accentColor,
                             onClick = { dismissThen(onOpenSleepTimer) },
                             modifier = Modifier.weight(1f)
                         )
-                        val permState by com.concept.music.service.AppPermissionManager.state.collectAsState()
-                        if (permState.musicDownloadEnabled) {
+                        if (onOpenMoreVersions != null && !song.isCloudSong) {
                             BentoControlTile(
-                                icon = Icons.Rounded.Download,
-                                title = "下载歌曲",
-                                subtitle = "保存至本地",
+                                icon = Icons.Rounded.LibraryMusic,
+                                title = "更多版本",
+                                subtitle = "Live / 翻唱",
                                 active = false,
                                 activeColor = accentColor,
-                                onClick = { dismissThen(onDownloadSong) },
+                                onClick = { dismissThen(onOpenMoreVersions) },
                                 modifier = Modifier.weight(1f)
                             )
+                        }
+                    }
+
+                    val permState by com.concept.music.service.AppPermissionManager.state.collectAsState()
+                    val showDownloadTile = permState.musicDownloadEnabled
+                    val showBlockTile = onBlockSong != null && !song.isCloudSong
+                    if (showDownloadTile || showBlockTile) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (showDownloadTile) {
+                                BentoControlTile(
+                                    icon = Icons.Rounded.Download,
+                                    title = "下载歌曲",
+                                    subtitle = "保存至本地",
+                                    active = false,
+                                    activeColor = accentColor,
+                                    onClick = { dismissThen(onDownloadSong) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (showBlockTile && onBlockSong != null) {
+                                BentoControlTile(
+                                    icon = Icons.Rounded.NotInterested,
+                                    title = "屏蔽此曲",
+                                    subtitle = "减少相似推荐",
+                                    active = false,
+                                    activeColor = accentColor,
+                                    onClick = { dismissThen(onBlockSong) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                         }
                     }
                 }

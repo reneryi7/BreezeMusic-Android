@@ -583,8 +583,11 @@ object SystemLyricBridge {
         return pm?.isInteractive ?: true
     }
 
+    @Volatile
+    var lyricOffsetMsSnapshot: Long = 0L
+
     fun syncProgressFromService(positionMs: Long, isPlaying: Boolean) {
-        currentPositionMsSnapshot = positionMs.coerceAtLeast(0L)
+        currentPositionMsSnapshot = (positionMs + lyricOffsetMsSnapshot).coerceAtLeast(0L)
         lastPositionSyncRealtimeMs = android.os.SystemClock.elapsedRealtime()
         isPlayingSnapshot = isPlaying
         val lyric = currentLyricSnapshot

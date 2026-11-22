@@ -544,7 +544,7 @@ data class AudioEffectState(
     val channelBalance: Float = 0f,          // -1f (左) ~ +1f (右) 声像平衡
     val antiClippingEnabled: Boolean = true, // 双声道耦合真峰值包络限幅保护 + 智能余量管理
     val equalLoudnessCompensation: Boolean = false, // 夜间小音量等响度听感曲线补偿 (Fletcher-Munson)
-    val volumeNormalizationEnabled: Boolean = true, // 跨曲目智能响度均衡
+    val volumeNormalizationEnabled: Boolean = false, // 跨曲目智能响度均衡（默认直通态关闭，启动后由设置持久化项同步）
     val reverbMode: ReverbMode = ReverbMode.NONE,
     val reverbWetMix: Int = 260,             // 0 ~ 1000 (混响干湿比)
     val reverbPreDelayMs: Int = 18,          // 0 ~ 80 ms (混响预延迟，拉开人声与混响反射)
@@ -914,13 +914,15 @@ object AudioEffectManager {
                     a2 = 1.0 - notchAlpha / A
                 }
                 PeqFilterType.BAND_PASS -> {
-                    val A = 10.0.pow((gainDb.coerceIn(-8.0, 8.0)) / 40.0)
-                    b0 = 1.0 + alpha * A
+                    val focusDb = if (kotlin.math.abs(gainDb) >= 0.5) gainDb.coerceIn(-8.0, 8.0) else 3.0
+                    val A = 10.0.pow(focusDb / 40.0)
+                    val bpAlpha = sinW0 / (2.0 * (q * 1.35).coerceIn(0.5, 8.0))
+                    b0 = 1.0 + bpAlpha * A
                     b1 = -2.0 * cosW0
-                    b2 = 1.0 - alpha * A
-                    a0 = 1.0 + alpha / A
+                    b2 = 1.0 - bpAlpha * A
+                    a0 = 1.0 + bpAlpha / A
                     a1 = -2.0 * cosW0
-                    a2 = 1.0 - alpha / A
+                    a2 = 1.0 - bpAlpha / A
                 }
             }
             totalDb += biquadMagDb(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
@@ -941,7 +943,7 @@ object AudioEffectManager {
         }
 
         // 低通滤波 (LPF) 频响叠加
-        if (state.lowPassCutoffHz in 6000..19500) {
+        if (state.lowPassCutoffHz in 8000 until 19500) {
             val w0 = 2.0 * PI * state.lowPassCutoffHz / sampleRate
             val cosW0 = cos(w0)
             val alpha = sin(w0) / (2.0 * 0.7071)
@@ -1047,27 +1049,57 @@ object AudioEffectManager {
         }
     }
 
+    @Volatile
+    private var lastActivePresetBeforeDisable: EffectPreset = EffectPreset.VIPER_3D
+
+    @Volatile
+    private var volumeNormModifiedBeforeInit: Boolean = false
+
     private fun resolveActivePresetWhenTuning(current: EffectPreset): EffectPreset =
         if (current == EffectPreset.OFF) EffectPreset.CUSTOM else current
 
     fun setEnabled(enabled: Boolean) {
-        val nextPreset = if (enabled && _state.value.currentPreset == EffectPreset.OFF) {
-            EffectPreset.VIPER_3D
-        } else if (!enabled) {
-            EffectPreset.OFF
-        } else {
-            _state.value.currentPreset
-        }
-        if (enabled && _state.value.currentPreset == EffectPreset.OFF) {
-            setPreset(nextPreset)
+        val cur = _state.value
+        if (!enabled) {
+            if (cur.currentPreset != EffectPreset.OFF) {
+                lastActivePresetBeforeDisable = cur.currentPreset
+            }
+            _state.value = cur.copy(
+                isEnabled = false,
+                currentPreset = EffectPreset.OFF,
+                isAbBypassActive = false
+            )
+            applyCurrentState()
+            saveToPrefs()
             return
         }
-        _state.value = _state.value.copy(isEnabled = enabled, currentPreset = nextPreset, isAbBypassActive = false)
-        applyCurrentState()
-        saveToPrefs()
+        val targetPreset = when {
+            cur.currentPreset != EffectPreset.OFF -> cur.currentPreset
+            lastActivePresetBeforeDisable != EffectPreset.OFF -> lastActivePresetBeforeDisable
+            else -> EffectPreset.VIPER_3D
+        }
+        if (targetPreset == EffectPreset.CUSTOM) {
+            // 保护用户自定义 PEQ 与声场滑块参数，开启总开关时不调用 setPreset 覆写任何自定义参数
+            _state.value = cur.copy(
+                isEnabled = true,
+                currentPreset = EffectPreset.CUSTOM,
+                isAbBypassActive = false
+            )
+            applyCurrentState()
+            saveToPrefs()
+        } else if (cur.currentPreset == EffectPreset.OFF) {
+            setPreset(targetPreset)
+        } else {
+            _state.value = cur.copy(isEnabled = true, currentPreset = targetPreset, isAbBypassActive = false)
+            applyCurrentState()
+            saveToPrefs()
+        }
     }
 
     fun setPreset(preset: EffectPreset) {
+        if (preset != EffectPreset.OFF) {
+            lastActivePresetBeforeDisable = preset
+        }
         val p = profileForPreset(preset)
         val cur = _state.value
         _state.value = cur.copy(
@@ -1096,6 +1128,31 @@ object AudioEffectManager {
             tenBandQFactors = if (preset == EffectPreset.CUSTOM) cur.tenBandQFactors else DEFAULT_TEN_BAND_Q,
             tenBandCenterHz = if (preset == EffectPreset.CUSTOM) cur.tenBandCenterHz else DEFAULT_TEN_BAND_HZ,
             tenBandFilterTypes = if (preset == EffectPreset.CUSTOM) cur.tenBandFilterTypes else DEFAULT_TEN_BAND_TYPES
+        )
+        applyCurrentState()
+        saveToPrefs()
+    }
+
+    /**
+     * 仅将 10 段参量均衡器 (PEQ) 与高/低通滤波器及前置增益归零，完全保留声场调音参数。
+     */
+    fun resetPeqOnly() {
+        val cur = _state.value
+        val nextPreset = if (cur.isEnabled) EffectPreset.CUSTOM else cur.currentPreset
+        if (nextPreset != EffectPreset.OFF) {
+            lastActivePresetBeforeDisable = nextPreset
+        }
+        _state.value = cur.copy(
+            currentPreset = nextPreset,
+            bandLevels = List(5) { 0 },
+            tenBandLevels = List(10) { 0 },
+            tenBandQFactors = DEFAULT_TEN_BAND_Q,
+            tenBandCenterHz = DEFAULT_TEN_BAND_HZ,
+            tenBandFilterTypes = DEFAULT_TEN_BAND_TYPES,
+            highPassCutoffHz = 0,
+            lowPassCutoffHz = 20000,
+            preampGainDb = 0f,
+            isAbBypassActive = false
         )
         applyCurrentState()
         saveToPrefs()
@@ -1514,17 +1571,13 @@ object AudioEffectManager {
     }
 
     fun setEqualLoudnessCompensation(enabled: Boolean) {
-        val cur = _state.value
-        _state.value = cur.copy(
-            isEnabled = if (enabled) true else cur.isEnabled,
-            currentPreset = if (enabled) resolveActivePresetWhenTuning(cur.currentPreset) else cur.currentPreset,
-            equalLoudnessCompensation = enabled
-        )
+        _state.value = _state.value.copy(equalLoudnessCompensation = enabled)
         applyCurrentState()
         saveToPrefs()
     }
 
     fun setVolumeNormalizationEnabled(enabled: Boolean) {
+        volumeNormModifiedBeforeInit = true
         _state.value = _state.value.copy(volumeNormalizationEnabled = enabled)
         dspConfigVersion.incrementAndGet()
         saveToPrefs()
@@ -1623,8 +1676,16 @@ object AudioEffectManager {
         val enabled = p.getBoolean("effect_enabled_v2", false)
         val presetName = p.getString("preset_v2", EffectPreset.OFF.name) ?: EffectPreset.OFF.name
         val preset = runCatching { EffectPreset.valueOf(presetName) }.getOrDefault(EffectPreset.OFF)
+        val savedLastActive = p.getString("last_active_preset_v3", null)?.let {
+            runCatching { EffectPreset.valueOf(it) }.getOrNull()
+        }?.takeIf { it != EffectPreset.OFF }
+        lastActivePresetBeforeDisable = when {
+            preset != EffectPreset.OFF -> preset
+            savedLastActive != null -> savedLastActive
+            else -> EffectPreset.VIPER_3D
+        }
         val activePreset = if (enabled && preset != EffectPreset.OFF) preset else EffectPreset.OFF
-        val defaultProf = profileForPreset(activePreset)
+        val defaultProf = profileForPreset(if (activePreset != EffectPreset.OFF) activePreset else lastActivePresetBeforeDisable)
 
         val bass = p.getInt("bass_v2", defaultProf.bass)
         val punch = p.getInt("bass_punch_v3", defaultProf.punch)
@@ -1643,7 +1704,11 @@ object AudioEffectManager {
         val balance = p.getFloat("channel_balance_v2", 0f)
         val antiClip = p.getBoolean("anti_clip_v2", true)
         val eqLoudness = p.getBoolean("eq_loudness_comp_v2", false)
-        val volNorm = p.getBoolean("vol_norm_v2", true)
+        val volNorm = if (volumeNormModifiedBeforeInit) {
+            _state.value.volumeNormalizationEnabled
+        } else {
+            p.getBoolean("vol_norm_v2", true)
+        }
         val reverbName = p.getString("reverb_v2", defaultProf.reverb.name) ?: defaultProf.reverb.name
         val reverb = runCatching { ReverbMode.valueOf(reverbName) }.getOrDefault(ReverbMode.NONE)
         val reverbWet = p.getInt("reverb_wet_v3", defaultProf.reverbWet)
@@ -1768,6 +1833,7 @@ object AudioEffectManager {
         val editor = p.edit()
             .putBoolean("effect_enabled_v2", s.isEnabled)
             .putString("preset_v2", s.currentPreset.name)
+            .putString("last_active_preset_v3", lastActivePresetBeforeDisable.name)
             .putInt("bass_v2", s.bassBoostStrength)
             .putInt("bass_punch_v3", s.bassPunchStrength)
             .putInt("bass_cutoff_v2", s.bassCutoffHz)

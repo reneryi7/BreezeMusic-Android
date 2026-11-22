@@ -63,8 +63,16 @@ data class Song(
     val fileSizeByte: Long = 0L,
     val climaxStartMs: Long = 0L,
     val climaxEndMs: Long = 0L,
-    val publishDate: String = ""
+    val publishDate: String = "",
+    val matchedLyricSnippet: String = "",
+    val cloudKvId: Long = 0L,
+    val versionTag: String = "",
+    val sourceDeviceLabel: String = "",
+    val playCount: Int = 0
 ) {
+    val isCloudSong: Boolean
+        get() = cloudKvId > 0L || id.startsWith("cloud_")
+
     val hasAccompaniment: Boolean
         get() = accompanyHash.isNotBlank()
 
@@ -176,7 +184,12 @@ data class Song(
             fileSizeByte = fileSizeByte,
             climaxStartMs = climaxStartMs,
             climaxEndMs = climaxEndMs,
-            publishDate = (publishDate as String?) ?: ""
+            publishDate = (publishDate as String?) ?: "",
+            matchedLyricSnippet = (matchedLyricSnippet as String?) ?: "",
+            cloudKvId = cloudKvId,
+            versionTag = (versionTag as String?) ?: "",
+            sourceDeviceLabel = (sourceDeviceLabel as String?) ?: "",
+            playCount = playCount
         )
         }
 }

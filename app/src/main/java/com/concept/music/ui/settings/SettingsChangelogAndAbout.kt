@@ -962,8 +962,9 @@ internal fun FeedbackGuideSectionContent(context: Context) {
                     .height(42.dp),
                 onClick = {
                     val template = buildStandardIssueMarkdownTemplate()
-                    copyTextToClipboard(context, "GitHub Issue 模板", template)
-                    Toast.makeText(context, "已复制标准 Issue 模板（含本机环境信息），可直接前往粘贴", Toast.LENGTH_LONG).show()
+                    if (copyTextToClipboard(context, "GitHub Issue 模板", template)) {
+                        Toast.makeText(context, "已复制标准 Issue 模板（含本机环境信息），可直接前往粘贴", Toast.LENGTH_LONG).show()
+                    }
                 }
             )
 
@@ -1001,8 +1002,9 @@ internal fun FeedbackGuideSectionContent(context: Context) {
                 FilledTonalButton(
                     onClick = {
                         val template = buildStandardIssueMarkdownTemplate()
-                        copyTextToClipboard(context, "GitHub Issue 模板", template)
-                        Toast.makeText(context, "已自动复制模板，正在打开新建 Issue 页面...", Toast.LENGTH_SHORT).show()
+                        if (copyTextToClipboard(context, "GitHub Issue 模板", template)) {
+                            Toast.makeText(context, "已自动复制模板，正在打开新建 Issue 页面...", Toast.LENGTH_SHORT).show()
+                        }
                         openExternalUrl(context, ProjectLinks.GITHUB_NEW_ISSUE_URL)
                     },
                     shape = RoundedCornerShape(14.dp),
@@ -1275,8 +1277,9 @@ internal fun AboutAppSectionContent(
                                     modifier = Modifier
                                         .clip(CircleShape)
                                         .clickable {
-                                            copyTextToClipboard(context, "项目仓库地址", ProjectLinks.GITHUB_REPO_URL)
-                                            Toast.makeText(context, "已复制仓库链接", Toast.LENGTH_SHORT).show()
+                                            if (copyTextToClipboard(context, "项目仓库地址", ProjectLinks.GITHUB_REPO_URL)) {
+                                                Toast.makeText(context, "已复制仓库链接", Toast.LENGTH_SHORT).show()
+                                            }
                                         }
                                 ) {
                                     Text(

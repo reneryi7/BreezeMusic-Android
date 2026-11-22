@@ -278,6 +278,8 @@ fun NowPlayingSheet(
     lyricBlurIntensity: Float = 1.0f,
     lyricLineSpacing: Float = 14f,
     lyricOffsetMs: Long = 0L,
+    manualLyricOffsetMs: Long = lyricOffsetMs,
+    bluetoothLyricOffsetMs: Long = 0L,
     lyricHighlightTheme: LyricHighlightTheme = LyricHighlightTheme.ICE_BLUE,
     lyricBackgroundDim: Float = 0.72f,
     lyricKeepScreenOn: Boolean = true,
@@ -336,6 +338,9 @@ fun NowPlayingSheet(
     onDeleteRecentQueue: (String) -> Unit = {},
     onOpenArtist: (Song) -> Unit = {},
     onOpenAlbum: (Song) -> Unit = {},
+    onPlayVersionSong: (Song, List<Song>) -> Unit = { _, _ -> },
+    onAddVersionToNext: (Song) -> Unit = {},
+    onBlockSong: ((Song) -> Unit)? = null,
     onPlayQueueSong: (Song) -> Unit,
     onRemoveFromQueue: (Song) -> Unit,
     onClearQueue: () -> Unit,
@@ -361,7 +366,6 @@ fun NowPlayingSheet(
     var showLyricView by remember { mutableStateOf(false) }
     var isLandscapeMode by remember { mutableStateOf(false) }
     var enteredLandscapeViaSensor by remember { mutableStateOf(false) }
-    var autoRotateSensorEnabled by remember { mutableStateOf(true) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
     var showAudioEffectScreen by remember { mutableStateOf(false) }
@@ -373,6 +377,7 @@ fun NowPlayingSheet(
     var showShareSongSheet by remember { mutableStateOf(false) }
     var showDoubleTapHeart by remember { mutableStateOf(false) }
     var showMoreControlSheet by remember { mutableStateOf(false) }
+    var showSongVersionsSheet by remember { mutableStateOf(false) }
     var showDownloadDialog by remember { mutableStateOf(false) }
     var showCoverPreviewDialog by remember { mutableStateOf(false) }
     var showArtistPickerDialog by remember { mutableStateOf(false) }
@@ -421,10 +426,10 @@ fun NowPlayingSheet(
         !showLyricView &&
         !showQueueSheet &&
         !showMoreControlSheet &&
+        !showSongVersionsSheet &&
         !showLyricSettingsDialog &&
         !showLyricPosterDialog &&
         !showShareSongSheet &&
-        autoRotateSensorEnabled &&
         motionOrientationPermissionEnabled
     val shouldListenOrientationSensor = isLifecycleStarted &&
         (canSensorTriggerLandscape || (isLandscapeMode && enteredLandscapeViaSensor))
@@ -551,6 +556,7 @@ fun NowPlayingSheet(
         when {
             showArtistPickerDialog -> showArtistPickerDialog = false
             showCoverPreviewDialog -> showCoverPreviewDialog = false
+            showSongVersionsSheet -> showSongVersionsSheet = false
             showQueueSheet -> showQueueSheet = false
             showLyricSettingsDialog -> showLyricSettingsDialog = false
             effectiveLandscape -> exitLandscape()
@@ -679,14 +685,14 @@ fun NowPlayingSheet(
         label = "coverDynamicSecondary"
     )
 
-    // 将播放页当前实时计算的封面随动可读高亮色（与全屏歌词完全同源）同步至桌面歌词
-    val syncedDesktopPrimary = remember(coverDynamicPrimary) {
-        coverDynamicPrimary.readableOnDarkSurface(minLuminance = 0.46f)
+    // 将播放页当前实时计算的封面随动可读高亮色（受 dynamicCoverAccentEnabled 统一约束）同步至桌面歌词
+    val syncedDesktopPrimary = remember(activeAccentColor) {
+        activeAccentColor.readableOnDarkSurface(minLuminance = 0.46f)
     }
-    val syncedDesktopSecondary = remember(coverDynamicSecondary) {
-        coverDynamicSecondary.readableOnDarkSurface(minLuminance = 0.50f)
+    val syncedDesktopSecondary = remember(activeSecondaryAccent) {
+        activeSecondaryAccent.readableOnDarkSurface(minLuminance = 0.50f)
     }
-    LaunchedEffect(syncedDesktopPrimary, syncedDesktopSecondary, song.coverUrl) {
+    LaunchedEffect(syncedDesktopPrimary, syncedDesktopSecondary, song.coverUrl, dynamicCoverAccentEnabled) {
         SystemLyricBridge.updateDynamicCoverColors(
             primaryHex = syncedDesktopPrimary.toArgb().toLong() and 0xFFFFFFFFL,
             secondaryHex = syncedDesktopSecondary.toArgb().toLong() and 0xFFFFFFFFL,
@@ -832,6 +838,7 @@ fun NowPlayingSheet(
                     showPhoneticButton = showPhoneticBtn,
                     lyricFontSize = lyricFontSize,
                     lyricTranslationScale = lyricTranslationScale,
+                    lyricAlignment = lyricAlignment,
                     lyricWordByWord = lyricWordByWord,
                     lyricBlurEnabled = lyricBlurEnabled,
                     lyricBlurIntensity = lyricBlurIntensity,
@@ -1066,8 +1073,8 @@ fun NowPlayingSheet(
                             lyricBlurIntensity = lyricBlurIntensity,
                             lyricLineSpacing = lyricLineSpacing,
                             lyricHighlightTheme = lyricHighlightTheme,
-                            dynamicCoverAccent = coverDynamicPrimary,
-                            dynamicCoverSecondary = coverDynamicSecondary,
+                            dynamicCoverAccent = activeAccentColor,
+                            dynamicCoverSecondary = activeSecondaryAccent,
                             onLineClick = onSeekToLyricLine,
                             onReturnToCover = { showLyricView = false },
                             onTogglePlay = onTogglePlay,
@@ -1121,6 +1128,7 @@ fun NowPlayingSheet(
             climaxModeEnabled = climaxModeEnabled,
             accompanyModeEnabled = accompanyModeEnabled,
             playbackSpeed = playbackSpeed,
+            playbackPitch = playbackPitch,
             sleepTimerRemainingSec = sleepTimerRemainingSec,
             sleepStopAfterCurrentSong = sleepStopAfterCurrentSong,
             sleepPendingStopAtTrackEnd = sleepPendingStopAtTrackEnd,
@@ -1146,6 +1154,16 @@ fun NowPlayingSheet(
                 showMoreControlSheet = false
                 showDetailSheet = true
             },
+            onOpenMoreVersions = {
+                showMoreControlSheet = false
+                showSongVersionsSheet = true
+            },
+            onBlockSong = onBlockSong?.let { handler ->
+                {
+                    showMoreControlSheet = false
+                    handler(song)
+                }
+            },
             onOpenArtist = {
                 showMoreControlSheet = false
                 val artistNames = parseSongArtistNames(song.artist)
@@ -1164,6 +1182,22 @@ fun NowPlayingSheet(
                 showDownloadDialog = true
             },
             onDismiss = { showMoreControlSheet = false }
+        )
+    }
+
+    // 歌曲「更多版本」轻量切换抽屉
+    if (showSongVersionsSheet) {
+        SongVersionsBottomSheet(
+            song = song,
+            accentColor = activeAccentColor,
+            onPlayVersion = { targetSong, versionList ->
+                onPlayVersionSong(targetSong, versionList)
+            },
+            onAddToNext = { targetSong ->
+                onAddVersionToNext(targetSong)
+                Toast.makeText(context, "已加入下一首播放", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showSongVersionsSheet = false }
         )
     }
 
@@ -1224,11 +1258,12 @@ fun NowPlayingSheet(
             blurEnabled = lyricBlurEnabled,
             blurIntensity = lyricBlurIntensity,
             lineSpacing = lyricLineSpacing,
-            offsetMs = lyricOffsetMs,
+            offsetMs = manualLyricOffsetMs,
+            bluetoothOffsetMs = bluetoothLyricOffsetMs,
             highlightTheme = lyricHighlightTheme,
             backgroundDim = lyricBackgroundDim,
             keepScreenOn = lyricKeepScreenOn,
-            dynamicAccentColor = coverDynamicPrimary,
+            dynamicAccentColor = activeAccentColor,
             onSetFontSize = onSetLyricFontSize,
             onSetTranslationScale = onSetLyricTranslationScale,
             onSetAlignment = onSetLyricAlignment,
@@ -1772,10 +1807,11 @@ private fun NowPlayingSelectableBackground(
                 PlayerBackgroundStyle.DEEP_OLED -> {
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         drawRect(color = Color(0xFF04060A))
+                        val dimFactor = (1.35f - dimAlpha).coerceIn(0.25f, 1.0f)
                         drawCircle(
                             brush = Brush.radialGradient(
                                 colors = listOf(
-                                    accentPrimary.copy(alpha = if (showLyricView) 0.09f else 0.15f),
+                                    accentPrimary.copy(alpha = (if (showLyricView) 0.14f else 0.18f) * dimFactor),
                                     Color.Transparent
                                 ),
                                 center = Offset(size.width * 0.5f, size.height * 0.38f),

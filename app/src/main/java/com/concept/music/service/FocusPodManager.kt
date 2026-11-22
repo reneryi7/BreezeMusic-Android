@@ -56,14 +56,40 @@ object FocusPodManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var prefs: SharedPreferences? = null
     private var timerJob: Job? = null
+    private var ambientObserverJob: Job? = null
+    private var previousSyncWithMusicBeforePod: Boolean? = null
 
     private val _state = MutableStateFlow(FocusPodState())
     val state = _state.asStateFlow()
+
+    init {
+        ensureAmbientTracksObserver()
+    }
+
+    private fun extractActiveAmbientTrackNames(amb: AmbientMixerState): List<String> {
+        if (!amb.masterEnabled) return emptyList()
+        return AmbientSoundChannel.entries.mapNotNull { ch ->
+            if (amb.levelFor(ch) > 0.02f) ch.title else null
+        }
+    }
+
+    private fun ensureAmbientTracksObserver() {
+        if (ambientObserverJob?.isActive == true) return
+        ambientObserverJob = scope.launch {
+            AmbientSoundManager.state.collect { amb ->
+                val names = extractActiveAmbientTrackNames(amb)
+                _state.update { cur ->
+                    if (cur.activeTracks == names) cur else cur.copy(activeTracks = names)
+                }
+            }
+        }
+    }
 
     private fun nowElapsedMs(): Long =
         runCatching { SystemClock.elapsedRealtime() }.getOrDefault(0L).takeIf { it > 0L } ?: System.currentTimeMillis()
 
     fun init(context: Context) {
+        ensureAmbientTracksObserver()
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences("concept_focus_pod", Context.MODE_PRIVATE)
         prefs = p
@@ -73,17 +99,26 @@ object FocusPodManager {
         val minsToday = if (savedDay == currentDay) p.getInt("mins_today", 0) else 0
         val autoAmbient = p.getBoolean("auto_ambient", true)
         val autoScene = p.getBoolean("auto_scene_music", true)
+        val savedPresetName = p.getString("selected_preset", FocusPreset.POMODORO_25.name)
+        val savedPreset = runCatching { FocusPreset.valueOf(savedPresetName ?: FocusPreset.POMODORO_25.name) }
+            .getOrDefault(FocusPreset.POMODORO_25)
+        val activeTrackNames = extractActiveAmbientTrackNames(AmbientSoundManager.state.value)
 
         _state.value = FocusPodState(
+            selectedPreset = savedPreset,
+            remainingSeconds = savedPreset.minutes * 60L,
+            totalSeconds = savedPreset.minutes * 60L,
             autoMixAmbient = autoAmbient,
             autoPlaySceneMusic = autoScene,
             completedPodsToday = podsToday,
-            totalFocusMinutesToday = minsToday
+            totalFocusMinutesToday = minsToday,
+            activeTracks = activeTrackNames
         )
     }
 
     fun selectPreset(preset: FocusPreset) {
         if (_state.value.isRunning) return
+        prefs?.edit()?.putString("selected_preset", preset.name)?.apply()
         _state.update {
             it.copy(
                 selectedPreset = preset,
@@ -116,6 +151,8 @@ object FocusPodManager {
         }
 
         if (_state.value.autoMixAmbient) {
+            previousSyncWithMusicBeforePod = AmbientSoundManager.state.value.syncWithMusic
+            AmbientSoundManager.setCoexistWithAppMusic(_state.value.autoPlaySceneMusic)
             AmbientSoundManager.setSyncWithMusic(false)
             AmbientSoundManager.applyQuickScene(preset.ambientSceneKey)
         }
@@ -158,7 +195,9 @@ object FocusPodManager {
                 )
             }
             if (_state.value.autoMixAmbient) {
-                AmbientSoundManager.setSyncWithMusic(true)
+                AmbientSoundManager.setCoexistWithAppMusic(false)
+                previousSyncWithMusicBeforePod?.let { AmbientSoundManager.setSyncWithMusic(it) }
+                previousSyncWithMusicBeforePod = null
                 AmbientSoundManager.setMasterEnabled(false)
             }
         }
@@ -175,7 +214,9 @@ object FocusPodManager {
             )
         }
         if (_state.value.autoMixAmbient) {
-            AmbientSoundManager.setSyncWithMusic(true)
+            AmbientSoundManager.setCoexistWithAppMusic(false)
+            previousSyncWithMusicBeforePod?.let { AmbientSoundManager.setSyncWithMusic(it) }
+            previousSyncWithMusicBeforePod = null
             AmbientSoundManager.setMasterEnabled(false)
         }
     }

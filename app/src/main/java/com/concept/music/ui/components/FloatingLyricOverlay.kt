@@ -15,6 +15,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -330,21 +331,29 @@ fun FloatingLyricOverlay(
                     }
 
                     // 2. 恒定三行高度歌词主显示区（短歌词两行插空居中 0.28/0.72，长歌词自然三行 0.18/0.50/0.82）
+                    // 单击切换毛玻璃顶栏，双击直达播放器
+                    val latestOnClickCapsule by rememberUpdatedState(onClickCapsule)
                     BoxWithConstraints(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(fixedThreeLineZoneDp)
                             .then(
                                 if (!state.floatingCapsuleLocked) {
-                                    Modifier.clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null
-                                    ) {
-                                        val nextHud = !showHudControls
-                                        showHudControls = nextHud
-                                        if (!nextHud) {
-                                            showSettingsPanel = false
-                                        }
+                                    Modifier.pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onTap = {
+                                                val nextHud = !showHudControls
+                                                showHudControls = nextHud
+                                                if (!nextHud) {
+                                                    showSettingsPanel = false
+                                                }
+                                            },
+                                            onDoubleTap = {
+                                                showHudControls = false
+                                                showSettingsPanel = false
+                                                latestOnClickCapsule()
+                                            }
+                                        )
                                     }
                                 } else {
                                     Modifier

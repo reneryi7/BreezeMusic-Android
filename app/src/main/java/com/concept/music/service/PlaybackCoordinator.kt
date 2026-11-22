@@ -39,6 +39,12 @@ object PlaybackCoordinator {
     var onTogglePlayDelegate: (() -> Boolean)? = null
 
     @Volatile
+    var onExplicitPlayDelegate: (() -> Boolean)? = null
+
+    @Volatile
+    var onExplicitPauseDelegate: (() -> Boolean)? = null
+
+    @Volatile
     var onResumePlayDelegate: (() -> Boolean)? = null
 
     @Volatile
@@ -187,6 +193,26 @@ object PlaybackCoordinator {
         return playFromBackgroundQueue(context, activePlayer, offsetDelta = 0)
     }
 
+    fun handleExplicitPlay(context: Context, player: Player?): Boolean {
+        if (player?.isPlaying == true) return true
+        onExplicitPlayDelegate?.let { delegate ->
+            if (delegate()) return true
+        }
+        return handleResumeOnHeadsetConnected(context, player)
+    }
+
+    fun handleExplicitPause(context: Context, player: Player?): Boolean {
+        onExplicitPauseDelegate?.let { delegate ->
+            if (delegate()) return true
+        }
+        val activePlayer = player ?: return false
+        if (!activePlayer.isPlaying && !activePlayer.playWhenReady) return true
+        activePlayer.pause()
+        AmbientSoundManager.onMusicPlayStateChanged(false)
+        ConceptMusicWidgetUpdater.updateState(context.applicationContext, isPlaying = false)
+        return true
+    }
+
     fun handleSkipToPrevious(context: Context, player: Player?): Boolean {
         onSkipToPreviousDelegate?.let { delegate ->
             if (delegate()) return true
@@ -260,6 +286,22 @@ object PlaybackCoordinator {
                 prefs.getString("preferred_quality_v2", AudioQuality.HIGH.name) ?: AudioQuality.HIGH.name
             )
         }.getOrDefault(AudioQuality.HIGH)
+        val wifiOnlyLossless = prefs.getBoolean("wifi_only_lossless", false)
+        val isOnCellular = runCatching {
+            val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+            caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+        }.getOrDefault(false)
+        val effectiveQuality = if (wifiOnlyLossless && isOnCellular &&
+            (savedQuality == AudioQuality.LOSSLESS || savedQuality == AudioQuality.HI_RES)
+        ) {
+            AudioQuality.HIGH
+        } else {
+            savedQuality
+        }
+        val savedSpeed = prefs.getFloat("playback_speed", 1.0f).coerceIn(0.5f, 2.0f)
+        val savedPitch = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.5f, 2.0f)
 
         persistAsync(prefs) {
             putInt("saved_current_index_$userScopeKey", targetIdx)
@@ -272,8 +314,8 @@ object PlaybackCoordinator {
         bgResolveJob = mainScope.launch {
             val playbackResult = withContext(Dispatchers.IO) {
                 suspendRunCatching {
-                    val reqQ = if (savedQuality in targetSong.effectiveQualities) {
-                        savedQuality
+                    val reqQ = if (effectiveQuality in targetSong.effectiveQualities) {
+                        effectiveQuality
                     } else {
                         targetSong.highestQuality
                     }
@@ -304,6 +346,7 @@ object PlaybackCoordinator {
                     )
                     .build()
                 player.setMediaItem(item)
+                player.playbackParameters = androidx.media3.common.PlaybackParameters(savedSpeed, savedPitch)
                 player.repeatMode = if (playMode == PlayMode.REPEAT_ONE) {
                     Player.REPEAT_MODE_ONE
                 } else {
@@ -311,6 +354,10 @@ object PlaybackCoordinator {
                 }
                 player.prepare()
                 player.play()
+                // 异步同步云端播放历史，确保跨设备继续播放队列及时更新
+                mainScope.launch(Dispatchers.IO) {
+                    runCatching { VipManager.music.uploadPlayHistory(targetSong) }
+                }
                 AmbientSoundManager.onMusicPlayStateChanged(true)
                 ConceptMusicWidgetUpdater.updateState(
                     context = appCtx,
