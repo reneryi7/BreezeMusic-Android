@@ -746,7 +746,11 @@ internal fun LandscapePlayerPage(
                                             text = phoneticText,
                                             textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.labelSmall.copy(
-                                                color = if (isCurrent) activePrimaryColor.copy(alpha = 0.90f) else Color.White.copy(alpha = (distanceAlpha * 0.68f).coerceIn(0.12f, 0.55f)),
+                                                color = when {
+                                                    isCurrent -> activePrimaryColor.copy(alpha = 0.90f)
+                                                    fallbackBlurShadow != null -> Color.Transparent
+                                                    else -> Color.White.copy(alpha = (distanceAlpha * 0.68f).coerceIn(0.12f, 0.55f))
+                                                },
                                                 fontSize = phoneticFontSize.sp,
                                                 lineHeight = (phoneticFontSize * 1.38f).sp,
                                                 fontWeight = FontWeight.SemiBold,
@@ -773,7 +777,11 @@ internal fun LandscapePlayerPage(
                                             textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.bodyLarge.copy(
                                                 fontWeight = FontWeight.ExtraBold,
-                                                color = if (isCurrent) activePrimaryColor else Color.White.copy(alpha = distanceAlpha),
+                                                color = when {
+                                                    isCurrent -> activePrimaryColor
+                                                    fallbackBlurShadow != null -> Color.Transparent
+                                                    else -> Color.White.copy(alpha = distanceAlpha)
+                                                },
                                                 fontSize = effectiveLyricFontSize.sp,
                                                 lineHeight = (effectiveLyricFontSize + 8f).sp,
                                                 shadow = if (isCurrent) null else fallbackBlurShadow
@@ -790,7 +798,11 @@ internal fun LandscapePlayerPage(
                                             text = trans,
                                             textAlign = alignLayout.textAlign,
                                             style = MaterialTheme.typography.bodyMedium.copy(
-                                                color = if (isCurrent) activePrimaryColor.copy(alpha = 0.88f) else Color.White.copy(alpha = (distanceAlpha * 0.78f).coerceIn(0.14f, 0.58f)),
+                                                color = when {
+                                                    isCurrent -> activePrimaryColor.copy(alpha = 0.88f)
+                                                    fallbackBlurShadow != null -> Color.Transparent
+                                                    else -> Color.White.copy(alpha = (distanceAlpha * 0.78f).coerceIn(0.14f, 0.58f))
+                                                },
                                                 fontSize = transFontSize.sp,
                                                 lineHeight = (transFontSize * 1.42f).sp,
                                                 fontWeight = FontWeight.SemiBold,

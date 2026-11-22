@@ -419,6 +419,8 @@ object SystemLyricBridge {
         if (prefs != null) return
         val p = ctx.getSharedPreferences("concept_system_lyric", Context.MODE_PRIVATE)
         prefs = p
+        val playerPrefs = ctx.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+        lyricOffsetMsSnapshot = playerPrefs.getLong("lyric_offset_ms", 0L).coerceIn(-10_000L, 10_000L)
         val schemeName = p.getString("desktop_color_scheme", DesktopLyricColorScheme.ICE_BLUE.name)
             ?: DesktopLyricColorScheme.ICE_BLUE.name
         val modeName = p.getString("desktop_line_mode", DesktopLyricLineMode.DUAL_BILINGUAL.name)

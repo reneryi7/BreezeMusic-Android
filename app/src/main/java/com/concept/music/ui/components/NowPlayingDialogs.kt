@@ -588,7 +588,11 @@ private fun LyricThemeAndAlignCompactCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .padding(end = 8.dp)
+                ) {
                     Text(
                         text = "时长校准",
                         color = textPrimary,
@@ -602,7 +606,8 @@ private fun LyricThemeAndAlignCompactCard(
                             text = String.format(Locale.getDefault(), "含蓝牙补偿 %+.1fs", bluetoothOffsetMs / 1000f),
                             color = roles.primary.copy(alpha = 0.85f),
                             fontSize = if (isTablet) 11.sp else 9.5.sp,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -1423,6 +1428,9 @@ internal fun PlayerMoreControlSheet(
                                     onClick = { dismissThen(onBlockSong) },
                                     modifier = Modifier.weight(1f)
                                 )
+                            }
+                            if (!showDownloadTile || !showBlockTile) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }

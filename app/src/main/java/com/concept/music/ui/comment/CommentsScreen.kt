@@ -450,6 +450,11 @@ fun CommentsScreen(
     hasMore: Boolean = true,
     currentUserAvatar: String = "",
     currentUserId: String = VipManager.accounts.state.value.currentId.orEmpty(),
+    headerTag: String? = null,
+    enableLike: Boolean = true,
+    enableFloorDetail: Boolean = true,
+    errorMessage: String? = null,
+    onRetry: (() -> Unit)? = null,
     onBack: () -> Unit,
     onTabSelected: (String) -> Unit = {},
     onLoadMore: () -> Unit = {},
@@ -614,15 +619,34 @@ fun CommentsScreen(
                                     )
                                     if (song != null) {
                                         Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = song.artist,
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                color = subText,
-                                                fontSize = 12.sp
-                                            ),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (!headerTag.isNullOrBlank()) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = ConceptPrimary.copy(alpha = 0.14f)
+                                                ) {
+                                                    Text(
+                                                        text = headerTag,
+                                                        color = ConceptPrimary,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = song.artist,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    color = subText,
+                                                    fontSize = 12.sp
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -759,7 +783,11 @@ fun CommentsScreen(
                             }
 
                             Text(
-                                text = if (currentType == "hot") "按热度排序" else "按最新时间排序",
+                                text = when {
+                                    !enableLike && !enableFloorDetail -> "暂不支持点赞与楼中楼展开"
+                                    currentType == "hot" -> "按热度排序"
+                                    else -> "按最新时间排序"
+                                },
                                 color = subText.copy(alpha = 0.72f),
                                 fontSize = 11.5.sp
                             )
@@ -773,6 +801,38 @@ fun CommentsScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 CircularProgressIndicator(color = ConceptPrimary, modifier = Modifier.size(36.dp))
+                            }
+                        } else if (errorMessage != null && comments.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .weight(1f),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.padding(horizontal = 24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CloudOff,
+                                        contentDescription = null,
+                                        tint = subText.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = errorMessage,
+                                        style = MaterialTheme.typography.bodyMedium.copy(color = subText),
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(
+                                        onClick = { (onRetry ?: onRefresh).invoke() },
+                                        shape = RoundedCornerShape(14.dp)
+                                    ) {
+                                        Text("重新加载", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
                             }
                         } else if (comments.isEmpty()) {
                             Box(
@@ -809,8 +869,8 @@ fun CommentsScreen(
                                     key = { idx, c -> "cmt_${c.id}_$idx" },
                                     contentType = { _, _ -> "root_comment_card" }
                                 ) { _, comment ->
-                                    LaunchedEffect(comment.id, comment.replyCount, comment.replies.size) {
-                                        if (comment.replyCount > 0 && comment.replies.isEmpty()) {
+                                    LaunchedEffect(comment.id, comment.replyCount, comment.replies.size, enableFloorDetail) {
+                                        if (enableFloorDetail && comment.replyCount > 0 && comment.replies.isEmpty()) {
                                             // 滑动零掉帧保护：若用户正在快速滑动评论列表，先防抖等待 180ms 并等待快速滚屏停歇，
                                             // 若评论项在高速滑屏中仅一闪而过则自动取消协程，避免滚屏中途并发数十个请求及高频回写重组
                                             if (listState.isScrollInProgress) {
@@ -825,15 +885,19 @@ fun CommentsScreen(
                                     RootCommentCard(
                                         comment = comment,
                                         isDark = isDark,
+                                        enableLike = enableLike,
+                                        enableFloorDetail = enableFloorDetail,
                                         canDelete = onDeleteComment != null &&
                                             currentUserId.isNotBlank() &&
                                             comment.userId.isNotBlank() &&
                                             comment.userId == currentUserId,
                                         onOpenAllRepliesFloor = {
-                                            lastOpenedFloorComment = comment
-                                            activeFloorCommentId = comment.id
-                                            if (comment.replies.isEmpty()) {
-                                                onLoadReplies(comment.id)
+                                            if (enableFloorDetail) {
+                                                lastOpenedFloorComment = comment
+                                                activeFloorCommentId = comment.id
+                                                if (comment.replies.isEmpty()) {
+                                                    onLoadReplies(comment.id)
+                                                }
                                             }
                                         },
                                         onReplyRoot = {
@@ -936,6 +1000,7 @@ fun CommentsScreen(
                     song = song,
                     rootComment = floorComment,
                     currentUserAvatar = currentUserAvatar,
+                    currentUserId = currentUserId,
                     onBack = { activeFloorCommentId = null },
                     onOpenConversationChain = { chain -> activeConversationChainRaw = chain },
                     onSyncReplyCount = { actualCnt, latestReplies ->
@@ -945,6 +1010,7 @@ fun CommentsScreen(
                         onPostComment(content, replyToId ?: floorComment.id, replyToUser ?: floorComment.userName, onResult)
                     },
                     onLikeComment = onLikeComment,
+                    onDeleteComment = onDeleteComment,
                     onPreviewImage = { previewImageUrl = it }
                 )
             }
@@ -1047,11 +1113,13 @@ fun CommentFloorDetailScreen(
     song: Song?,
     rootComment: SongComment,
     currentUserAvatar: String = "",
+    currentUserId: String = "",
     onBack: () -> Unit,
     onOpenConversationChain: (CommentConversationChain) -> Unit = {},
     onSyncReplyCount: (actualCount: Int, latestReplies: List<SongComment>) -> Unit = { _, _ -> },
     onPostReply: (content: String, replyToCommentId: String?, replyToUserName: String?, onResult: (Boolean, String) -> Unit) -> Unit,
     onLikeComment: (commentId: String) -> Unit,
+    onDeleteComment: ((commentId: String, tid: String?, onResult: (Boolean, String) -> Unit) -> Unit)? = null,
     onPreviewImage: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -1072,6 +1140,7 @@ fun CommentFloorDetailScreen(
     var replyTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var inputText by remember { mutableStateOf("") }
     var showEmojiBar by remember { mutableStateOf(false) }
+    var pendingDeleteReply by remember { mutableStateOf<SongComment?>(null) }
 
     LaunchedEffect(rootComment.replies) {
         if (rootComment.replies.isNotEmpty()) {
@@ -1310,8 +1379,16 @@ fun CommentFloorDetailScreen(
                 ) { _, visualItem ->
                     when (visualItem) {
                         is FloorTreeVisualItem.ClusterCommentRow -> {
+                            val canDeleteSub = onDeleteComment != null &&
+                                currentUserId.isNotBlank() &&
+                                visualItem.comment.userId.isNotBlank() &&
+                                visualItem.comment.userId == currentUserId
                             MultiLevelClusterReplyNode(
                                 item = visualItem,
+                                canDelete = canDeleteSub,
+                                onDeleteClick = if (canDeleteSub) {
+                                    { pendingDeleteReply = visualItem.comment }
+                                } else null,
                                 onReplyClick = {
                                     replyTarget = visualItem.comment.id to visualItem.comment.userName
                                 },
@@ -1363,6 +1440,37 @@ fun CommentFloorDetailScreen(
                 }
             }
         }
+    }
+
+    pendingDeleteReply?.let { delTarget ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteReply = null },
+            title = { Text("删除回复", fontWeight = FontWeight.Bold) },
+            text = { Text("确定要删除这条回复吗？删除后将无法恢复。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDeleteReply = null
+                        val tid = delTarget.rootId?.takeIf { it.isNotBlank() && it != delTarget.id } ?: rootComment.id
+                        onDeleteComment?.invoke(delTarget.id, tid) { ok, msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            if (ok) {
+                                val updated = floorReplies.filterNot { it.id == delTarget.id }
+                                floorReplies = updated
+                                onSyncReplyCount(updated.size, updated)
+                            }
+                        }
+                    }
+                ) {
+                    Text("确认删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteReply = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -1676,6 +1784,8 @@ private fun CommentConversationDetailScreen(
 @Composable
 private fun MultiLevelClusterReplyNode(
     item: FloorTreeVisualItem.ClusterCommentRow,
+    canDelete: Boolean = false,
+    onDeleteClick: (() -> Unit)? = null,
     onReplyClick: () -> Unit,
     onLikeClick: () -> Unit,
     onOpenConversation: (() -> Unit)? = null,
@@ -1877,6 +1987,22 @@ private fun MultiLevelClusterReplyNode(
                         ),
                         label = "replyLikeScale"
                     )
+                    if (canDelete && onDeleteClick != null) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .softClickable(onClick = onDeleteClick)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteOutline,
+                                contentDescription = "删除回复",
+                                tint = subText.copy(alpha = 0.72f),
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -2087,6 +2213,8 @@ private fun MultiLevelDeepDialogueEntryNode(
 private fun RootCommentCard(
     comment: SongComment,
     isDark: Boolean,
+    enableLike: Boolean = true,
+    enableFloorDetail: Boolean = true,
     canDelete: Boolean = false,
     onOpenAllRepliesFloor: () -> Unit,
     onReplyRoot: () -> Unit,
@@ -2109,6 +2237,7 @@ private fun RootCommentCard(
                 comment = comment,
                 isDark = isDark,
                 isFloorOwner = false,
+                enableLike = enableLike,
                 canDelete = canDelete,
                 onDeleteClick = onDeleteClick,
                 onLikeClick = { onLikeComment(comment.id) }
@@ -2145,7 +2274,7 @@ private fun RootCommentCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (totalRepliesCount > 0 && comment.replies.isEmpty()) {
+                if (enableFloorDetail && totalRepliesCount > 0 && comment.replies.isEmpty()) {
                     Text(
                         text = "查看全部 $totalRepliesCount 条回复 >",
                         color = ConceptPrimary,
@@ -2175,7 +2304,7 @@ private fun RootCommentCard(
             }
 
             // 主评论卡片下方默认预览前 3 条回复（严格限定为直接回复层主本人的 1 级评论，绝不展示 2 级及往后的评论）
-            if (comment.replies.isNotEmpty() || totalRepliesCount > 0) {
+            if (enableFloorDetail && (comment.replies.isNotEmpty() || totalRepliesCount > 0)) {
                 val level1Replies = remember(comment.id, comment.userName, comment.content, comment.replies) {
                     comment.replies.filter { isLevel1DirectReply(rootComment = comment, reply = it) }
                 }
@@ -2260,6 +2389,7 @@ private fun CommentUserHeaderRow(
     comment: SongComment,
     isDark: Boolean,
     isFloorOwner: Boolean,
+    enableLike: Boolean = true,
     canDelete: Boolean = false,
     onDeleteClick: (() -> Unit)? = null,
     onLikeClick: () -> Unit
@@ -2401,44 +2531,62 @@ private fun CommentUserHeaderRow(
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (canDelete && onDeleteClick != null) {
-                Icon(
-                    imageVector = Icons.Rounded.DeleteOutline,
-                    contentDescription = "删除评论",
-                    tint = subText.copy(alpha = 0.72f),
+                Box(
+                    contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(38.dp)
                         .softClickable(onClick = onDeleteClick)
-                        .padding(5.dp)
-                )
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .softClickable(onClick = onLikeClick)
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
-            ) {
-                Icon(
-                    imageVector = if (comment.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                    contentDescription = "点赞",
-                    tint = likeTint,
-                    modifier = Modifier
-                        .size(16.dp)
-                        .graphicsLayer {
-                            scaleX = likeScale
-                            scaleY = likeScale
-                        }
-                )
-                if (comment.likeCount > 0) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = formatCommentLikeCount(comment.likeCount),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = if (comment.isLiked) Color(0xFFFF5252) else subText,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DeleteOutline,
+                        contentDescription = "删除评论",
+                        tint = subText.copy(alpha = 0.72f),
+                        modifier = Modifier.size(17.dp)
                     )
                 }
+                if (enableLike || comment.likeCount > 0) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+            }
+            if (enableLike) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .softClickable(onClick = onLikeClick)
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = if (comment.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                        contentDescription = "点赞",
+                        tint = likeTint,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .graphicsLayer {
+                                scaleX = likeScale
+                                scaleY = likeScale
+                            }
+                    )
+                    if (comment.likeCount > 0) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = formatCommentLikeCount(comment.likeCount),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = if (comment.isLiked) Color(0xFFFF5252) else subText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        )
+                    }
+                }
+            } else if (comment.likeCount > 0) {
+                Text(
+                    text = "${formatCommentLikeCount(comment.likeCount)} 赞",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = subText.copy(alpha = 0.65f),
+                        fontSize = 11.sp
+                    ),
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                )
             }
         }
     }
@@ -2453,6 +2601,8 @@ private fun TreeBranchReplyNode(
     isFirstNode: Boolean = false,
     isLastNode: Boolean,
     hasMoreNodesBelow: Boolean = false,
+    canDelete: Boolean = false,
+    onDeleteClick: (() -> Unit)? = null,
     onReplyClick: () -> Unit,
     onLikeClick: () -> Unit,
     onPreviewImage: (String) -> Unit
@@ -2597,6 +2747,22 @@ private fun TreeBranchReplyNode(
                         ),
                         label = "replyLikeScale"
                     )
+                    if (canDelete && onDeleteClick != null) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .softClickable(onClick = onDeleteClick)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteOutline,
+                                contentDescription = "删除回复",
+                                tint = subText.copy(alpha = 0.72f),
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -3235,6 +3401,7 @@ fun ResourceCommentsScreen(
     var comments by remember(targetType, resourceId) { mutableStateOf<List<SongComment>>(emptyList()) }
     var totalCount by remember(targetType, resourceId) { mutableIntStateOf(0) }
     var loading by remember(targetType, resourceId) { mutableStateOf(false) }
+    var errorMsg by remember(targetType, resourceId) { mutableStateOf<String?>(null) }
     var page by remember(targetType, resourceId) { mutableIntStateOf(1) }
     var hasMore by remember(targetType, resourceId) { mutableStateOf(true) }
 
@@ -3242,6 +3409,7 @@ fun ResourceCommentsScreen(
         if (loading && !reset) return
         scope.launch {
             loading = true
+            errorMsg = null
             runCatching {
                 val (cnt, list) = VipManager.music.fetchResourceComments(
                     targetType = targetType,
@@ -3250,13 +3418,17 @@ fun ResourceCommentsScreen(
                     page = targetPage,
                     pageSize = 30
                 )
+                val prevCount = comments.size
                 val merged = if (reset) list else (comments + list).distinctBy { it.id }
                 comments = merged
                 totalCount = maxOf(cnt, merged.size)
                 page = targetPage
-                hasMore = list.size >= 8 && (reset || merged.size > comments.size - list.size)
-            }.onFailure {
+                hasMore = list.size >= 8 && (reset || merged.size > prevCount)
+            }.onFailure { err ->
                 hasMore = false
+                if (comments.isEmpty()) {
+                    errorMsg = err.message?.takeIf { it.isNotBlank() } ?: "评论加载失败，请稍后重试"
+                }
             }
             loading = false
         }
@@ -3284,6 +3456,11 @@ fun ResourceCommentsScreen(
         hasMore = hasMore,
         currentUserAvatar = currentUserAvatar,
         currentUserId = currentUserId,
+        headerTag = if (targetType == CommentTargetType.ALBUM) "专辑评论" else "歌单评论",
+        enableLike = false,
+        enableFloorDetail = false,
+        errorMessage = errorMsg,
+        onRetry = { loadPage(targetPage = 1, reset = true) },
         onBack = onBack,
         onTabSelected = { newType ->
             if (commentType != newType) {
@@ -3317,14 +3494,7 @@ fun ResourceCommentsScreen(
                 }
             }
         },
-        onLikeComment = { cid ->
-            comments = comments.map { c ->
-                if (c.id == cid) {
-                    val next = !c.isLiked
-                    c.copy(isLiked = next, likeCount = (c.likeCount + if (next) 1 else -1).coerceAtLeast(0))
-                } else c
-            }
-        },
+        onLikeComment = {},
         onDeleteComment = { cid, tid, onResult ->
             scope.launch {
                 val ok = runCatching {

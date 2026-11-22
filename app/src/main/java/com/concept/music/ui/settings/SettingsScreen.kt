@@ -769,7 +769,8 @@ private suspend fun checkGitHubLatestRelease(
 fun SettingsScreen(
     viewModel: MusicPlayerViewModel,
     onBackClick: () -> Unit,
-    onOpenViperEffect: () -> Unit = {}
+    onOpenViperEffect: () -> Unit = {},
+    onOpenPreferenceSheet: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -989,14 +990,36 @@ fun SettingsScreen(
                         )
                     }
                     item {
+                        val speedPitchStatus = when {
+                            isSleepActive -> sleepStatusText
+                            kotlin.math.abs(playbackPitch - 1.0f) > 0.01f -> String.format(
+                                Locale.getDefault(),
+                                "%.2fx · 调%.2f",
+                                playbackSpeed,
+                                playbackPitch
+                            )
+                            else -> "${String.format(Locale.getDefault(), "%.2f", playbackSpeed)}x"
+                        }
                         SettingsMenuEntryCard(
                             category = SettingsCategory.SPEED_SLEEP,
                             icon = Icons.Rounded.Speed,
                             accentColor = ConceptPrimary,
-                            statusText = if (isSleepActive) sleepStatusText else "${String.format(Locale.getDefault(), "%.2f", playbackSpeed)}x",
+                            statusText = speedPitchStatus,
                             selected = highlightedCat == SettingsCategory.SPEED_SLEEP,
                             onClick = { selectCategoryAction(SettingsCategory.SPEED_SLEEP) }
                         )
+                    }
+                    if (onOpenPreferenceSheet != null) {
+                        item {
+                            SettingsActionEntryCard(
+                                title = "推荐偏好与内容屏蔽",
+                                subtitle = "管理私人 FM / 日推算法倾向与屏蔽的歌曲/歌手",
+                                icon = Icons.Rounded.Tune,
+                                accentColor = ConceptMintAccent,
+                                statusText = "偏好管理",
+                                onClick = onOpenPreferenceSheet
+                            )
+                        }
                     }
 
                     item {
@@ -1906,10 +1929,7 @@ fun SettingsScreen(
                                             ).show()
                                         },
                                         onEnableAll = {
-                                            AppPermissionManager.restoreDefaultCorePermissions(context)
-                                            AppPermissionType.entries
-                                                .filter { it != AppPermissionType.MUSIC_DOWNLOAD }
-                                                .forEach { t -> viewModel.setAppPermissionEnabled(t, true) }
+                                            viewModel.restoreDefaultCorePermissions()
                                             Toast.makeText(context, "已恢复开启全部默认核心权限", Toast.LENGTH_SHORT).show()
                                         }
                                     )
@@ -2265,6 +2285,96 @@ internal fun SettingsMenuEntryCard(
             Icon(
                 imageVector = Icons.Rounded.ChevronRight,
                 contentDescription = "进入${category.title}",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsActionEntryCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accentColor: Color,
+    statusText: String = "",
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = conceptFloatingCardColor(),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shadowElevation = 0.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .softCardClickable(shape = RoundedCornerShape(22.dp), onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(accentColor.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = accentColor,
+                    modifier = Modifier.size(21.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.5.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            if (statusText.isNotBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = accentColor.copy(alpha = 0.13f)
+                ) {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = accentColor,
+                        fontSize = 11.2.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = "进入$title",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 modifier = Modifier.size(20.dp)
             )

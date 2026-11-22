@@ -362,6 +362,45 @@ fun AlbumDetailScreen(
                                     }
                                 }
 
+                                if (onOpenAlbumComments != null && albumId.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(20.dp),
+                                        color = ConceptAmberAccent.copy(alpha = 0.14f),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(40.dp)
+                                            .softCardClickable(shape = RoundedCornerShape(20.dp)) {
+                                                onOpenAlbumComments(
+                                                    albumId,
+                                                    album?.name ?: "专辑详情",
+                                                    album?.artist.orEmpty(),
+                                                    effectiveCoverUrl
+                                                )
+                                            }
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center,
+                                            modifier = Modifier.fillMaxSize()
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.Comment,
+                                                contentDescription = null,
+                                                tint = ConceptAmberAccent,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "查看专辑评论",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.5.sp,
+                                                color = ConceptAmberAccent
+                                            )
+                                        }
+                                    }
+                                }
+
                                 if (!album?.intro.isNullOrBlank()) {
                                     Spacer(modifier = Modifier.height(16.dp))
                                     HorizontalDivider(

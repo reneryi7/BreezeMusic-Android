@@ -594,6 +594,7 @@ object AudioEffectManager {
     private val _state = MutableStateFlow(AudioEffectState())
     val state = _state.asStateFlow()
 
+    @Synchronized
     fun init(context: Context) {
         if (prefs != null) return
         prefs = context.applicationContext.getSharedPreferences("concept_audio_effects", Context.MODE_PRIVATE)
@@ -1053,6 +1054,9 @@ object AudioEffectManager {
     private var lastActivePresetBeforeDisable: EffectPreset = EffectPreset.VIPER_3D
 
     @Volatile
+    private var hasPreservedStateBeforeDisable: Boolean = false
+
+    @Volatile
     private var volumeNormModifiedBeforeInit: Boolean = false
 
     private fun resolveActivePresetWhenTuning(current: EffectPreset): EffectPreset =
@@ -1063,6 +1067,7 @@ object AudioEffectManager {
         if (!enabled) {
             if (cur.currentPreset != EffectPreset.OFF) {
                 lastActivePresetBeforeDisable = cur.currentPreset
+                hasPreservedStateBeforeDisable = true
             }
             _state.value = cur.copy(
                 isEnabled = false,
@@ -1078,11 +1083,12 @@ object AudioEffectManager {
             lastActivePresetBeforeDisable != EffectPreset.OFF -> lastActivePresetBeforeDisable
             else -> EffectPreset.VIPER_3D
         }
-        if (targetPreset == EffectPreset.CUSTOM) {
-            // 保护用户自定义 PEQ 与声场滑块参数，开启总开关时不调用 setPreset 覆写任何自定义参数
+        if (targetPreset == EffectPreset.CUSTOM || (cur.currentPreset == EffectPreset.OFF && hasPreservedStateBeforeDisable)) {
+            // 保护用户自定义 PEQ 与命名预设上的声场微调参数，关闭再开启总开关时不调用 setPreset 覆写任何微调
+            hasPreservedStateBeforeDisable = false
             _state.value = cur.copy(
                 isEnabled = true,
-                currentPreset = EffectPreset.CUSTOM,
+                currentPreset = targetPreset,
                 isAbBypassActive = false
             )
             applyCurrentState()
@@ -1099,6 +1105,9 @@ object AudioEffectManager {
     fun setPreset(preset: EffectPreset) {
         if (preset != EffectPreset.OFF) {
             lastActivePresetBeforeDisable = preset
+            hasPreservedStateBeforeDisable = false
+        } else {
+            hasPreservedStateBeforeDisable = false
         }
         val p = profileForPreset(preset)
         val cur = _state.value
@@ -1704,11 +1713,7 @@ object AudioEffectManager {
         val balance = p.getFloat("channel_balance_v2", 0f)
         val antiClip = p.getBoolean("anti_clip_v2", true)
         val eqLoudness = p.getBoolean("eq_loudness_comp_v2", false)
-        val volNorm = if (volumeNormModifiedBeforeInit) {
-            _state.value.volumeNormalizationEnabled
-        } else {
-            p.getBoolean("vol_norm_v2", true)
-        }
+        val persistedVolNorm = p.getBoolean("vol_norm_v2", true)
         val reverbName = p.getString("reverb_v2", defaultProf.reverb.name) ?: defaultProf.reverb.name
         val reverb = runCatching { ReverbMode.valueOf(reverbName) }.getOrDefault(ReverbMode.NONE)
         val reverbWet = p.getInt("reverb_wet_v3", defaultProf.reverbWet)
@@ -1778,40 +1783,49 @@ object AudioEffectManager {
             }
         }
 
-        _state.value = AudioEffectState(
-            isEnabled = enabled && activePreset != EffectPreset.OFF,
-            currentPreset = activePreset,
-            bassBoostStrength = bass,
-            bassPunchStrength = punch,
-            bassCutoffHz = cutoffHz,
-            virtualizerStrength = virt,
-            soundstageDepthStrength = depth,
-            crossfeedStrength = crossfeed,
-            vocalClarityStrength = clarity,
-            deEsserStrength = deEsser,
-            trebleAirStrength = air,
-            analogWarmthStrength = warmth,
-            transientAttackStrength = transientAttack,
-            surroundRotationSpeed = rotSpeed,
-            loudnessGainMb = loudness,
-            preampGainDb = preamp,
-            channelBalance = balance,
-            antiClippingEnabled = antiClip,
-            equalLoudnessCompensation = eqLoudness,
-            volumeNormalizationEnabled = volNorm,
-            reverbMode = reverb,
-            reverbWetMix = reverbWet,
-            reverbPreDelayMs = reverbPreDelay,
-            reverbDamping = reverbDamp,
-            bandLevels = bands,
-            tenBandLevels = restoredTenBands,
-            tenBandQFactors = restoredQs,
-            tenBandCenterHz = restoredHz,
-            tenBandFilterTypes = restoredTypes,
-            highPassCutoffHz = hpfHz,
-            lowPassCutoffHz = lpfHz,
-            customPeqSlots = slotsList
-        )
+        _state.update { cur ->
+            val resolvedVolNorm = if (volumeNormModifiedBeforeInit) {
+                cur.volumeNormalizationEnabled
+            } else {
+                persistedVolNorm
+            }
+            AudioEffectState(
+                isEnabled = enabled && activePreset != EffectPreset.OFF,
+                currentPreset = activePreset,
+                bassBoostStrength = bass,
+                bassPunchStrength = punch,
+                bassCutoffHz = cutoffHz,
+                virtualizerStrength = virt,
+                soundstageDepthStrength = depth,
+                crossfeedStrength = crossfeed,
+                vocalClarityStrength = clarity,
+                deEsserStrength = deEsser,
+                trebleAirStrength = air,
+                analogWarmthStrength = warmth,
+                transientAttackStrength = transientAttack,
+                surroundRotationSpeed = rotSpeed,
+                loudnessGainMb = loudness,
+                preampGainDb = preamp,
+                channelBalance = balance,
+                antiClippingEnabled = antiClip,
+                equalLoudnessCompensation = eqLoudness,
+                volumeNormalizationEnabled = resolvedVolNorm,
+                reverbMode = reverb,
+                reverbWetMix = reverbWet,
+                reverbPreDelayMs = reverbPreDelay,
+                reverbDamping = reverbDamp,
+                bandLevels = bands,
+                tenBandLevels = restoredTenBands,
+                tenBandQFactors = restoredQs,
+                tenBandCenterHz = restoredHz,
+                tenBandFilterTypes = restoredTypes,
+                highPassCutoffHz = hpfHz,
+                lowPassCutoffHz = lpfHz,
+                customPeqSlots = slotsList,
+                onlineEffectMeta = cur.onlineEffectMeta,
+                syncingOnlineEffects = cur.syncingOnlineEffects
+            )
+        }
         dspConfigVersion.incrementAndGet()
     }
 

@@ -65,8 +65,10 @@ import com.concept.music.ui.theme.ConceptVioletAccent
 import com.concept.music.ui.theme.LocalIsDarkTheme
 import com.concept.music.ui.theme.VipGold
 import com.concept.music.ui.theme.conceptCategoryContentTransition
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import com.concept.music.ui.theme.conceptFloatingCardColor
+import com.concept.music.ui.theme.conceptGoldAccentColor
 import com.concept.music.ui.theme.conceptSheetContainerColor
 import com.concept.music.ui.theme.softCardClickable
 import com.concept.music.ui.theme.ConceptCategoryTabItem
@@ -97,6 +99,8 @@ fun LibraryScreen(
     onOpenArtist: (String) -> Unit = {},
     onOpenAlbum: (String) -> Unit = {},
     onPlaySong: (Song, List<Song>) -> Unit = { _, _ -> },
+    onOpenCloudDiskSheet: (() -> Unit)? = null,
+    onOpenPlaylistSortSheet: ((Boolean) -> Unit)? = null,
     isOverlayOpen: Boolean = false,
     onSubSheetOpenChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
@@ -120,10 +124,9 @@ fun LibraryScreen(
     val purchasedAlbums by viewModel.purchasedAlbums.collectAsState()
     val cloudDiskSummary by viewModel.cloudDiskSummary.collectAsState()
     val cloudDiskLoading by viewModel.cloudDiskLoading.collectAsState()
-    val listeningPreference by viewModel.listeningPreference.collectAsState()
-    val blacklistedSongs by viewModel.blacklistedSongs.collectAsState()
-    val blacklistedSingers by viewModel.blacklistedSingers.collectAsState()
-    val preferenceLoading by viewModel.preferenceLoading.collectAsState()
+    val cloudDiskLoadingMore by viewModel.cloudDiskLoadingMore.collectAsState()
+    val cloudDiskError by viewModel.cloudDiskError.collectAsState()
+    val listenRankWeek by viewModel.listenRankWeek.collectAsState()
 
     val selectedTab by viewModel.selectedAssetTab.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
@@ -143,8 +146,8 @@ fun LibraryScreen(
     var showVipCenterSheet by remember { mutableStateOf(false) }
     var showFocusPodSheet by remember { mutableStateOf(false) }
     var showCloudDiskSheet by remember { mutableStateOf(false) }
-    var showPreferenceSheet by remember { mutableStateOf(false) }
     var playlistSortTargetTab by remember { mutableStateOf<Int?>(null) }
+    var showAssetToolsMenu by remember { mutableStateOf(false) }
     var isLibrarySubSheetDismissing by remember { mutableStateOf(false) }
     val focusPodState by FocusPodManager.state.collectAsState()
 
@@ -153,19 +156,18 @@ fun LibraryScreen(
             showFocusPodSheet = false
             showVipCenterSheet = false
             showCloudDiskSheet = false
-            showPreferenceSheet = false
             playlistSortTargetTab = null
             isLibrarySubSheetDismissing = false
         }
     }
 
-    LaunchedEffect(showFocusPodSheet, showVipCenterSheet, showCloudDiskSheet, showPreferenceSheet, playlistSortTargetTab) {
-        if (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || showPreferenceSheet || playlistSortTargetTab != null) {
+    LaunchedEffect(showFocusPodSheet, showVipCenterSheet, showCloudDiskSheet, playlistSortTargetTab) {
+        if (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || playlistSortTargetTab != null) {
             isLibrarySubSheetDismissing = false
         }
     }
 
-    val anyLibrarySubSheetOpen = (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || showPreferenceSheet || playlistSortTargetTab != null) && !isOverlayOpen && !isLibrarySubSheetDismissing
+    val anyLibrarySubSheetOpen = (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || playlistSortTargetTab != null) && !isOverlayOpen && !isLibrarySubSheetDismissing
     LaunchedEffect(anyLibrarySubSheetOpen) {
         onSubSheetOpenChanged(anyLibrarySubSheetOpen)
     }
@@ -268,47 +270,96 @@ fun LibraryScreen(
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
-            // 3. 核心快捷入口（我喜欢的音乐 + 最近播放，双色渐变点缀）
+            // 3. 紧凑 2×2 核心快捷入口网格（我喜欢的音乐 / 最近播放 / 音乐云盘 / 听歌排行），释放首屏给歌单资产
             item(key = "lib_shortcuts", contentType = "lib_shortcuts") {
+                val cyanAccent = conceptCyanAccentColor()
+                val goldAccent = conceptGoldAccentColor()
                 val likeGradient = if (isDark) {
                     listOf(Color(0xFF2B1822), Color(0xFF191724))
                 } else {
-                    listOf(Color(0xFFFFE8EE), Color(0xFFFFF3F6))
+                    listOf(Color(0xFFFFE8EE), Color(0xFFFFF4F7))
                 }
                 val historyGradient = if (isDark) {
                     listOf(Color(0xFF132638), Color(0xFF151926))
                 } else {
-                    listOf(Color(0xFFE3F2FF), Color(0xFFF0F7FF))
+                    listOf(Color(0xFFE3F2FF), Color(0xFFF1F8FF))
+                }
+                val cloudGradient = if (isDark) {
+                    listOf(Color(0xFF11292C), Color(0xFF141B29))
+                } else {
+                    listOf(Color(0xFFE0F7F4), Color(0xFFF0FBFA))
+                }
+                val rankGradient = if (isDark) {
+                    listOf(Color(0xFF292114), Color(0xFF171A27))
+                } else {
+                    listOf(Color(0xFFFFF3DF), Color(0xFFFFFAF0))
                 }
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    MediaShortcutCard(
-                        title = "我喜欢的音乐",
-                        subtitle = "${likedPlaylist?.trackCount ?: 0} 首歌曲",
-                        icon = Icons.Rounded.Favorite,
-                        iconTint = ConceptCoralAccent,
-                        gradientColors = likeGradient,
-                        onClick = { onOpenPlaylist("like") },
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    MediaShortcutCard(
-                        title = "最近播放",
-                        subtitle = "$historyCount 首记录",
-                        icon = Icons.Rounded.History,
-                        iconTint = ConceptPrimary,
-                        gradientColors = historyGradient,
-                        onClick = { onOpenPlaylist("history") },
-                        modifier = Modifier.weight(1f)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        MediaShortcutCard(
+                            title = "我喜欢",
+                            subtitle = "${likedPlaylist?.trackCount ?: 0} 首歌曲",
+                            icon = Icons.Rounded.Favorite,
+                            iconTint = ConceptCoralAccent,
+                            gradientColors = likeGradient,
+                            onClick = { onOpenPlaylist("like") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        MediaShortcutCard(
+                            title = "最近播放",
+                            subtitle = "$historyCount 首记录",
+                            icon = Icons.Rounded.History,
+                            iconTint = ConceptPrimary,
+                            gradientColors = historyGradient,
+                            onClick = { onOpenPlaylist("history") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        MediaShortcutCard(
+                            title = "音乐云盘",
+                            subtitle = if (cloudDiskSummary.totalCount > 0) "${cloudDiskSummary.totalCount} 首曲目" else "私有云端曲库",
+                            icon = Icons.Rounded.CloudQueue,
+                            iconTint = cyanAccent,
+                            gradientColors = cloudGradient,
+                            onClick = {
+                                if (!isLoggedIn) {
+                                    Toast.makeText(context, "请先登录酷狗账号查看音乐云盘", Toast.LENGTH_SHORT).show()
+                                    onLogin()
+                                } else if (onOpenCloudDiskSheet != null) {
+                                    onOpenCloudDiskSheet()
+                                } else {
+                                    showCloudDiskSheet = true
+                                    viewModel.loadCloudDisk(force = false)
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        MediaShortcutCard(
+                            title = "听歌排行",
+                            subtitle = if (listenRankWeek.isNotEmpty()) "本周 Top ${listenRankWeek.size}" else "周榜与累计榜",
+                            icon = Icons.Rounded.Leaderboard,
+                            iconTint = goldAccent,
+                            gradientColors = rankGradient,
+                            onClick = { onOpenPlaylist("listen_rank") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
             }
 
-            // 4. 概念胶囊工作台 · Focus Pod（去除右侧胶囊按钮，改为极简文字指示，减少页面圆角按钮密度）
+            // 4. 概念胶囊工作台 · Focus Pod（单行紧凑版，把首屏核心视野留给自建/收藏歌单）
             item(key = "lib_focus_pod", contentType = "lib_focus_pod") {
                 val podActive = focusPodState.isRunning || focusPodState.activeTracks.isNotEmpty()
                 val podAccent = if (isDark) Color(0xFF9688FF) else ConceptVioletAccent
@@ -319,24 +370,24 @@ fun LibraryScreen(
                 }
 
                 Surface(
-                    shape = RoundedCornerShape(24.dp),
+                    shape = RoundedCornerShape(20.dp),
                     color = Color.Transparent,
                     shadowElevation = 0.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .softCardClickable { showFocusPodSheet = true }
+                        .softCardClickable(shape = RoundedCornerShape(20.dp)) { showFocusPodSheet = true }
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(podBrush)
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(14.dp))
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(podAccent.copy(alpha = 0.16f)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -344,11 +395,11 @@ fun LibraryScreen(
                                 imageVector = Icons.Rounded.SelfImprovement,
                                 contentDescription = "概念胶囊工作台",
                                 tint = podAccent,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(21.dp)
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(13.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
 
                         Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -371,7 +422,6 @@ fun LibraryScreen(
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(3.dp))
                             Text(
                                 text = if (focusPodState.activeTracks.isNotEmpty()) {
                                     "正在混音 ${focusPodState.activeTracks.size} 路环境音"
@@ -380,14 +430,14 @@ fun LibraryScreen(
                                 },
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 11.5.sp
+                                    fontSize = 11.sp
                                 ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -406,131 +456,16 @@ fun LibraryScreen(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // 4b. 轻量工具胶囊行：个人音乐云盘 & 听歌偏好/内容屏蔽（克制极简，不增卡片堆叠）
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = conceptFloatingCardColor(),
-                        shadowElevation = if (isDark) 0.dp else 1.dp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .softCardClickable(shape = RoundedCornerShape(16.dp)) {
-                                if (!isLoggedIn) {
-                                    Toast.makeText(context, "请先登录酷狗账号查看音乐云盘", Toast.LENGTH_SHORT).show()
-                                    onLogin()
-                                } else {
-                                    showCloudDiskSheet = true
-                                    viewModel.loadCloudDisk(force = false)
-                                }
-                            }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 13.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.CloudQueue,
-                                contentDescription = "音乐云盘",
-                                tint = ConceptCyanAccent,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "音乐云盘",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1
-                                )
-                                Text(
-                                    text = if (cloudDiskSummary.totalCount > 0) "${cloudDiskSummary.totalCount} 首云端曲目" else "云端私人曲库",
-                                    fontSize = 10.5.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Icon(
-                                imageVector = Icons.Rounded.ChevronRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = conceptFloatingCardColor(),
-                        shadowElevation = if (isDark) 0.dp else 1.dp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .softCardClickable(shape = RoundedCornerShape(16.dp)) {
-                                if (!isLoggedIn) {
-                                    Toast.makeText(context, "请先登录酷狗账号管理听歌偏好", Toast.LENGTH_SHORT).show()
-                                    onLogin()
-                                } else {
-                                    showPreferenceSheet = true
-                                    viewModel.loadListeningPreferenceAndBlacklist()
-                                }
-                            }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 13.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Tune,
-                                contentDescription = "听歌偏好与屏蔽",
-                                tint = ConceptMintAccent,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "偏好与屏蔽",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1
-                                )
-                                Text(
-                                    text = (listeningPreference ?: UserListeningPreference()).modeLabel,
-                                    fontSize = 10.5.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Icon(
-                                imageVector = Icons.Rounded.ChevronRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
             }
 
-            // 5. 开放式极简音乐资产导航栏（彻底告别 4 个胶囊按钮 + 4 个图标按钮的密集感）
+            // 5. 开放式极简音乐资产导航栏（右侧收敛为「+」与「更多」，保障 38dp+ 热区且不挤压 Tab）
             item(key = "lib_asset_tabs", contentType = "lib_asset_tabs") {
                 val assetTabs = listOf(
                     ConceptCategoryTabItem("0", "自建", myPlaylists.size.toString(), ConceptPrimary),
                     ConceptCategoryTabItem("1", "收藏", favoritePlaylists.size.toString(), ConceptCoralAccent),
                     ConceptCategoryTabItem("2", "关注", followedArtists.size.toString(), ConceptMintAccent),
-                    ConceptCategoryTabItem("3", "已购", (purchasedSongs.size + purchasedAlbums.size).toString(), VipGold)
+                    ConceptCategoryTabItem("3", "已购", (purchasedSongs.size + purchasedAlbums.size).toString(), conceptGoldAccentColor())
                 )
 
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -541,14 +476,15 @@ fun LibraryScreen(
                             val idx = keyStr.toIntOrNull() ?: 0
                             switchAssetTab(idx)
                         },
-                        itemSpacing = 20.dp,
-                        fontSize = 15.5.sp,
+                        itemSpacing = 18.dp,
+                        fontSize = 15.sp,
                         indicatorWidth = 20.dp,
+                        scrollable = true,
                         trailingContent = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier.padding(bottom = 2.dp)
+                                modifier = Modifier.padding(bottom = 1.dp)
                             ) {
                                 if (selectedTab == 0) {
                                     IconButton(
@@ -560,53 +496,76 @@ fun LibraryScreen(
                                                 showCreateDialog = true
                                             }
                                         },
-                                        modifier = Modifier.size(30.dp)
+                                        modifier = Modifier.size(38.dp)
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Add,
                                             contentDescription = "新建歌单",
                                             tint = ConceptPrimary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { showImportDialog = true },
-                                        modifier = Modifier.size(30.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.FileUpload,
-                                            contentDescription = "导入歌单",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(17.dp)
+                                            modifier = Modifier.size(21.dp)
                                         )
                                     }
                                 }
                                 if (selectedTab == 0 || selectedTab == 1) {
                                     val sortableCount = if (selectedTab == 0) myPlaylists.size else favoritePlaylists.size
-                                    if (sortableCount >= 2 && isLoggedIn) {
+                                    Box {
                                         IconButton(
-                                            onClick = { playlistSortTargetTab = selectedTab },
-                                            modifier = Modifier.size(30.dp)
+                                            onClick = { showAssetToolsMenu = true },
+                                            modifier = Modifier.size(38.dp)
                                         ) {
                                             Icon(
-                                                imageVector = Icons.Rounded.SwapVert,
-                                                contentDescription = "调整歌单排序",
+                                                imageVector = Icons.Rounded.MoreVert,
+                                                contentDescription = "歌单管理选项",
                                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(19.dp)
                                             )
                                         }
-                                    }
-                                    IconButton(
-                                        onClick = { viewModel.toggleGridView() },
-                                        modifier = Modifier.size(30.dp)
-                                    ) {
-                                        @Suppress("DEPRECATION")
-                                        Icon(
-                                            imageVector = if (isGridView) Icons.Rounded.ViewList else Icons.Rounded.GridView,
-                                            contentDescription = if (isGridView) "切换为列表视图" else "切换为网格视图",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(17.dp)
-                                        )
+                                        DropdownMenu(
+                                            expanded = showAssetToolsMenu,
+                                            onDismissRequest = { showAssetToolsMenu = false },
+                                            modifier = Modifier.background(conceptSheetContainerColor(), RoundedCornerShape(16.dp))
+                                        ) {
+                                            if (selectedTab == 0) {
+                                                DropdownMenuItem(
+                                                    leadingIcon = { Icon(Icons.Rounded.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                                    text = { Text("导入外部歌单", fontSize = 13.5.sp) },
+                                                    onClick = {
+                                                        showAssetToolsMenu = false
+                                                        showImportDialog = true
+                                                    }
+                                                )
+                                            }
+                                            if (sortableCount >= 2 && isLoggedIn) {
+                                                DropdownMenuItem(
+                                                    leadingIcon = { Icon(Icons.Rounded.SwapVert, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                                    text = { Text("调整歌单云端排序", fontSize = 13.5.sp) },
+                                                    onClick = {
+                                                        showAssetToolsMenu = false
+                                                        val isCreated = selectedTab == 0
+                                                        if (onOpenPlaylistSortSheet != null) {
+                                                            onOpenPlaylistSortSheet(isCreated)
+                                                        } else {
+                                                            playlistSortTargetTab = selectedTab
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                            DropdownMenuItem(
+                                                leadingIcon = {
+                                                    @Suppress("DEPRECATION")
+                                                    Icon(
+                                                        imageVector = if (isGridView) Icons.Rounded.ViewList else Icons.Rounded.GridView,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                },
+                                                text = { Text(if (isGridView) "切换为列表视图" else "切换为网格视图", fontSize = 13.5.sp) },
+                                                onClick = {
+                                                    showAssetToolsMenu = false
+                                                    viewModel.toggleGridView()
+                                                }
+                                            )
+                                        }
                                     }
                                 } else {
                                     var assetRefreshSpin by remember { mutableIntStateOf(0) }
@@ -618,13 +577,13 @@ fun LibraryScreen(
                                                 else viewModel.loadFollowedArtistNewReleases(force = true)
                                             } else if (selectedTab == 3) viewModel.refreshPurchasedAssets()
                                         },
-                                        modifier = Modifier.size(30.dp)
+                                        modifier = Modifier.size(38.dp)
                                     ) {
                                         ConceptFluidRefreshIcon(
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             isRefreshing = libraryLoading || (selectedTab == 2 && followSubTab == 1 && followedNewReleasesLoading),
                                             spinTrigger = assetRefreshSpin,
-                                            modifier = Modifier.size(16.dp)
+                                            modifier = Modifier.size(17.dp)
                                         )
                                     }
                                 }
@@ -866,13 +825,14 @@ fun LibraryScreen(
                                                                 overflow = TextOverflow.Ellipsis,
                                                                 modifier = Modifier.weight(1f, fill = false)
                                                             )
+                                                            val tagGold = conceptGoldAccentColor()
                                                             Surface(
                                                                 shape = RoundedCornerShape(6.dp),
-                                                                color = (if (release.isAlbum) VipGold else ConceptMintAccent).copy(alpha = 0.16f)
+                                                                color = (if (release.isAlbum) tagGold else ConceptMintAccent).copy(alpha = 0.16f)
                                                             ) {
                                                                 Text(
                                                                     text = if (release.isAlbum) "新专辑" else "新歌",
-                                                                    color = if (release.isAlbum) VipGold else ConceptMintAccent,
+                                                                    color = if (release.isAlbum) tagGold else ConceptMintAccent,
                                                                     fontSize = 10.sp,
                                                                     fontWeight = FontWeight.Bold,
                                                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp)
@@ -1419,40 +1379,21 @@ fun LibraryScreen(
             CloudDiskBottomSheet(
                 summary = cloudDiskSummary,
                 loading = cloudDiskLoading,
+                loadingMore = cloudDiskLoadingMore,
+                errorMessage = cloudDiskError,
                 onRefresh = { viewModel.loadCloudDisk(force = true) },
-                onPlayCloudSong = { item, allItems ->
+                onLoadMore = { viewModel.loadMoreCloudDisk() },
+                onPlaySong = { item, allItems ->
                     val queue = allItems.map { it.toSong() }
                     val target = item.toSong()
                     onPlaySong(target, queue.ifEmpty { listOf(target) })
                 },
-                onDeleteCloudSong = { item ->
+                onDeleteSong = { item ->
                     viewModel.deleteCloudSong(item) { _, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
                 },
                 onDismiss = { showCloudDiskSheet = false },
-                onDismissStart = { isLibrarySubSheetDismissing = true }
-            )
-        }
-
-        if (showPreferenceSheet && !isOverlayOpen) {
-            ListeningPreferenceAndBlacklistSheet(
-                preference = listeningPreference ?: UserListeningPreference(),
-                blacklistedSongs = blacklistedSongs,
-                blacklistedSingers = blacklistedSingers,
-                loading = preferenceLoading,
-                onRefresh = { viewModel.loadListeningPreferenceAndBlacklist() },
-                onSelectMode = { mode ->
-                    viewModel.updateListeningMode(mode) { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onRemoveBlacklist = { entry ->
-                    viewModel.removeFromBlacklist(entry) { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onDismiss = { showPreferenceSheet = false },
                 onDismissStart = { isLibrarySubSheetDismissing = true }
             )
         }
@@ -1464,10 +1405,10 @@ fun LibraryScreen(
             PlaylistOrderSortSheet(
                 title = if (isCreatedByMe) "调整自建歌单顺序" else "调整收藏歌单顺序",
                 playlists = sourcePlaylists,
-                onSaveOrder = { ordered ->
+                onSaveOrder = { ordered, onDone ->
                     viewModel.reorderUserPlaylists(isCreatedByMe, ordered) { ok, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        if (ok) playlistSortTargetTab = null
+                        onDone(ok)
                     }
                 },
                 onDismiss = { playlistSortTargetTab = null },
@@ -1802,684 +1743,55 @@ private fun MediaShortcutCard(
     val subColor = if (isDark) Color.White.copy(alpha = 0.65f) else Color(0xFF4F6482)
 
     Surface(
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(20.dp),
         color = Color.Transparent,
         shadowElevation = 0.dp,
         modifier = modifier
-            .softCardClickable(onClick = onClick)
+            .softCardClickable(shape = RoundedCornerShape(20.dp), onClick = onClick)
     ) {
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Brush.linearGradient(gradientColors))
-                .padding(16.dp)
+                .padding(horizontal = 13.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            Surface(
+                modifier = Modifier.size(38.dp),
+                shape = CircleShape,
+                color = iconTint.copy(alpha = 0.16f)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        modifier = Modifier.size(40.dp),
-                        shape = CircleShape,
-                        color = iconTint.copy(alpha = 0.16f)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = icon,
-                                contentDescription = title,
-                                tint = iconTint,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
-
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
-                        contentDescription = null,
-                        tint = subColor.copy(alpha = 0.55f),
-                        modifier = Modifier.size(16.dp)
+                        imageVector = icon,
+                        contentDescription = title,
+                        tint = iconTint,
+                        modifier = Modifier.size(19.dp)
                     )
                 }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
                         color = titleColor,
-                        fontSize = 15.sp
+                        fontSize = 14.sp
                     ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = subColor,
-                        fontSize = 12.sp
+                        fontSize = 11.sp
                     ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-            }
-        }
-    }
-}
-
-private fun formatCloudBytes(bytes: Long): String {
-    if (bytes <= 0L) return "0 MB"
-    val mb = bytes / (1024.0 * 1024.0)
-    return if (mb >= 1024.0) {
-        String.format(java.util.Locale.US, "%.2f GB", mb / 1024.0)
-    } else {
-        String.format(java.util.Locale.US, "%.1f MB", mb)
-    }
-}
-
-@Composable
-private fun CloudDiskBottomSheet(
-    summary: CloudDiskSummary,
-    loading: Boolean,
-    onRefresh: () -> Unit,
-    onPlayCloudSong: (CloudSongItem, List<CloudSongItem>) -> Unit,
-    onDeleteCloudSong: (CloudSongItem) -> Unit,
-    onDismiss: () -> Unit,
-    onDismissStart: () -> Unit = {}
-) {
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
-    val sheetBg = conceptSheetContainerColor()
-    val cardBg = conceptElevatedSurfaceColor()
-    val textPrimary = MaterialTheme.colorScheme.onSurface
-    val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
-    var pendingDelete by remember { mutableStateOf<CloudSongItem?>(null) }
-
-    ConceptAnimatedOverlaySheet(
-        onDismiss = onDismiss,
-        onDismissStart = onDismissStart,
-        isLandscape = isLandscape,
-        zIndex = 88f
-    ) {
-        Surface(
-            shape = if (isLandscape) RoundedCornerShape(24.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            color = sheetBg,
-            contentColor = textPrimary,
-            shadowElevation = 24.dp,
-            modifier = Modifier
-                .then(
-                    if (isLandscape) {
-                        Modifier
-                            .padding(horizontal = 24.dp, vertical = 14.dp)
-                            .widthIn(max = 580.dp)
-                            .fillMaxWidth()
-                            .fillMaxHeight(0.86f)
-                    } else {
-                        Modifier
-                            .widthIn(max = 560.dp)
-                            .fillMaxWidth()
-                            .heightIn(min = 340.dp, max = 580.dp)
-                    }
-                )
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {}
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 18.dp, vertical = 10.dp)
-                    .navigationBarsPadding()
-            ) {
-                if (!isLandscape) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .sheetVerticalDragGesture()
-                            .padding(top = 4.dp, bottom = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(38.dp)
-                                .height(4.dp)
-                                .clip(CircleShape)
-                                .background(textSecondary.copy(alpha = 0.28f))
-                        )
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "个人音乐云盘",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = textPrimary
-                        )
-                        val capacityText = if (summary.maxBytes > 0L) {
-                            "已用 ${formatCloudBytes(summary.usedBytes)} / ${formatCloudBytes(summary.maxBytes)} · ${summary.totalCount} 首"
-                        } else {
-                            "共 ${summary.totalCount.coerceAtLeast(summary.songs.size)} 首云端私人曲目"
-                        }
-                        Text(text = capacityText, fontSize = 11.5.sp, color = textSecondary)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Surface(
-                            shape = CircleShape,
-                            color = cardBg,
-                            modifier = Modifier.size(34.dp).softClickable(onClick = onRefresh)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (loading) {
-                                    CircularProgressIndicator(color = ConceptCyanAccent, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-                                } else {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新云盘", tint = textPrimary, modifier = Modifier.size(18.dp))
-                                }
-                            }
-                        }
-                        Surface(
-                            shape = CircleShape,
-                            color = cardBg,
-                            modifier = Modifier.size(34.dp).softClickable(onClick = requestDismiss)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = textSecondary, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(10.dp))
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (loading && summary.songs.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = ConceptCyanAccent, strokeWidth = 2.5.dp)
-                        }
-                    } else if (summary.songs.isEmpty()) {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(Icons.Rounded.CloudOff, contentDescription = null, tint = textSecondary.copy(alpha = 0.5f), modifier = Modifier.size(36.dp))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("云盘中暂无已上传曲目", color = textSecondary, fontSize = 13.5.sp)
-                        }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(7.dp),
-                            contentPadding = PaddingValues(bottom = 12.dp)
-                        ) {
-                            itemsIndexed(
-                                items = summary.songs,
-                                key = { idx, item -> "cloud_${item.kvId}_${item.hash}_$idx" }
-                            ) { idx, item ->
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = cardBg,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .softCardClickable(shape = RoundedCornerShape(14.dp)) {
-                                            onPlayCloudSong(item, summary.songs)
-                                        }
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "${idx + 1}",
-                                            color = ConceptCyanAccent,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.width(24.dp)
-                                        )
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = item.title.ifBlank { item.name },
-                                                color = textPrimary,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            val meta = buildList {
-                                                add(item.artist.ifBlank { "云盘曲目" })
-                                                if (item.extName.isNotBlank()) add(item.extName.uppercase())
-                                                if (item.fileSize > 0L) add(formatCloudBytes(item.fileSize))
-                                            }.joinToString(" · ")
-                                            Text(
-                                                text = meta,
-                                                color = textSecondary,
-                                                fontSize = 11.5.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { pendingDelete = item },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.DeleteOutline,
-                                                contentDescription = "删除云盘曲目",
-                                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pendingDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除云盘曲目？", fontWeight = FontWeight.Bold) },
-            text = { Text("将从你的酷狗音乐云盘中永久移除「${target.title.ifBlank { target.name }}」，此操作不可撤销。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onDeleteCloudSong(target)
-                    pendingDelete = null
-                }) {
-                    Text("确认删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
-            }
-        )
-    }
-}
-
-@Composable
-private fun ListeningPreferenceAndBlacklistSheet(
-    preference: UserListeningPreference,
-    blacklistedSongs: List<BlacklistEntry>,
-    blacklistedSingers: List<BlacklistEntry>,
-    loading: Boolean,
-    onRefresh: () -> Unit,
-    onSelectMode: (Int) -> Unit,
-    onRemoveBlacklist: (BlacklistEntry) -> Unit,
-    onDismiss: () -> Unit,
-    onDismissStart: () -> Unit = {}
-) {
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
-    val sheetBg = conceptSheetContainerColor()
-    val cardBg = conceptElevatedSurfaceColor()
-    val textPrimary = MaterialTheme.colorScheme.onSurface
-    val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
-
-    ConceptAnimatedOverlaySheet(
-        onDismiss = onDismiss,
-        onDismissStart = onDismissStart,
-        isLandscape = isLandscape,
-        zIndex = 88f
-    ) {
-        Surface(
-            shape = if (isLandscape) RoundedCornerShape(24.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            color = sheetBg,
-            contentColor = textPrimary,
-            shadowElevation = 24.dp,
-            modifier = Modifier
-                .then(
-                    if (isLandscape) {
-                        Modifier
-                            .padding(horizontal = 24.dp, vertical = 14.dp)
-                            .widthIn(max = 580.dp)
-                            .fillMaxWidth()
-                            .fillMaxHeight(0.86f)
-                    } else {
-                        Modifier
-                            .widthIn(max = 560.dp)
-                            .fillMaxWidth()
-                            .heightIn(min = 340.dp, max = 580.dp)
-                    }
-                )
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {}
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 18.dp, vertical = 10.dp)
-                    .navigationBarsPadding()
-            ) {
-                if (!isLandscape) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .sheetVerticalDragGesture()
-                            .padding(top = 4.dp, bottom = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(38.dp)
-                                .height(4.dp)
-                                .clip(CircleShape)
-                                .background(textSecondary.copy(alpha = 0.28f))
-                        )
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("听歌偏好与屏蔽名单", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = textPrimary)
-                        Text("调节推荐算法口味并管理已屏蔽的歌曲或歌手", fontSize = 11.5.sp, color = textSecondary)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Surface(
-                            shape = CircleShape,
-                            color = cardBg,
-                            modifier = Modifier.size(34.dp).softClickable(onClick = onRefresh)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (loading) {
-                                    CircularProgressIndicator(color = ConceptMintAccent, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-                                } else {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新", tint = textPrimary, modifier = Modifier.size(18.dp))
-                                }
-                            }
-                        }
-                        Surface(
-                            shape = CircleShape,
-                            color = cardBg,
-                            modifier = Modifier.size(34.dp).softClickable(onClick = requestDismiss)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = textSecondary, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("推荐口味模式", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = textSecondary)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf(
-                        0 to "默认平衡",
-                        1 to "偏好熟悉",
-                        2 to "更多尝鲜"
-                    ).forEach { (mode, label) ->
-                        val selected = preference.mode == mode
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (selected) ConceptMintAccent.copy(alpha = 0.18f) else cardBg,
-                            modifier = Modifier
-                                .weight(1f)
-                                .softCardClickable(shape = RoundedCornerShape(14.dp)) {
-                                    onSelectMode(mode)
-                                }
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    color = if (selected) ConceptMintAccent else textPrimary,
-                                    fontSize = 12.5.sp,
-                                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(14.dp))
-                Text(
-                    text = "已屏蔽内容（歌曲 ${blacklistedSongs.size} · 歌手 ${blacklistedSingers.size}）",
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = textSecondary
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                val combined = remember(blacklistedSongs, blacklistedSingers) {
-                    blacklistedSongs + blacklistedSingers
-                }
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (combined.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("暂未屏蔽任何歌曲或歌手", color = textSecondary, fontSize = 13.sp)
-                        }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(7.dp),
-                            contentPadding = PaddingValues(bottom = 12.dp)
-                        ) {
-                            itemsIndexed(
-                                items = combined,
-                                key = { idx, item -> "bl_${item.label}_${item.key}_$idx" }
-                            ) { _, entry ->
-                                Surface(
-                                    shape = RoundedCornerShape(13.dp),
-                                    color = cardBg,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 9.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = (if (entry.label == "singer") ConceptVioletAccent else ConceptCoralAccent).copy(alpha = 0.16f)
-                                        ) {
-                                            Text(
-                                                text = if (entry.label == "singer") "歌手" else "歌曲",
-                                                color = if (entry.label == "singer") ConceptVioletAccent else ConceptCoralAccent,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = entry.name.ifBlank { entry.key },
-                                            color = textPrimary,
-                                            fontSize = 13.5.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(
-                                            onClick = { onRemoveBlacklist(entry) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                        ) {
-                                            Text("移出", color = ConceptPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlaylistOrderSortSheet(
-    title: String,
-    playlists: List<Playlist>,
-    onSaveOrder: (List<Playlist>) -> Unit,
-    onDismiss: () -> Unit,
-    onDismissStart: () -> Unit = {}
-) {
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.screenWidthDp > configuration.screenHeightDp
-    val sheetBg = conceptSheetContainerColor()
-    val cardBg = conceptElevatedSurfaceColor()
-    val textPrimary = MaterialTheme.colorScheme.onSurface
-    val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
-    var workingList by remember(playlists) { mutableStateOf(playlists) }
-    var saving by remember { mutableStateOf(false) }
-
-    ConceptAnimatedOverlaySheet(
-        onDismiss = onDismiss,
-        onDismissStart = onDismissStart,
-        isLandscape = isLandscape,
-        zIndex = 88f
-    ) {
-        Surface(
-            shape = if (isLandscape) RoundedCornerShape(24.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            color = sheetBg,
-            contentColor = textPrimary,
-            shadowElevation = 24.dp,
-            modifier = Modifier
-                .then(
-                    if (isLandscape) {
-                        Modifier
-                            .padding(horizontal = 24.dp, vertical = 14.dp)
-                            .widthIn(max = 560.dp)
-                            .fillMaxWidth()
-                            .fillMaxHeight(0.84f)
-                    } else {
-                        Modifier
-                            .widthIn(max = 560.dp)
-                            .fillMaxWidth()
-                            .heightIn(min = 320.dp, max = 560.dp)
-                    }
-                )
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {}
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 18.dp, vertical = 10.dp)
-                    .navigationBarsPadding()
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(title, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, color = textPrimary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Button(
-                            enabled = !saving && workingList.isNotEmpty(),
-                            onClick = {
-                                saving = true
-                                onSaveOrder(workingList)
-                            },
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(if (saving) "同步中..." else "保存云端排序", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                        IconButton(onClick = requestDismiss, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = textSecondary, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
-                    contentPadding = PaddingValues(bottom = 12.dp)
-                ) {
-                    itemsIndexed(
-                        items = workingList,
-                        key = { _, pl -> "sort_pl_${pl.listId}_${pl.id}" }
-                    ) { idx, pl ->
-                        Surface(
-                            shape = RoundedCornerShape(13.dp),
-                            color = cardBg,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "${idx + 1}",
-                                    color = ConceptPrimary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.width(24.dp)
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = pl.title,
-                                        color = textPrimary,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "${pl.trackCount} 首歌曲",
-                                        color = textSecondary,
-                                        fontSize = 11.5.sp
-                                    )
-                                }
-                                IconButton(
-                                    enabled = idx > 0,
-                                    onClick = {
-                                        val next = workingList.toMutableList()
-                                        val item = next.removeAt(idx)
-                                        next.add(idx - 1, item)
-                                        workingList = next
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "上移", modifier = Modifier.size(20.dp))
-                                }
-                                IconButton(
-                                    enabled = idx < workingList.lastIndex,
-                                    onClick = {
-                                        val next = workingList.toMutableList()
-                                        val item = next.removeAt(idx)
-                                        next.add(idx + 1, item)
-                                        workingList = next
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "下移", modifier = Modifier.size(20.dp))
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }

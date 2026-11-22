@@ -485,8 +485,8 @@ class MusicApiRepository(
         }
     }
 
-    private suspend fun <T> auth(block: suspend (AccountContext) -> T): T {
-        val context = accounts.context() ?: throw ApiFailure(null, "请先登录")
+    internal suspend fun <T> auth(block: suspend (AccountContext) -> T): T {
+        val context = accounts.context() ?: throw ApiFailure(20010, "请先登录酷狗账号")
         return accounts.authenticated(context) { block(context) }
     }
 
@@ -529,6 +529,9 @@ class MusicApiRepository(
             headers = mapOf("x-router" to "cloudlist.service.kugou.com")
         ).requireSuccess()
 
+        val topTotalVer = response.data.text("total_ver")?.toLongOrNull()
+            ?: response.body.text("total_ver")?.toLongOrNull()
+            ?: 0L
         response.data.objects("info").filterNot { item -> item.number("is_def") == 1 || (item.text("name") ?: item.text("listname")).orEmpty().trim() == "默认收藏" }.map { item ->
             val name = item.text("name") ?: item.text("listname") ?: "未命名歌单"
             val listId = item.text("listid")?.toLongOrNull() ?: 0L
@@ -558,7 +561,7 @@ class MusicApiRepository(
                 isLiked = isDefault,
                 listId = listId,
                 globalCollectionId = global,
-                totalVersion = item.text("total_ver")?.toLongOrNull() ?: 0L,
+                totalVersion = item.text("total_ver")?.toLongOrNull()?.takeIf { it > 0L } ?: topTotalVer,
                 listCreateUserid = listCreateUserid,
                 listCreateListid = listCreateListid,
                 listCreateGid = listCreateGid
@@ -2055,7 +2058,12 @@ class MusicApiRepository(
         useAccompaniment: Boolean = false
     ): PlaybackResult {
         if (song.isCloudSong) {
-            return resolveUserCloudPlayback(song)
+            val cloudScope = accounts.context()?.session?.userId ?: "guest"
+            val cloudCacheKey = "cloud_${cloudScope}_${song.hash.trim().lowercase()}_cloud"
+            getValidCachedPlayback(cloudCacheKey)?.let { return it }
+            val cloudResult = resolveUserCloudPlayback(song)
+            putCachedPlayback(cloudCacheKey, cloudResult)
+            return cloudResult
         }
         val effectiveSong = if (useAccompaniment) {
             val accHash = song.accompanyHash.ifBlank { runCatching { matchAccompanyHash(song) }.getOrDefault("") }
@@ -2696,8 +2704,9 @@ class MusicApiRepository(
                     val fSize = (it.data.number("fileSize") ?: it.data.number("file_size") ?: 0).toLong()
                     val bRate = (it.data.number("bitRate") ?: it.data.number("bitrate") ?: 0).toLong()
                     val ext = it.data.text("extName") ?: it.data.text("extname")
-                    val respDurSec = (it.data.number("timeLength") ?: it.data.number("timelength") ?: 0).toLong()
-                    val effectiveDurMs = song.durationMs.takeIf { it > 0L } ?: if (respDurSec in 1..10000) respDurSec * 1000L else respDurSec
+                    val respDurRaw = (it.data.number("timeLength") ?: it.data.number("timelength") ?: 0).toLong()
+                    val respDurMs = if (respDurRaw in 1L..10_000L) respDurRaw * 1000L else respDurRaw
+                    val effectiveDurMs = song.durationMs.takeIf { it > 0L } ?: respDurMs
                     val reqTier = when (qualityParam.lowercase()) {
                         "high", "hires", "res" -> AudioQuality.HI_RES
                         "flac", "sq", "lossless" -> AudioQuality.LOSSLESS
@@ -2708,7 +2717,7 @@ class MusicApiRepository(
                     val (cStart, cEnd) = extractClimaxRange(it.data)
                     val isExplicitFreePart = (it.data.number("is_free_part") ?: it.data.number("IsFreePart") ?: 0) == 1 ||
                         (it.data.number("priv_status") ?: 0) == 5 ||
-                        (respDurSec in 1L..65L && song.durationMs >= 100_000L && respDurSec * 1000L < song.durationMs / 2L)
+                        (respDurMs in 1_000L..65_000L && song.durationMs >= 100_000L && respDurMs < song.durationMs / 2L)
                     return PlaybackResult(url, q, kbps, fSize, cStart, cEnd, isFreePart = isExplicitFreePart, resolvedHash = hashLower)
                 }
             }
@@ -8799,6 +8808,9 @@ class MusicApiRepository(
         if (serverLoc.isNotBlank()) {
             resolvedIpLocation = serverLoc
         }
+        if (specialChildId.isNotBlank() && specialChildId != "0") {
+            commentSpecialChildIdCache[commentId] = specialChildId
+        }
 
         return SongComment(
             id = commentId,
@@ -8814,6 +8826,7 @@ class MusicApiRepository(
             parentId = replyToCommentId,
             rootId = replyToCommentId,
             replyUserName = replyToUserName,
+            specialChildId = specialChildId.takeIf { it.isNotBlank() && it != "0" } ?: "",
             replyCount = 0,
             replies = emptyList()
         )

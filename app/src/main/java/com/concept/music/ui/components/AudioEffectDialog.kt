@@ -2129,7 +2129,9 @@ private fun EqFrequencyResponseCurveCanvas(
             val minLogF = kotlin.math.ln(20.0)
             val maxLogF = kotlin.math.ln(20000.0)
             for (idx in 0 until 10) {
-                val fc = AudioEffectManager.DEFAULT_TEN_BAND_HZ[idx].toDouble()
+                val fc = state.tenBandCenterHz.getOrElse(idx) { AudioEffectManager.DEFAULT_TEN_BAND_HZ[idx] }
+                    .toDouble()
+                    .coerceIn(20.0, 20000.0)
                 val xFrac = ((kotlin.math.ln(fc) - minLogF) / (maxLogF - minLogF)).toFloat().coerceIn(0.02f, 0.98f)
                 val gx = w * xFrac
                 drawLine(
@@ -2184,7 +2186,6 @@ private fun EqFrequencyResponseCurveCanvas(
             )
 
             // 3. 绘制 10 个频段的控制锚点（高亮当前选中的精调频段）
-            val bands = if (tenBandLevels.size == 10) tenBandLevels else List(10) { 0 }
             for (idx in 0 until 10) {
                 val fc = state.tenBandCenterHz.getOrElse(idx) { AudioEffectManager.DEFAULT_TEN_BAND_HZ[idx] }.toDouble().coerceIn(20.0, 20000.0)
                 val logXFrac = ((kotlin.math.ln(fc) - minLogF) / (maxLogF - minLogF)).toFloat().coerceIn(0.02f, 0.98f)

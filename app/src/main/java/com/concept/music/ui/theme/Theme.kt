@@ -26,6 +26,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.Interaction
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -366,6 +368,22 @@ fun conceptFloatingCardColor(): Color {
 @Composable
 fun conceptElevatedSurfaceColor(): Color {
     return if (LocalIsDarkTheme.current) ConceptElevatedCardDark else ConceptElevatedCardLight
+}
+
+/**
+ * 浅色模式 WCAG AA 高对比度语义青色（深色保持清透 ConceptCyanAccent，浅色降至深青 #00796B，确保文字/标签对比度 >= 4.5:1）
+ */
+@Composable
+fun conceptCyanAccentColor(): Color {
+    return if (LocalIsDarkTheme.current) ConceptCyanAccent else Color(0xFF00796B)
+}
+
+/**
+ * 浅色模式 WCAG AA 高对比度语义琥珀金色（深色保持 VipGold，浅色降至深金 #B87900）
+ */
+@Composable
+fun conceptGoldAccentColor(): Color {
+    return if (LocalIsDarkTheme.current) VipGold else Color(0xFFB87900)
 }
 
 /**
@@ -839,6 +857,7 @@ fun ConceptSlidingCategoryTabs(
     indicatorWidth: Dp = 20.dp,
     indicatorHeight: Dp = 3.dp,
     fillWidth: Boolean = true,
+    scrollable: Boolean = false,
     trailingContent: (@Composable RowScope.() -> Unit)? = null
 ) {
     if (tabs.isEmpty()) return
@@ -851,6 +870,20 @@ fun ConceptSlidingCategoryTabs(
     val tabCentersPx = remember(tabs.size) { FloatArray(tabs.size) }
     var rowWidthPx by remember(tabs.size) { mutableIntStateOf(0) }
     var layoutVersion by remember(tabs.size) { mutableIntStateOf(0) }
+    val scrollState = rememberScrollState()
+
+    // 可横向滚动模式下，选中项切换时自动平滑滚动到可见居中区域，避免窄屏/大字号下末尾 Tab 不可见
+    LaunchedEffect(selectedIndex, scrollable, layoutVersion) {
+        if (scrollable && selectedIndex in tabCentersPx.indices) {
+            val center = tabCentersPx[selectedIndex]
+            if (center > 0f && scrollState.maxValue > 0) {
+                val targetScroll = (center - (rowWidthPx - scrollState.maxValue) / 2f)
+                    .toInt()
+                    .coerceIn(0, scrollState.maxValue)
+                scrollState.animateScrollTo(targetScroll)
+            }
+        }
+    }
 
     // 判断是否为多色分类栏（如新歌速递为单色，排行榜/我的页/搜索页为多色）
     val isMultiColor = remember(tabs) {
@@ -885,7 +918,11 @@ fun ConceptSlidingCategoryTabs(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.Bottom
     ) {
-        Column(modifier = if (trailingContent != null) Modifier.weight(1f, fill = false) else Modifier) {
+        Column(
+            modifier = Modifier
+                .then(if (trailingContent != null) Modifier.weight(1f, fill = false) else Modifier)
+                .then(if (scrollable) Modifier.horizontalScroll(scrollState) else Modifier)
+        ) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(itemSpacing),
                 verticalAlignment = Alignment.Bottom,

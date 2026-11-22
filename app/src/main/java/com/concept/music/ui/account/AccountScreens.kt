@@ -13,18 +13,27 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -37,8 +46,14 @@ import coil.compose.AsyncImage
 import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.SavedAccount
 import com.concept.music.data.model.LoginDeviceItem
+import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
 import com.concept.music.ui.components.resolveDeviceIcon
+import com.concept.music.ui.theme.ConceptFluidRefreshIcon
 import com.concept.music.ui.theme.ConceptPrimary
+import com.concept.music.ui.theme.ConceptStageBackground
+import com.concept.music.ui.theme.conceptElevatedSurfaceColor
+import com.concept.music.ui.theme.conceptFloatingCardColor
+import com.concept.music.ui.theme.softClickable
 import com.concept.music.ui.viewmodel.LibraryViewModel
 import com.concept.music.util.SecurityGuards
 import kotlinx.coroutines.Dispatchers
@@ -183,15 +198,20 @@ private fun saveQr(context: Context, bitmap: Bitmap) {
     } catch (e: Exception) { resolver.delete(uri, null, null); throw e }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () -> Unit) {
     val context = LocalContext.current
     val state by viewModel.accountState.collectAsState()
     val loginDevices by viewModel.loginDevices.collectAsState()
     val loginDevicesLoading by viewModel.loginDevicesLoading.collectAsState()
+    val loginDevicesError by viewModel.loginDevicesError.collectAsState()
     var removing by remember { mutableStateOf<SavedAccount?>(null) }
     var kickingDevice by remember { mutableStateOf<LoginDeviceItem?>(null) }
+    var deviceRefreshSpin by remember { mutableIntStateOf(0) }
     val isLoggedIn = state.auth == AuthState.READY && !state.currentId.isNullOrBlank()
+    val cardBg = conceptFloatingCardColor()
+    val elevatedBg = conceptElevatedSurfaceColor()
 
     LaunchedEffect(state.currentId, state.auth) {
         if (isLoggedIn) {
@@ -199,143 +219,403 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
         }
     }
 
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) { LazyColumn(Modifier.widthIn(max = 640.dp).fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { TextButton(onClick = onBack) { Text("返回") }; Text("账号管理", style = MaterialTheme.typography.headlineMedium) }
-        item { Button(onClick = onLogin) { Text("添加账号") } }
-        if (state.accounts.isEmpty()) item { Text("还没有保存的账号") }
-        items(state.accounts, key = { it.userId }) { account ->
-            OutlinedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (account.avatarUrl.isNotBlank()) AsyncImage(account.avatarUrl, "头像", Modifier.size(44.dp))
-                        Column {
-                            Text(account.nickname, style = MaterialTheme.typography.titleMedium)
-                            Text("酷狗 ID：${account.userId}${if (account.userId == state.currentId) " · 当前账号" else ""}")
-                        }
-                    }
-                    if (account.needsLogin) Text("登录已失效", color = MaterialTheme.colorScheme.error)
-                    Row {
-                        if (account.userId != state.currentId) TextButton(onClick = { viewModel.selectAccount(account.userId) }) { Text("切换") }
-                        TextButton(onClick = onLogin) { Text("重新登录") }
-                        TextButton(onClick = { removing = account }) { Text(if (account.userId == state.currentId) "退出账号" else "移除") }
-                    }
-                }
-            }
-        }
-
-        if (isLoggedIn) {
-            item(key = "login_devices_header") {
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
+    ConceptStageBackground {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
                         Text(
-                            text = "已登录设备管理",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            text = "账号与设备管理",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold)
                         )
-                        Text(
-                            text = "支持查看同账号在线设备及跨设备续播来源，可安全移除非常用设备",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        enabled = !loginDevicesLoading,
-                        onClick = { viewModel.loadLoginDevices() }
-                    ) {
-                        if (loginDevicesLoading) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                        } else {
-                            Icon(Icons.Rounded.Refresh, contentDescription = "刷新登录设备")
-                        }
-                    }
-                }
-            }
-
-            if (loginDevices.isEmpty() && !loginDevicesLoading) {
-                item(key = "login_devices_empty") {
-                    OutlinedCard(Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "暂未查询到其他已登录设备（可点击右上角刷新重试）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    }
-                }
-            } else {
-                items(
-                    items = loginDevices,
-                    key = { dev -> "dev_${dev.mid}_${dev.deviceName}_${dev.t}" }
-                ) { device ->
-                    OutlinedCard(Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
                             Icon(
-                                imageVector = resolveDeviceIcon("${device.deviceName} ${device.platform}"),
-                                contentDescription = null,
-                                tint = if (device.isCurrentDevice) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(24.dp)
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "返回"
                             )
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        }
+                    },
+                    actions = {
+                        FilledTonalButton(
+                            onClick = onLogin,
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(end = 12.dp)
+                        ) {
+                            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("添加账号", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                )
+            },
+            containerColor = Color.Transparent
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .widthIn(max = 680.dp)
+                        .fillMaxSize(),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    item(key = "accounts_section_header") {
+                        Text(
+                            text = "已保存的酷狗账号",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                    }
+
+                    if (state.accounts.isEmpty()) {
+                        item(key = "accounts_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(22.dp),
+                                color = cardBg,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(22.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Text(
-                                        text = device.deviceName.ifBlank { "未知设备" },
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
+                                        text = "还没有保存的账号",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    if (device.isCurrentDevice) {
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = ConceptPrimary.copy(alpha = 0.16f)
+                                    Button(onClick = onLogin, shape = RoundedCornerShape(14.dp)) {
+                                        Text("立即登录酷狗账号", fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        items(state.accounts, key = { "acc_${it.userId}" }) { account ->
+                            val isCurrent = account.userId == state.currentId
+                            val avatarModel = rememberOptimizedAsyncImageModel(account.avatarUrl, sizePx = 128)
+                            Surface(
+                                shape = RoundedCornerShape(22.dp),
+                                color = cardBg,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .clip(CircleShape)
+                                                .background(ConceptPrimary.copy(alpha = 0.14f)),
+                                            contentAlignment = Alignment.Center
                                         ) {
+                                            if (avatarModel != null) {
+                                                AsyncImage(
+                                                    model = avatarModel,
+                                                    contentDescription = "头像",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            } else {
+                                                Icon(Icons.Rounded.Person, contentDescription = null, tint = ConceptPrimary)
+                                            }
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = account.nickname,
+                                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (isCurrent) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(8.dp),
+                                                        color = ConceptPrimary.copy(alpha = 0.16f)
+                                                    ) {
+                                                        Text(
+                                                            text = "当前使用",
+                                                            color = ConceptPrimary,
+                                                            fontSize = 10.5.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
                                             Text(
-                                                text = "本机",
-                                                color = ConceptPrimary,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                                text = "酷狗 ID：${account.userId}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    if (account.needsLogin) {
+                                        Text(
+                                            text = "当前登录凭证已失效，请重新登录",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (!isCurrent) {
+                                            FilledTonalButton(
+                                                onClick = { viewModel.selectAccount(account.userId) },
+                                                shape = RoundedCornerShape(12.dp),
+                                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                            ) {
+                                                Text("切换", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                        TextButton(onClick = onLogin) {
+                                            Text("重新登录", fontWeight = FontWeight.SemiBold)
+                                        }
+                                        TextButton(onClick = { removing = account }) {
+                                            Text(
+                                                text = if (isCurrent) "退出账号" else "移除",
+                                                color = MaterialTheme.colorScheme.error,
+                                                fontWeight = FontWeight.SemiBold
                                             )
                                         }
                                     }
                                 }
-                                val sub = listOfNotNull(
-                                    device.platform.takeIf { it.isNotBlank() },
-                                    device.loginTime.takeIf { it.isNotBlank() }?.let { "登录：$it" }
-                                ).joinToString(" · ").ifBlank { "MID: ${device.mid.take(12)}" }
-                                Text(
-                                    text = sub,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
                             }
-                            if (!device.isCurrentDevice) {
-                                TextButton(onClick = { kickingDevice = device }) {
-                                    Text("移出", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+
+                    if (isLoggedIn) {
+                        item(key = "login_devices_header") {
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "已登录设备管理",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
+                                    )
+                                    Text(
+                                        text = "查看同账号活跃设备与跨设备续播来源，可安全移除非常用设备",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Surface(
+                                    shape = CircleShape,
+                                    color = elevatedBg,
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .softClickable(enabled = !loginDevicesLoading) {
+                                            deviceRefreshSpin += 1
+                                            viewModel.loadLoginDevices()
+                                        }
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        ConceptFluidRefreshIcon(
+                                            tint = ConceptPrimary,
+                                            isRefreshing = loginDevicesLoading,
+                                            spinTrigger = deviceRefreshSpin,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (loginDevicesLoading && loginDevices.isEmpty()) {
+                            item(key = "login_devices_loading") {
+                                Surface(
+                                    shape = RoundedCornerShape(22.dp),
+                                    color = cardBg,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth().padding(28.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator(color = ConceptPrimary, strokeWidth = 2.5.dp, modifier = Modifier.size(26.dp))
+                                    }
+                                }
+                            }
+                        } else if (loginDevicesError != null && loginDevices.isEmpty()) {
+                            item(key = "login_devices_error") {
+                                Surface(
+                                    shape = RoundedCornerShape(22.dp),
+                                    color = cardBg,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.WifiOff,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(30.dp)
+                                        )
+                                        Text(
+                                            text = loginDevicesError ?: "获取登录设备列表失败",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Button(
+                                            onClick = {
+                                                deviceRefreshSpin += 1
+                                                viewModel.loadLoginDevices()
+                                            },
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            Text("重新加载", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (loginDevices.isEmpty()) {
+                            item(key = "login_devices_empty") {
+                                Surface(
+                                    shape = RoundedCornerShape(22.dp),
+                                    color = cardBg,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "暂未查询到其他已登录设备",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(onClick = {
+                                            deviceRefreshSpin += 1
+                                            viewModel.loadLoginDevices()
+                                        }) {
+                                            Text("刷新", fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            itemsIndexed(
+                                items = loginDevices,
+                                key = { idx, dev -> "dev_${idx}_${dev.mid}_${dev.t}" }
+                            ) { _, device ->
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = cardBg,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 13.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(42.dp)
+                                                .clip(RoundedCornerShape(13.dp))
+                                                .background(
+                                                    if (device.isCurrentDevice) ConceptPrimary.copy(alpha = 0.16f) else elevatedBg
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = resolveDeviceIcon("${device.deviceName} ${device.platform}"),
+                                                contentDescription = null,
+                                                tint = if (device.isCurrentDevice) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = device.deviceName.ifBlank { "未知设备" },
+                                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (device.isCurrentDevice) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(7.dp),
+                                                        color = ConceptPrimary.copy(alpha = 0.16f)
+                                                    ) {
+                                                        Text(
+                                                            text = "本机",
+                                                            color = ConceptPrimary,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            val sub = listOfNotNull(
+                                                device.platform.takeIf { it.isNotBlank() },
+                                                device.loginTime.takeIf { it.isNotBlank() }?.let { "最近活跃：$it" }
+                                            ).joinToString(" · ").ifBlank { "MID: ${device.mid.take(12)}" }
+                                            Text(
+                                                text = sub,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (!device.isCurrentDevice) {
+                                            TextButton(
+                                                onClick = { kickingDevice = device },
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                            ) {
+                                                Text("下线", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
+
+                    item(key = "accounts_nav_bar_pad") {
+                        Spacer(Modifier.navigationBarsPadding().height(16.dp))
+                    }
                 }
             }
-            item(key = "login_devices_bottom_pad") { Spacer(Modifier.height(48.dp)) }
         }
-    } }
+    }
     removing?.let { account -> AlertDialog(onDismissRequest = { removing = null }, title = { Text("移除账号？") },
         text = { Text("清除本机保存的 ${account.nickname} 的登录凭证和设置，其他账号保留。") },
         confirmButton = { TextButton(onClick = { viewModel.removeAccount(account.userId); removing = null }) { Text("移除") } },

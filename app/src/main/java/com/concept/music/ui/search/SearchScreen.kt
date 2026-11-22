@@ -32,9 +32,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -53,6 +56,7 @@ import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptStageBackground
 import com.concept.music.ui.theme.ConceptVioletAccent
 import com.concept.music.ui.theme.LocalIsDarkTheme
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import com.concept.music.ui.theme.conceptFloatingCardColor
 import com.concept.music.ui.theme.softCardClickable
@@ -195,9 +199,11 @@ fun SearchScreen(
                     onValueChange = viewModel::onQueryChange,
                     placeholder = {
                         Text(
-                            text = "搜索歌曲、歌手、专辑或粘贴酷狗分享链接...",
+                            text = "搜索歌曲、歌手、专辑、歌词或酷狗链接...",
                             fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     singleLine = true,
@@ -243,9 +249,10 @@ fun SearchScreen(
                 )
             }
 
-            // 开放式极简分类导航栏（综合 / 单曲 / 歌手 / 专辑 / 歌单）
+            // 开放式极简分类导航栏（综合 / 单曲 / 歌手 / 专辑 / 歌单 / 歌词）
             if (hasSearched && query.isNotEmpty()) {
-                val searchTabItems = remember {
+                val cyanAccent = conceptCyanAccentColor()
+                val searchTabItems = remember(cyanAccent) {
                     SearchTab.entries.map { tab ->
                         val tabAccent = when (tab) {
                             SearchTab.COMPLEX -> ConceptPrimary
@@ -253,7 +260,7 @@ fun SearchScreen(
                             SearchTab.ARTIST -> ConceptPrimary
                             SearchTab.ALBUM -> ConceptAmberAccent
                             SearchTab.PLAYLIST -> ConceptVioletAccent
-                            SearchTab.LYRIC -> ConceptCyanAccent
+                            SearchTab.LYRIC -> cyanAccent
                         }
                         ConceptCategoryTabItem(
                             key = tab.name,
@@ -269,10 +276,11 @@ fun SearchScreen(
                         onSelectTab = { name ->
                             runCatching { SearchTab.valueOf(name) }.getOrNull()?.let { viewModel.selectTab(it) }
                         },
-                        itemSpacing = 24.dp,
+                        itemSpacing = 18.dp,
                         fontSize = 14.5.sp,
                         indicatorWidth = 20.dp,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+                        scrollable = true,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
                     )
                     HorizontalDivider(
                         thickness = 0.5.dp,
@@ -637,72 +645,101 @@ fun SearchScreen(
                                     if (lyricResults.isEmpty()) {
                                         EmptySearchState(message = "未找到包含歌词“$displayKw”的歌曲")
                                     } else {
+                                        val lyricScope = rememberCoroutineScope()
                                         val latestLyricResults by rememberUpdatedState(lyricResults)
                                         val curPlayingId = currentSong?.id
                                         val curPlayingHash = currentSong?.hash.orEmpty()
-                                        LazyColumn(
-                                            state = lyricListState,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentPadding = PaddingValues(bottom = 112.dp)
-                                        ) {
-                                            itemsIndexed(
-                                                items = lyricResults,
-                                                key = { idx, s -> "search_lyric_${s.hash.ifBlank { s.id }}_$idx" },
-                                                contentType = { _, _ -> "lyric_song_row" }
-                                            ) { index, song ->
-                                                Column(modifier = Modifier.fillMaxWidth()) {
-                                                    SongItemRow(
-                                                        song = song,
-                                                        orderIndex = index + 1,
-                                                        isPlaying = curPlayingId != null && (curPlayingId == song.id || (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))),
-                                                        onClick = { onSongClick(song, latestLyricResults) },
-                                                        onMoreClick = { onSongMoreClick(song) }
-                                                    )
-                                                    if (song.matchedLyricSnippet.isNotBlank()) {
-                                                        Surface(
-                                                            shape = RoundedCornerShape(10.dp),
-                                                            color = ConceptCyanAccent.copy(alpha = 0.09f),
+                                        val cyanAccent = conceptCyanAccentColor()
+                                        val showLyricScrollTop by remember(lyricResults.size) {
+                                            derivedStateOf {
+                                                lyricListState.firstVisibleItemIndex > 2 ||
+                                                    (lyricListState.firstVisibleItemIndex == 2 && lyricListState.firstVisibleItemScrollOffset > 100)
+                                            }
+                                        }
+                                        Box(modifier = Modifier.fillMaxSize()) {
+                                            LazyColumn(
+                                                state = lyricListState,
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentPadding = PaddingValues(bottom = 112.dp)
+                                            ) {
+                                                if (adaptiveInfo.useTwoColumnSongOrCardGrid) {
+                                                    val pairs = lyricResults.chunked(2)
+                                                    itemsIndexed(
+                                                        items = pairs,
+                                                        key = { idx, pair -> "search_lyric_pair_${pair.first().hash.ifBlank { pair.first().id }}_$idx" },
+                                                        contentType = { _, _ -> "lyric_song_pair" }
+                                                    ) { pairIdx, pair ->
+                                                        Row(
                                                             modifier = Modifier
                                                                 .fillMaxWidth()
-                                                                .padding(start = 52.dp, end = 16.dp, bottom = 8.dp)
-                                                                .softCardClickable(shape = RoundedCornerShape(10.dp)) {
-                                                                    onSongClick(song, latestLyricResults)
-                                                                }
+                                                                .padding(horizontal = 8.dp),
+                                                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                                                         ) {
-                                                            Row(
-                                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                                verticalAlignment = Alignment.CenterVertically,
-                                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Rounded.FormatQuote,
-                                                                    contentDescription = null,
-                                                                    tint = ConceptCyanAccent,
-                                                                    modifier = Modifier.size(14.dp)
-                                                                )
-                                                                Text(
-                                                                    text = song.matchedLyricSnippet,
-                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                                    fontSize = 12.sp,
-                                                                    lineHeight = 16.sp,
-                                                                    maxLines = 2,
-                                                                    overflow = TextOverflow.Ellipsis
-                                                                )
+                                                            pair.forEachIndexed { colIdx, song ->
+                                                                val orderNo = pairIdx * 2 + colIdx + 1
+                                                                val isPlaying = curPlayingId != null && (
+                                                                    curPlayingId == song.id ||
+                                                                        (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))
+                                                                    )
+                                                                Box(modifier = Modifier.weight(1f)) {
+                                                                    LyricSearchResultItem(
+                                                                        song = song,
+                                                                        orderIndex = orderNo,
+                                                                        keyword = displayKw,
+                                                                        cyanAccent = cyanAccent,
+                                                                        isPlaying = isPlaying,
+                                                                        onClick = { onSongClick(song, latestLyricResults) },
+                                                                        onMoreClick = { onSongMoreClick(song) }
+                                                                    )
+                                                                }
                                                             }
+                                                            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
+                                                        }
+                                                    }
+                                                } else {
+                                                    itemsIndexed(
+                                                        items = lyricResults,
+                                                        key = { idx, s -> "search_lyric_${s.hash.ifBlank { s.id }}_$idx" },
+                                                        contentType = { _, _ -> "lyric_song_row" }
+                                                    ) { index, song ->
+                                                        val isPlaying = curPlayingId != null && (
+                                                            curPlayingId == song.id ||
+                                                                (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))
+                                                            )
+                                                        LyricSearchResultItem(
+                                                            song = song,
+                                                            orderIndex = index + 1,
+                                                            keyword = displayKw,
+                                                            cyanAccent = cyanAccent,
+                                                            isPlaying = isPlaying,
+                                                            onClick = { onSongClick(song, latestLyricResults) },
+                                                            onMoreClick = { onSongMoreClick(song) }
+                                                        )
+                                                    }
+                                                }
+                                                if (loadingMore) {
+                                                    item {
+                                                        Box(
+                                                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
+                                                            CircularProgressIndicator(color = cyanAccent, modifier = Modifier.size(24.dp))
                                                         }
                                                     }
                                                 }
                                             }
-                                            if (loadingMore) {
-                                                item {
-                                                    Box(
-                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        CircularProgressIndicator(color = ConceptCyanAccent, modifier = Modifier.size(24.dp))
+                                            FloatingScrollToTopButton(
+                                                visible = showLyricScrollTop,
+                                                onClick = {
+                                                    lyricScope.launch {
+                                                        lyricListState.smoothFastScrollToItem(0)
                                                     }
-                                                }
-                                            }
+                                                },
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomEnd)
+                                                    .navigationBarsPadding()
+                                                    .padding(end = 18.dp, bottom = 104.dp)
+                                            )
                                         }
                                     }
                                 }
@@ -1807,6 +1844,101 @@ private fun EmptySearchState(message: String) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             )
+        }
+    }
+}
+
+@Composable
+private fun LyricSearchResultItem(
+    song: Song,
+    orderIndex: Int,
+    keyword: String,
+    cyanAccent: Color,
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    onMoreClick: () -> Unit
+) {
+    val snippet = song.matchedLyricSnippet
+    val highlightedSnippet = remember(snippet, keyword, cyanAccent) {
+        buildAnnotatedString {
+            val kw = keyword.trim()
+            if (snippet.isBlank() || kw.isBlank()) {
+                append(snippet)
+            } else {
+                val tokens = kw.split(Regex("\\s+")).filter { it.isNotBlank() }.distinct()
+                val lower = snippet.lowercase()
+                val matchedMask = BooleanArray(snippet.length)
+                tokens.forEach { token ->
+                    val lowerToken = token.lowercase()
+                    var start = 0
+                    while (true) {
+                        val idx = lower.indexOf(lowerToken, startIndex = start)
+                        if (idx < 0) break
+                        for (i in idx until (idx + lowerToken.length).coerceAtMost(snippet.length)) {
+                            matchedMask[i] = true
+                        }
+                        start = idx + lowerToken.length
+                    }
+                }
+                var i = 0
+                while (i < snippet.length) {
+                    val isHit = matchedMask[i]
+                    var j = i + 1
+                    while (j < snippet.length && matchedMask[j] == isHit) {
+                        j++
+                    }
+                    val seg = snippet.substring(i, j)
+                    if (isHit) {
+                        withStyle(SpanStyle(color = cyanAccent, fontWeight = FontWeight.ExtraBold)) {
+                            append(seg)
+                        }
+                    } else {
+                        append(seg)
+                    }
+                    i = j
+                }
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SongItemRow(
+            song = song,
+            orderIndex = orderIndex,
+            isPlaying = isPlaying,
+            onClick = onClick,
+            onMoreClick = onMoreClick
+        )
+        if (snippet.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = cyanAccent.copy(alpha = 0.09f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
+                    .softCardClickable(shape = RoundedCornerShape(12.dp), onClick = onClick)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.FormatQuote,
+                        contentDescription = null,
+                        tint = cyanAccent,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = highlightedSnippet,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
         }
     }
 }

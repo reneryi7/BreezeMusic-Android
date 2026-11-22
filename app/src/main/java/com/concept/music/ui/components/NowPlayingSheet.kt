@@ -674,17 +674,6 @@ fun NowPlayingSheet(
         label = "activeTertiaryAccent"
     )
 
-    val coverDynamicPrimary by animateColorAsState(
-        targetValue = extractedPalette.dominantAccent,
-        animationSpec = tween(durationMillis = 700, easing = FastOutSlowInEasing),
-        label = "coverDynamicPrimary"
-    )
-    val coverDynamicSecondary by animateColorAsState(
-        targetValue = extractedPalette.secondaryAccent,
-        animationSpec = tween(durationMillis = 700, easing = FastOutSlowInEasing),
-        label = "coverDynamicSecondary"
-    )
-
     // 将播放页当前实时计算的封面随动可读高亮色（受 dynamicCoverAccentEnabled 统一约束）同步至桌面歌词
     val syncedDesktopPrimary = remember(activeAccentColor) {
         activeAccentColor.readableOnDarkSurface(minLuminance = 0.46f)
@@ -1195,7 +1184,6 @@ fun NowPlayingSheet(
             },
             onAddToNext = { targetSong ->
                 onAddVersionToNext(targetSong)
-                Toast.makeText(context, "已加入下一首播放", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showSongVersionsSheet = false }
         )

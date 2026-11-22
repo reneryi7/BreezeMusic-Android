@@ -63,7 +63,12 @@ object AmbientSoundManager {
     private var appContext: Context? = null
     private var prefs: SharedPreferences? = null
     private var synthJob: Job? = null
+
+    @Volatile
     private var isMusicCurrentlyPlaying: Boolean = false
+
+    @Volatile
+    private var appMusicStartingUntilMs: Long = 0L
 
     @Volatile
     private var focusPaused: Boolean = false
@@ -79,8 +84,9 @@ object AmbientSoundManager {
     private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
-                // 若是本应用自身播放器启动抢焦（如心流舱双联动或独立开白噪音后播放音乐），不自杀关闭白噪音
-                if (coexistWithAppMusic || isMusicCurrentlyPlaying || PlaybackService.isAppPlaybackActive) {
+                val appMusicStarting = System.currentTimeMillis() < appMusicStartingUntilMs
+                // 仅当是本应用自身播放器启动/播放导致的焦点切换时保留白噪音共存；外部应用抢焦时正常让出
+                if (appMusicStarting || isMusicCurrentlyPlaying || PlaybackService.isAppPlaybackActive) {
                     focusPaused = false
                     focusDucked = false
                     requestStandaloneAudioFocusIfNeeded(false)
@@ -124,7 +130,19 @@ object AmbientSoundManager {
         evaluateEngineLoop()
     }
 
+    /**
+     * 在本应用音乐播放器即将发起播放并向系统申请音频焦点前主动调用：
+     * 提前放弃白噪音的独立音频焦点并标记 3 秒保护窗口，防止 ExoPlayer 抢焦触发 AUDIOFOCUS_LOSS 误杀白噪音。
+     */
+    fun prepareForAppMusicPlayback() {
+        appMusicStartingUntilMs = System.currentTimeMillis() + 3_000L
+        requestStandaloneAudioFocusIfNeeded(false)
+    }
+
     fun onMusicPlayStateChanged(isPlaying: Boolean) {
+        if (isPlaying) {
+            appMusicStartingUntilMs = 0L
+        }
         if (isMusicCurrentlyPlaying == isPlaying) return
         isMusicCurrentlyPlaying = isPlaying
         evaluateEngineLoop()

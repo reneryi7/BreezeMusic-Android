@@ -30,6 +30,7 @@ object NetworkClientProvider {
 
     private val SENSITIVE_QUERY_KEYS = setOf(
         "token",
+        "clienttoken",
         "vip_token",
         "viptoken",
         "p3",
@@ -546,54 +547,61 @@ class DirectKugouTransport(
         }
         params.putAll(query)
         val bodyBytes = rawBodyBytes ?: ByteArray(0)
-        if (sign) params["signature"] = KugouSigner.signature(params, "", false)
-        val originalHostName = runCatching { host.toHttpUrl().host.lowercase(Locale.ROOT) }.getOrDefault("")
+        if (sign) {
+            val bodyForSign = if (bodyBytes.isNotEmpty()) String(bodyBytes, Charsets.ISO_8859_1) else ""
+            params["signature"] = KugouSigner.signature(params, bodyForSign, false)
+        }
         val safeHost = enforceHttpsForSensitiveHost(host, session, params, if (bodyBytes.isNotEmpty()) JsonObject().apply { addProperty("params", "1") } else null)
-        val safeHostName = runCatching { safeHost.toHttpUrl().host.lowercase(Locale.ROOT) }.getOrDefault("")
-        val effectiveHeaders = if (safeHostName == "gateway.kugou.com" &&
-            originalHostName.isNotBlank() &&
-            originalHostName != "gateway.kugou.com" &&
-            headers.keys.none { it.equals("x-router", ignoreCase = true) }
-        ) {
-            LinkedHashMap(headers).apply { put("x-router", originalHostName) }
-        } else {
-            headers
-        }
-        val url = safeHost.toHttpUrl().newBuilder().addPathSegments(path.trimStart('/')).apply {
-            params.forEach { (key, value) -> addQueryParameter(key, value) }
-        }.build()
-        val contentType = effectiveHeaders.entries.firstOrNull { it.key.equals("content-type", ignoreCase = true) }?.value ?: "application/octet-stream"
+        val hasSensitiveCreds = hasSensitiveCredentials(session, params, if (bodyBytes.isNotEmpty()) JsonObject().apply { addProperty("params", "1") } else null)
+        val candidates = buildCandidateEndpoints(
+            rawHost = safeHost,
+            baseHeaders = headers,
+            allowCleartextFallback = !hasSensitiveCreds
+        )
         val isBodylessMethod = method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
-        val request = Request.Builder().url(url)
-            .header("User-Agent", "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi")
-            .header("dfid", d.dfid).header("mid", d.mid).header("clienttime", params["clienttime"] ?: clock.instant().epochSecond.toString())
-            .header("kg-rc", "1").header("kg-thash", "5d816a0").header("kg-rec", "1")
-            .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
-            .apply { effectiveHeaders.forEach { (key, value) -> header(key, value) } }
-            .method(method, if (isBodylessMethod) null else bodyBytes.toRequestBody(contentType.toMediaType()))
-            .build()
-        suspendCancellableCoroutine { continuation ->
-            val call = client.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(IOException("网络连接失败，请检查网络后重试", e))
-                }
-                override fun onResponse(call: Call, response: Response) {
-                    response.use {
-                        try {
-                            if (!it.isSuccessful) {
-                                throw IOException("HTTP ${it.code} for ${url.encodedPath}")
-                            }
-                            val bytes = SecurityGuards.readBoundedBytes(it.body, SecurityGuards.MAX_API_RESPONSE_BYTES)
-                            if (continuation.isActive) continuation.resume(bytes)
-                        } catch (e: Exception) {
-                            val ioEx = e as? IOException ?: IOException("酷狗响应读取失败", e)
-                            if (continuation.isActive) continuation.resumeWithException(ioEx)
+        var lastException: IOException? = null
+
+        for ((candidateHost, candidateHeaders) in candidates) {
+            val url = candidateHost.toHttpUrl().newBuilder().addPathSegments(path.trimStart('/')).apply {
+                params.forEach { (key, value) -> addQueryParameter(key, value) }
+            }.build()
+            val contentType = candidateHeaders.entries.firstOrNull { it.key.equals("content-type", ignoreCase = true) }?.value ?: "application/octet-stream"
+            val request = Request.Builder().url(url)
+                .header("User-Agent", "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi")
+                .header("dfid", d.dfid).header("mid", d.mid).header("clienttime", params["clienttime"] ?: clock.instant().epochSecond.toString())
+                .header("kg-rc", "1").header("kg-thash", "5d816a0").header("kg-rec", "1")
+                .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
+                .apply { candidateHeaders.forEach { (key, value) -> header(key, value) } }
+                .method(method, if (isBodylessMethod) null else bodyBytes.toRequestBody(contentType.toMediaType()))
+                .build()
+            try {
+                return@withContext suspendCancellableCoroutine { continuation ->
+                    val call = client.newCall(request)
+                    continuation.invokeOnCancellation { call.cancel() }
+                    call.enqueue(object : Callback {
+                        override fun onFailure(call: Call, e: IOException) {
+                            if (continuation.isActive) continuation.resumeWithException(IOException("网络连接失败，请检查网络后重试", e))
                         }
-                    }
+                        override fun onResponse(call: Call, response: Response) {
+                            response.use {
+                                try {
+                                    if (!it.isSuccessful) {
+                                        throw IOException("HTTP ${it.code} for ${url.encodedPath}")
+                                    }
+                                    val bytes = SecurityGuards.readBoundedBytes(it.body, SecurityGuards.MAX_API_RESPONSE_BYTES)
+                                    if (continuation.isActive) continuation.resume(bytes)
+                                } catch (e: Exception) {
+                                    val ioEx = e as? IOException ?: IOException("酷狗响应读取失败", e)
+                                    if (continuation.isActive) continuation.resumeWithException(ioEx)
+                                }
+                            }
+                        }
+                    })
                 }
-            })
+            } catch (e: IOException) {
+                lastException = e
+            }
         }
+        throw lastException ?: IOException("网络连接失败，请检查网络后重试")
     }
 }

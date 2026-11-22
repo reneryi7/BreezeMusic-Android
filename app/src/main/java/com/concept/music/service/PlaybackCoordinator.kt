@@ -185,6 +185,7 @@ object PlaybackCoordinator {
             } else if (activePlayer.playbackState == Player.STATE_IDLE) {
                 activePlayer.prepare()
             }
+            AmbientSoundManager.prepareForAppMusicPlayback()
             activePlayer.play()
             AmbientSoundManager.onMusicPlayStateChanged(true)
             ConceptMusicWidgetUpdater.updateState(context.applicationContext, isPlaying = true)
@@ -194,10 +195,10 @@ object PlaybackCoordinator {
     }
 
     fun handleExplicitPlay(context: Context, player: Player?): Boolean {
-        if (player?.isPlaying == true) return true
         onExplicitPlayDelegate?.let { delegate ->
             if (delegate()) return true
         }
+        if (player?.isPlaying == true) return true
         return handleResumeOnHeadsetConnected(context, player)
     }
 
@@ -352,18 +353,22 @@ object PlaybackCoordinator {
                 } else {
                     Player.REPEAT_MODE_OFF
                 }
+                AmbientSoundManager.prepareForAppMusicPlayback()
                 player.prepare()
                 player.play()
-                // 异步同步云端播放历史，确保跨设备继续播放队列及时更新
-                mainScope.launch(Dispatchers.IO) {
-                    runCatching { VipManager.music.uploadPlayHistory(targetSong) }
+                // 异步同步云端播放历史（排除云盘本地文件），确保跨设备继续播放队列及时更新
+                if (!targetSong.isCloudSong) {
+                    mainScope.launch(Dispatchers.IO) {
+                        runCatching { VipManager.music.uploadPlayHistory(targetSong) }
+                    }
                 }
                 AmbientSoundManager.onMusicPlayStateChanged(true)
                 ConceptMusicWidgetUpdater.updateState(
                     context = appCtx,
                     songTitle = targetSong.title,
                     artist = targetSong.artist,
-                    isPlaying = true
+                    isPlaying = true,
+                    lyricLine = ""
                 )
                 SystemLyricBridge.updatePlaybackSnapshot(
                     song = targetSong,
@@ -376,7 +381,7 @@ object PlaybackCoordinator {
                 val fetchedLyric = withContext(Dispatchers.IO) {
                     suspendRunCatching { VipManager.lyric.getLyric(targetSong) }.getOrNull()
                 } ?: com.concept.music.data.model.LyricData.Empty
-                val livePos = player.currentPosition.coerceAtLeast(0L)
+                val livePos = (player.currentPosition + SystemLyricBridge.lyricOffsetMsSnapshot).coerceAtLeast(0L)
                 val lineIdx = if (fetchedLyric.lines.isNotEmpty()) fetchedLyric.getLineIndexAt(livePos) else -1
                 SystemLyricBridge.updatePlaybackSnapshot(
                     song = targetSong,

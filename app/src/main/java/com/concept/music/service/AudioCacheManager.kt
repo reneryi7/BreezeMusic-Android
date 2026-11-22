@@ -101,7 +101,7 @@ object AudioCacheManager {
     /**
      * 支持运行时热更新容量上限的 LRU 淘汰器：修改缓存上限后无需重启应用立即按新阈值淘汰。
      */
-    private class DynamicLruCacheEvictor(initialMaxBytes: Long) : CacheEvictor {
+    internal class DynamicLruCacheEvictor(initialMaxBytes: Long) : CacheEvictor {
         @Volatile
         var maxBytes: Long = initialMaxBytes.coerceAtLeast(64L * 1024L * 1024L)
 
@@ -119,40 +119,47 @@ object AudioCacheManager {
 
         override fun onCacheInitialized() = Unit
 
-        @Synchronized
         override fun onStartFile(cache: Cache, key: String, position: Long, length: Long) {
             if (length != androidx.media3.common.C.LENGTH_UNSET.toLong()) {
                 evictCache(cache, length)
             }
         }
 
-        @Synchronized
         override fun onSpanAdded(cache: Cache, span: CacheSpan) {
             leastRecentlyUsed.add(span)
             currentSize += span.length
             evictCache(cache, 0L)
         }
 
-        @Synchronized
         override fun onSpanRemoved(cache: Cache, span: CacheSpan) {
-            leastRecentlyUsed.remove(span)
-            currentSize = (currentSize - span.length).coerceAtLeast(0L)
+            if (leastRecentlyUsed.remove(span)) {
+                currentSize = (currentSize - span.length).coerceAtLeast(0L)
+            }
         }
 
-        @Synchronized
         override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) {
             onSpanRemoved(cache, oldSpan)
             onSpanAdded(cache, newSpan)
         }
 
-        @Synchronized
+        /**
+         * 严格遵循 Media3 `SimpleCache` 单一锁约定（始终在持有 SimpleCache 锁的回调上下文内调用，不额外加锁，
+         * 彻底规避 `SimpleCache <-> Evictor` AB-BA 死锁），并基于淘汰前后状态进展判定防死循环。
+         */
         fun evictCache(cache: Cache, requiredSpace: Long) {
             val limit = maxBytes
             while (currentSize + requiredSpace > limit && leastRecentlyUsed.isNotEmpty()) {
                 val oldest = leastRecentlyUsed.first()
+                val sizeBefore = currentSize
                 runCatching { cache.removeSpan(oldest) }
-                if (!leastRecentlyUsed.remove(oldest)) {
-                    break
+                // 正常情况下 cache.removeSpan(oldest) 会同步触发 onSpanRemoved 移出 oldest 并扣减 currentSize；
+                // 若因分片被锁或异常未能触发 onSpanRemoved，则主动剔除追踪并同步扣减体积防止死循环与体积漂移
+                if (leastRecentlyUsed.isNotEmpty() && leastRecentlyUsed.first() === oldest && currentSize == sizeBefore) {
+                    if (leastRecentlyUsed.remove(oldest)) {
+                        currentSize = (currentSize - oldest.length).coerceAtLeast(0L)
+                    } else {
+                        break
+                    }
                 }
             }
         }
@@ -195,7 +202,7 @@ object AudioCacheManager {
             runCatching {
                 val cache = getCache(appCtx)
                 activeEvictor?.maxBytes = limit.maxBytes
-                activeEvictor?.evictCache(cache, 0L)
+                // 仅通过 SimpleCache 外部入口裁剪，先获取 SimpleCache 锁再回调 Evictor，彻底杜绝 AB-BA 死锁
                 trimCacheToLimit(cache, limit.maxBytes)
             }
             refreshCacheSize(appCtx)

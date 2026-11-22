@@ -30,12 +30,119 @@ private const val COMMENT_CODE_ALBUM = "94f1792ced1df89aa68a7939eaf2efca"
 private const val COMMENT_CODE_PLAYLIST = "ca53b96fe5a1d9c22d71c8f522ef7c4f"
 
 private val htmlTagStripRegex = Regex("<[^>]+>")
+private val audioExtensionSuffixRegex = Regex(
+    "\\.(mp3|flac|wav|m4a|aac|ogg|ape|dsf|dff|wma|alac|opus)$",
+    RegexOption.IGNORE_CASE
+)
+private val hex32HashRegex = Regex("^[0-9a-fA-F]{32}$")
+
+private fun Song.allLowercaseHashes(): Set<String> = buildSet {
+    listOf(hash, hash128, mp3Hash128, hash320, hashFlac, hashHiRes).forEach { h ->
+        val clean = h.trim().lowercase(Locale.ROOT)
+        if (clean.isNotEmpty()) add(clean)
+    }
+}
+
+/**
+ * 进程内跨 ViewModel 实时共享的推荐黑名单过滤器：
+ * 当用户在发现页 FM 负反馈、播放页/操作面板屏蔽歌曲或歌手、或在黑名单管理页移除条目时实时同步，
+ * 确保客户端 FM 与日推列表立刻生效且重启/切号不串号。
+ */
+object LocalBlacklistFilter {
+    private val blockedSongHashes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val blockedSongMixIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val blockedArtistIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val blockedArtistNames = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun clear() {
+        blockedSongHashes.clear()
+        blockedSongMixIds.clear()
+        blockedArtistIds.clear()
+        blockedArtistNames.clear()
+    }
+
+    fun syncFromEntries(songs: List<BlacklistEntry>, singers: List<BlacklistEntry>) {
+        blockedSongHashes.clear()
+        blockedSongMixIds.clear()
+        songs.forEach { entry ->
+            val k = entry.key.trim().lowercase(Locale.ROOT)
+            if (k.isNotEmpty()) blockedSongHashes.add(k)
+            val m = entry.mixSongId.trim()
+            if (m.isNotEmpty()) blockedSongMixIds.add(m)
+        }
+        blockedArtistIds.clear()
+        blockedArtistNames.clear()
+        singers.forEach { entry ->
+            val k = entry.key.trim()
+            if (k.isNotEmpty()) blockedArtistIds.add(k)
+            val n = entry.name.trim().lowercase(Locale.ROOT)
+            if (n.isNotEmpty()) blockedArtistNames.add(n)
+        }
+    }
+
+    fun addSong(song: Song) {
+        listOf(song.hash, song.hash128, song.mp3Hash128, song.hash320, song.hashFlac, song.hashHiRes)
+            .forEach { h ->
+                val clean = h.trim().lowercase(Locale.ROOT)
+                if (clean.isNotEmpty()) blockedSongHashes.add(clean)
+            }
+        song.mixSongId.trim().takeIf { it.isNotEmpty() }?.let { blockedSongMixIds.add(it) }
+        song.albumAudioId.takeIf { it > 0L }?.toString()?.let { blockedSongMixIds.add(it) }
+    }
+
+    fun removeSongEntry(entry: BlacklistEntry) {
+        val k = entry.key.trim().lowercase(Locale.ROOT)
+        if (k.isNotEmpty()) blockedSongHashes.remove(k)
+        entry.mixSongId.trim().takeIf { it.isNotEmpty() }?.let { blockedSongMixIds.remove(it) }
+    }
+
+    fun addArtist(artistId: String, artistName: String) {
+        artistId.trim().takeIf { it.isNotEmpty() }?.let { blockedArtistIds.add(it) }
+        artistName.trim().lowercase(Locale.ROOT).takeIf { it.isNotEmpty() }?.let { blockedArtistNames.add(it) }
+    }
+
+    fun removeArtistEntry(entry: BlacklistEntry) {
+        entry.key.trim().takeIf { it.isNotEmpty() }?.let { blockedArtistIds.remove(it) }
+        entry.name.trim().lowercase(Locale.ROOT).takeIf { it.isNotEmpty() }?.let { blockedArtistNames.remove(it) }
+    }
+
+    fun isBlocked(song: Song): Boolean {
+        if (blockedSongHashes.isEmpty() && blockedSongMixIds.isEmpty() &&
+            blockedArtistIds.isEmpty() && blockedArtistNames.isEmpty()
+        ) return false
+        val hashes = listOf(song.hash, song.hash128, song.mp3Hash128, song.hash320, song.hashFlac, song.hashHiRes)
+        if (hashes.any { it.isNotBlank() && it.trim().lowercase(Locale.ROOT) in blockedSongHashes }) {
+            return true
+        }
+        val mix = song.mixSongId.trim()
+        if (mix.isNotEmpty() && mix in blockedSongMixIds) return true
+        if (song.albumAudioId > 0L && song.albumAudioId.toString() in blockedSongMixIds) return true
+        val aid = song.artistId.trim()
+        if (aid.isNotEmpty() && aid in blockedArtistIds) return true
+        if (blockedArtistNames.isNotEmpty() && song.artist.isNotBlank()) {
+            val singers = song.artist.split("、", "/", ",", "&").map { it.trim().lowercase(Locale.ROOT) }
+            if (singers.any { it.isNotEmpty() && it in blockedArtistNames }) return true
+        }
+        return false
+    }
+
+    fun filterSongs(songs: List<Song>): List<Song> {
+        if (songs.isEmpty()) return songs
+        return songs.filterNot(::isBlocked)
+    }
+}
+
+private fun stripKnownAudioExtension(raw: String): String =
+    audioExtensionSuffixRegex.replace(raw.trim(), "").trim()
 
 private fun CommentTargetType.commentPoolCode(): String = when (this) {
     CommentTargetType.SONG -> COMMENT_CODE_SONG
     CommentTargetType.PLAYLIST -> COMMENT_CODE_PLAYLIST
     CommentTargetType.ALBUM -> COMMENT_CODE_ALBUM
 }
+
+private fun ApiResponse.errorMsg(fallback: String = "登录已过期"): String =
+    body.text("error_msg") ?: body.text("msg") ?: body.text("message") ?: fallback
 
 private fun JsonObject.longVal(key: String): Long? {
     val el = get(key)?.takeIf { it.isJsonPrimitive } ?: return null
@@ -92,17 +199,22 @@ internal fun normalizeCrossDeviceSource(rawSource: String?, rawDeviceName: Strin
     return sourceType to label
 }
 
-private fun decodeEncryptedJsonResponse(rawBytes: ByteArray, aesKey: String): JsonObject? {
+internal fun decodeEncryptedJsonResponse(rawBytes: ByteArray, aesKey: String): JsonObject? {
     if (rawBytes.isEmpty()) return null
     val utf8Text = String(rawBytes, Charsets.UTF_8).trim()
-    val plain = if (utf8Text.startsWith("{") || utf8Text.startsWith("[")) {
-        utf8Text
-    } else {
-        runCatching { KugouSigner.playlistAesDecrypt(rawBytes, aesKey) }
-            .getOrElse {
-                runCatching { KugouSigner.playlistAesDecrypt(aesKey, utf8Text) }.getOrDefault(utf8Text)
-            }
-    }.trim()
+    // 先尝试按合法明文 JSONObject 解析（避免仅靠首字节 '{'/'[' 误判，消除 ~0.78% 原始 AES 密文首字节碰撞）
+    if (utf8Text.startsWith("{")) {
+        val directObj = runCatching {
+            val parsed = JsonParser.parseString(utf8Text)
+            if (parsed.isJsonObject) parsed.asJsonObject else null
+        }.getOrNull()
+        if (directObj != null) return directObj
+    }
+    val plain = runCatching { KugouSigner.playlistAesDecrypt(rawBytes, aesKey) }
+        .getOrElse {
+            runCatching { KugouSigner.playlistAesDecrypt(aesKey, utf8Text) }.getOrDefault(utf8Text)
+        }
+        .trim()
     return runCatching {
         val parsed = JsonParser.parseString(plain)
         if (parsed.isJsonObject) parsed.asJsonObject else null
@@ -110,16 +222,20 @@ private fun decodeEncryptedJsonResponse(rawBytes: ByteArray, aesKey: String): Js
 }
 
 /**
- * 酷狗云歌单服务加密通用请求（严格对齐 MakcRe/KuGouMusicApi util/request.js: createCloudRequest）
+ * 酷狗云歌单服务加密通用请求（接入 accounts.authenticated 自动处理 20010 Token 续期）
  */
 internal suspend fun MusicApiRepository.callCloudListEncrypted(
     path: String,
     dataObj: JsonObject
-): JsonObject? {
-    val session = accounts.context()?.session ?: throw ApiFailure(20010, "请先登录酷狗账号")
+): JsonObject? = auth { ctx ->
+    val session = ctx.session
     val d = device()
     val clientTime = System.currentTimeMillis() / 1000
-    val (aesKey, cipherBytes) = KugouSigner.playlistAesEncryptBytes(KugouSigner.gson.toJson(dataObj))
+    val payloadObj = dataObj.deepCopy().apply {
+        if (!has("userid")) addProperty("userid", session.userId.toLongOrNull() ?: 0L)
+        if (!has("token")) addProperty("token", session.token)
+    }
+    val (aesKey, cipherBytes) = KugouSigner.playlistAesEncryptBytes(KugouSigner.gson.toJson(payloadObj))
     val uidLong = session.userId.toLongOrNull() ?: 0L
     val portraitJson = KugouSigner.gson.toJson(
         mapOf(
@@ -135,13 +251,15 @@ internal suspend fun MusicApiRepository.callCloudListEncrypted(
         "clientver" to KugouSigner.CLIENT_VERSION.toString(),
         "mid" to d.mid,
         "clienttime" to clientTime.toString(),
+        "last_time" to clientTime.toString(),
+        "last_area" to "gztx",
         "key" to key,
         "dfid" to d.dfid,
         "p" to portrait
     )
     val headers = mapOf(
         "x-router" to "cloudlist.service.kugou.com",
-        "Content-Type" to "application/json;charset=utf-8"
+        "Content-Type" to "application/octet-stream"
     )
     val rawBytes = transport.requestBinaryBytes(
         path = path,
@@ -155,7 +273,12 @@ internal suspend fun MusicApiRepository.callCloudListEncrypted(
         includeDefaultParams = false,
         device = d
     )
-    return decodeEncryptedJsonResponse(rawBytes, aesKey)
+    val parsed = decodeEncryptedJsonResponse(rawBytes, aesKey)
+    val errCode = parsed?.number("err_code") ?: parsed?.number("error_code") ?: parsed?.number("errcode")
+    if (errCode == 20010) {
+        throw ApiFailure(20010, parsed?.text("error_msg") ?: "登录已过期")
+    }
+    parsed
 }
 
 // =========================================================================
@@ -170,7 +293,7 @@ suspend fun MusicApiRepository.fetchRelatedSongVersions(
     val mixId = song.albumAudioId.takeIf { it > 0L }
         ?: song.audioId.takeIf { it > 0L }
         ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L }
-        ?: runCatching { resolveCommentMixSongId(song) }.getOrDefault(0L)
+        ?: suspendRunCatching { resolveCommentMixSongId(song) }.getOrDefault(0L)
 
     val sortVal = when (sort.lowercase(Locale.ROOT)) {
         "hot" -> 2
@@ -217,10 +340,16 @@ suspend fun MusicApiRepository.fetchRelatedSongVersions(
         }
     }
 
-    // 兜底：若接口无结果且为首页，用歌名搜索匹配不同版本（剔除当前同一 hash）
+    // 兜底：若接口无结果且为首页，用「洁净歌名 + 主歌手」搜索匹配不同版本，避免同名不同曲混入
     if (resultList.isEmpty() && page == 1 && song.title.isNotBlank()) {
         val cleanTitle = song.title.substringBefore("(").substringBefore("（").trim().ifBlank { song.title }
-        val fallback = suspendRunCatching { searchSongs(cleanTitle, page = 1, pageSize = 20).songs }.getOrDefault(emptyList())
+        val primaryArtist = song.artist.split("、", "/", ",", "&").firstOrNull()?.trim().orEmpty()
+        val fallbackQuery = if (primaryArtist.isNotBlank() && !cleanTitle.contains(primaryArtist, ignoreCase = true)) {
+            "$cleanTitle $primaryArtist"
+        } else {
+            cleanTitle
+        }
+        val fallback = suspendRunCatching { searchSongs(fallbackQuery, page = 1, pageSize = 20).songs }.getOrDefault(emptyList())
         resultList.addAll(
             fallback.map { item ->
                 val tag = inferSongVersionTag(item.title, rawTag = item.versionTag)
@@ -229,13 +358,17 @@ suspend fun MusicApiRepository.fetchRelatedSongVersions(
         )
     }
 
-    val deduped = resultList
+    val preDeduped = resultList.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
+    val enriched = suspendRunCatching { enrichSongsPrivilegeLite(preDeduped) }.getOrDefault(preDeduped)
+    // 音质补全完成后，再基于原曲全档位 hash 集合与 albumAudioId 精准剔除自身，防止高/低音质 hash 不同导致的重复展示
+    val currentHashes = song.allLowercaseHashes()
+    return enriched
         .distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
-        .filterNot {
-            it.hash.isNotBlank() && song.hash.isNotBlank() && it.hash.equals(song.hash, ignoreCase = true)
+        .filterNot { candidate ->
+            val candidateHashes = candidate.allLowercaseHashes()
+            (currentHashes.isNotEmpty() && candidateHashes.any { it in currentHashes }) ||
+                (song.albumAudioId > 0L && candidate.albumAudioId > 0L && candidate.albumAudioId == song.albumAudioId)
         }
-
-    return suspendRunCatching { enrichSongsPrivilegeLite(deduped) }.getOrDefault(deduped)
 }
 
 // =========================================================================
@@ -256,13 +389,16 @@ suspend fun MusicApiRepository.updatePlaylistInfo(
         addProperty("listid", listId)
         addProperty("type", if (playlist.isCreatedByMe) 0 else 1)
         addProperty("sort", 0)
-        addProperty("tags", newTags ?: "")
+        // 仅在显式提供 newTags 时下发 tags 字段，避免仅改名/简介时清空云端原有标签
+        if (newTags != null) {
+            addProperty("tags", newTags)
+        }
         addProperty("intro", newIntro ?: playlist.description)
         if (!newName.isNullOrBlank()) {
             addProperty("name", newName.trim())
         }
     }
-    val resp = suspendRunCatching { callCloudListEncrypted("/v1/modify_list", dataObj) }.getOrNull()
+    val resp = callCloudListEncrypted("/v1/modify_list", dataObj)
     val errCode = resp?.number("err_code") ?: resp?.number("error_code") ?: resp?.number("errcode") ?: 0
     return resp != null && resp.number("status") == 1 && errCode == 0
 }
@@ -276,13 +412,33 @@ suspend fun MusicApiRepository.sortPlaylistTracks(
         ?: playlist.listCreateListid.toLongOrNull()
         ?: playlist.id.toLongOrNull()
         ?: return false
+    val session = accounts.context()?.session
+    // 若存在刚入单导致本地缺失 fileId 的曲目，先反查云端歌单曲目补齐 fileId，防止排序跳号或静默丢失
+    val fallbackFileIdByHash = HashMap<String, Long>()
+    val fallbackFileIdByAudioId = HashMap<Long, Long>()
+    if (orderedSongs.any { it.fileId <= 0L } && session != null) {
+        val lookupId = playlist.globalCollectionId.ifBlank { playlist.listCreateGid.ifBlank { playlist.id } }
+        if (lookupId.isNotBlank()) {
+            val remoteTracks = suspendRunCatching { fetchPlaylistSongsAll(lookupId, session) }.getOrDefault(emptyList())
+            for (t in remoteTracks) {
+                if (t.fileId <= 0L) continue
+                t.allLowercaseHashes().forEach { h -> fallbackFileIdByHash.putIfAbsent(h, t.fileId) }
+                if (t.albumAudioId > 0L) fallbackFileIdByAudioId.putIfAbsent(t.albumAudioId, t.fileId)
+            }
+        }
+    }
     val resourceArr = JsonArray()
-    orderedSongs.forEachIndexed { idx, song ->
-        val fid = song.fileId
+    var sortIdx = 0
+    orderedSongs.forEach { song ->
+        val fid = song.fileId.takeIf { it > 0L }
+            ?: song.allLowercaseHashes().firstNotNullOfOrNull { fallbackFileIdByHash[it] }
+            ?: song.albumAudioId.takeIf { it > 0L }?.let { fallbackFileIdByAudioId[it] }
+            ?: 0L
         if (fid > 0L) {
+            sortIdx += 1
             resourceArr.add(JsonObject().apply {
                 addProperty("fileid", fid)
-                addProperty("sort", idx + 1)
+                addProperty("sort", sortIdx)
             })
         }
     }
@@ -293,7 +449,7 @@ suspend fun MusicApiRepository.sortPlaylistTracks(
         addProperty("type", if (playlist.isCreatedByMe) 0 else 1)
         add("data", resourceArr)
     }
-    val resp = suspendRunCatching { callCloudListEncrypted("/v1/modify_song_sort", dataObj) }.getOrNull()
+    val resp = callCloudListEncrypted("/v1/modify_song_sort", dataObj)
     val errCode = resp?.number("err_code") ?: resp?.number("error_code") ?: resp?.number("errcode") ?: 0
     return resp != null && resp.number("status") == 1 && errCode == 0
 }
@@ -305,13 +461,18 @@ suspend fun MusicApiRepository.sortUserPlaylists(
 ): Boolean {
     val type = if (isCreatedByMe) 0 else 1
     val resourceArr = JsonArray()
-    orderedPlaylists.forEachIndexed { idx, pl ->
-        val lid = pl.listId.takeIf { it > 0L } ?: pl.id.toLongOrNull() ?: 0L
+    var sortIdx = 0
+    orderedPlaylists.forEach { pl ->
+        val lid = pl.listId.takeIf { it > 0L }
+            ?: pl.listCreateListid.toLongOrNull()
+            ?: pl.id.toLongOrNull()
+            ?: 0L
         if (lid > 0L) {
+            sortIdx += 1
             resourceArr.add(JsonObject().apply {
                 addProperty("listid", lid)
                 addProperty("type", type)
-                addProperty("sort", idx + 1)
+                addProperty("sort", sortIdx)
             })
         }
     }
@@ -321,7 +482,7 @@ suspend fun MusicApiRepository.sortUserPlaylists(
         addProperty("total_ver", effectiveVer)
         add("data", resourceArr)
     }
-    val resp = suspendRunCatching { callCloudListEncrypted("/v1/modify_list_sort", dataObj) }.getOrNull()
+    val resp = callCloudListEncrypted("/v1/modify_list_sort", dataObj)
     val errCode = resp?.number("err_code") ?: resp?.number("error_code") ?: resp?.number("errcode") ?: 0
     return resp != null && resp.number("status") == 1 && errCode == 0
 }
@@ -382,11 +543,25 @@ suspend fun MusicApiRepository.searchByLyric(
         }
     }
     val enriched = suspendRunCatching { enrichSongsPrivilegeLite(songs) }.getOrDefault(songs)
-    // 保留 enrich 前提取的 matchedLyricSnippet
-    val snippetByKey = songs.associate { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) to it.matchedLyricSnippet }
-    val finalSongs = enriched.map { s ->
-        val snippet = snippetByKey[(s.hash.ifBlank { s.id }).lowercase(Locale.ROOT)].orEmpty()
-        if (snippet.isNotBlank() && s.matchedLyricSnippet.isBlank()) s.copy(matchedLyricSnippet = snippet) else s
+    // 严格按 1:1 位置映射 + 全档位 hash 兜底恢复 matchedLyricSnippet，避免音质升级改写主 hash 后查表失配
+    val snippetByAnyHash = HashMap<String, String>()
+    songs.forEach { s ->
+        if (s.matchedLyricSnippet.isNotBlank()) {
+            s.allLowercaseHashes().forEach { h -> snippetByAnyHash.putIfAbsent(h, s.matchedLyricSnippet) }
+            if (s.id.isNotBlank()) snippetByAnyHash.putIfAbsent(s.id.lowercase(Locale.ROOT), s.matchedLyricSnippet)
+        }
+    }
+    val finalSongs = enriched.mapIndexed { idx, s ->
+        val origSnippet = songs.getOrNull(idx)?.matchedLyricSnippet
+            ?.takeIf { it.isNotBlank() }
+            ?: s.allLowercaseHashes().firstNotNullOfOrNull { snippetByAnyHash[it] }
+            ?: snippetByAnyHash[s.id.lowercase(Locale.ROOT)]
+            ?: ""
+        if (origSnippet.isNotBlank() && s.matchedLyricSnippet.isBlank()) {
+            s.copy(matchedLyricSnippet = origSnippet)
+        } else {
+            s
+        }
     }
     return SearchResult(
         songs = finalSongs,
@@ -506,8 +681,9 @@ suspend fun MusicApiRepository.fetchFollowedArtistNewSongs(
             if (!el.isJsonObject) continue
             val obj = el.asJsonObject
             val albumId = obj.text("album_id") ?: obj.text("albumid") ?: ""
-            val isAlbum = (obj.number("type") == 2 || obj.number("res_type") == 2 || obj.arr("songs") != null) && albumId.isNotBlank()
             val nestedSongs = obj.arr("songs") ?: obj.arr("audio_list")
+            val hasNestedSongs = (nestedSongs?.size() ?: 0) > 0
+            val isAlbum = (obj.number("type") == 2 || obj.number("res_type") == 2 || hasNestedSongs) && albumId.isNotBlank()
             val firstSongObj = nestedSongs?.firstOrNull()?.takeIf { it.isJsonObject }?.asJsonObject
             val parsedSong = when {
                 firstSongObj != null -> parseSong(firstSongObj)
@@ -537,7 +713,12 @@ suspend fun MusicApiRepository.fetchFollowedArtistNewSongs(
                 ?: obj.text("release_date")
                 ?: parsedSong?.publishDate
                 ?: ""
-            val id = albumId.ifBlank { parsedSong?.id ?: "${artistId}_${title.hashCode()}" }
+            val uniqueSongKey = parsedSong?.hash?.takeIf { it.isNotBlank() } ?: parsedSong?.id.orEmpty()
+            val id = if (isAlbum) {
+                "album_$albumId"
+            } else {
+                uniqueSongKey.ifBlank { albumId.ifBlank { "${artistId}_${title.hashCode()}" } }
+            }
             releases.add(
                 FollowedArtistNewRelease(
                     id = id,
@@ -546,7 +727,7 @@ suspend fun MusicApiRepository.fetchFollowedArtistNewSongs(
                     artistId = artistId,
                     coverUrl = cover,
                     publishDate = publishDate,
-                    isAlbum = isAlbum && parsedSong == null,
+                    isAlbum = isAlbum,
                     albumId = albumId,
                     song = parsedSong?.copy(
                         coverUrl = parsedSong.coverUrl.ifBlank { cover },
@@ -583,17 +764,25 @@ suspend fun MusicApiRepository.deleteComment(
     commentId: String,
     tid: String? = null,
     song: Song? = null
-): Boolean {
-    val session = accounts.context()?.session?.takeIf { it.token.isNotBlank() }
-        ?: throw ApiFailure(20010, "请先登录酷狗账号后再删除评论")
+): Boolean = auth { ctx ->
+    val session = ctx.session
+    if (session.token.isBlank()) throw ApiFailure(20010, "请先登录酷狗账号后再删除评论")
     val d = device()
     val clientTime = System.currentTimeMillis() / 1000
     val code = targetType.commentPoolCode()
+    val cleanTargetId = targetId.trim().takeIf { it.isNotBlank() && it != "0" }
+    // 对于单曲评论，若传入的 targetId 只是 32 位 hex hash 而非数字 mixSongId，优先通过 resolveCommentMixSongId 获取真实 childrenid
+    val preferredTargetId = if (targetType == CommentTargetType.SONG && cleanTargetId != null && hex32HashRegex.matches(cleanTargetId)) {
+        null
+    } else {
+        cleanTargetId
+    }
     val resolvedChildrenId = commentSpecialChildIdCache[commentId]?.takeIf { it.isNotBlank() && it != "0" }
-        ?: targetId.takeIf { it.isNotBlank() && it != "0" }
-        ?: song?.let { runCatching { resolveCommentMixSongId(it) }.getOrDefault(0L).takeIf { id -> id > 0L }?.toString() }
+        ?: preferredTargetId
+        ?: song?.let { suspendRunCatching { resolveCommentMixSongId(it) }.getOrDefault(0L).takeIf { id -> id > 0L }?.toString() }
+        ?: cleanTargetId
         ?: song?.hash?.trim()?.lowercase(Locale.ROOT)
-        ?: return false
+        ?: return@auth false
 
     val query = linkedMapOf(
         "r" to "commentsv2/delcomment",
@@ -614,20 +803,20 @@ suspend fun MusicApiRepository.deleteComment(
     if (!tid.isNullOrBlank()) {
         query["tid"] = tid
     }
-    val resp = suspendRunCatching {
-        transport.callAdvanced(
-            path = "/index.php",
-            session = session,
-            query = query,
-            method = "GET",
-            headers = mapOf("x-router" to "m.comment.service.kugou.com"),
-            sign = false,
-            includeDefaultParams = false
-        )
-    }.getOrNull() ?: return false
-
+    val resp = transport.callAdvanced(
+        path = "/index.php",
+        session = session,
+        query = query,
+        method = "GET",
+        headers = mapOf("x-router" to "m.comment.service.kugou.com"),
+        sign = false,
+        includeDefaultParams = false
+    )
+    if (resp.code == 20010) {
+        throw ApiFailure(20010, resp.errorMsg())
+    }
     val isMockEmpty = resp.body.entrySet().isEmpty() && resp.httpCode in 200..299
-    return resp.success || resp.status == 1 || resp.code == 0 || isMockEmpty
+    resp.success || isMockEmpty
 }
 
 suspend fun MusicApiRepository.fetchResourceComments(
@@ -649,21 +838,19 @@ suspend fun MusicApiRepository.fetchResourceComments(
         "pagesize" to pageSize.coerceIn(1, 50).toString(),
         "show_classify" to "1",
         "show_hotword_list" to "1",
+        "sort" to if (isHotTab) "2" else "1",
         "code" to code
     )
     if (targetType == CommentTargetType.PLAYLIST) {
         params["content_type"] = "0"
         params["tag"] = "5"
     }
-    val resp = suspendRunCatching {
-        transport.call(
-            path = "/m.comment.service/v1/cmtlist",
-            session = session,
-            method = "POST",
-            query = params
-        )
-    }.getOrNull() ?: return 0 to emptyList()
-
+    val resp = transport.call(
+        path = "/m.comment.service/v1/cmtlist",
+        session = session,
+        method = "POST",
+        query = params
+    )
     val total = listOfNotNull(
         resp.body.number("count"),
         resp.body.number("total"),
@@ -682,9 +869,9 @@ suspend fun MusicApiRepository.postResourceComment(
     content: String,
     replyToCommentId: String? = null,
     replyToUserName: String? = null
-): SongComment {
-    val session = accounts.context()?.session?.takeIf { it.token.isNotBlank() }
-        ?: throw ApiFailure(20010, "请先登录酷狗账号后再发表评论")
+): SongComment = auth { ctx ->
+    val session = ctx.session
+    if (session.token.isBlank()) throw ApiFailure(20010, "请先登录酷狗账号后再发表评论")
     val profile = accounts.state.value.profile
     val d = device()
     val clientTime = System.currentTimeMillis() / 1000
@@ -759,13 +946,13 @@ suspend fun MusicApiRepository.postResourceComment(
     }
 
     val isMockEmpty = resp.body.entrySet().isEmpty() && resp.httpCode in 200..299
-    if (!resp.success && resp.status != 1 && resp.code != 0 && !isMockEmpty) {
+    if (!resp.success && !isMockEmpty) {
         resp.requireSuccess()
     }
     val respData = resp.data.obj("data") ?: resp.data
     val createdId = respData.text("id") ?: respData.text("cid") ?: "c_${targetType.name.lowercase()}_${System.currentTimeMillis()}"
     commentSpecialChildIdCache[createdId] = resourceId
-    return SongComment(
+    SongComment(
         id = createdId,
         userId = session.userId,
         userName = profile?.nickname?.takeIf { it.isNotBlank() } ?: "乐迷_${session.userId}",
@@ -787,14 +974,172 @@ suspend fun MusicApiRepository.fetchUserCloudDisk(
     page: Int = 1,
     pageSize: Int = 50
 ): CloudDiskSummary {
-    val session = accounts.context()?.session ?: return CloudDiskSummary()
+    if (accounts.context()?.session == null) return CloudDiskSummary()
+    return auth { ctx ->
+        val session = ctx.session
+        val d = device()
+        val clientTime = System.currentTimeMillis() / 1000
+        val dataObj = JsonObject().apply {
+            addProperty("page", page.coerceAtLeast(1))
+            addProperty("pagesize", pageSize.coerceIn(1, 100))
+            addProperty("getkmr", 1)
+        }
+        val (aesKey, cipherBytes) = KugouSigner.playlistAesEncryptBytes(KugouSigner.gson.toJson(dataObj))
+        val pJson = KugouSigner.gson.toJson(
+            mapOf(
+                "aes" to aesKey,
+                "uid" to (session.userId.toLongOrNull() ?: 0L),
+                "token" to session.token
+            )
+        )
+        val p = KugouSigner.rsaPkcs1(pJson, lite = true).uppercase(Locale.ROOT)
+        val query = linkedMapOf(
+            "clienttime" to clientTime.toString(),
+            "mid" to d.mid,
+            "key" to KugouSigner.paramsKey(clientTime),
+            "clientver" to KugouSigner.CLIENT_VERSION.toString(),
+            "appid" to KugouSigner.APP_ID.toString(),
+            "p" to p
+        )
+        val rawBytes = transport.requestBinaryBytes(
+            path = "/v1/get_list",
+            session = session,
+            query = query,
+            rawBodyBytes = cipherBytes,
+            host = "https://mcloudservice.kugou.com",
+            method = "POST",
+            sign = false,
+            includeDefaultParams = false,
+            device = d
+        )
+        val root = decodeEncryptedJsonResponse(rawBytes, aesKey)
+            ?: throw IOException("云盘响应解析失败，请稍后重试")
+        val errCode = root.number("err_code") ?: root.number("error_code") ?: root.number("errcode")
+        if (errCode == 20010) throw ApiFailure(20010, root.text("error_msg") ?: "登录已过期")
+        val dataNode = root.obj("data") ?: root
+        val listArr = dataNode.arr("list") ?: dataNode.arr("info") ?: root.arr("list")
+        val items = mutableListOf<CloudSongItem>()
+        if (listArr != null) {
+            for (el in listArr) {
+                if (!el.isJsonObject) continue
+                val obj = el.asJsonObject
+                val hash = (obj.text("hash") ?: obj.text("file_hash") ?: "").trim()
+                if (hash.isBlank()) continue
+                val rawName = obj.text("name") ?: obj.text("filename") ?: obj.text("songname") ?: "未命名云盘曲目"
+                val parts = rawName.split(" - ", limit = 2)
+                val artist = obj.text("singer_name")
+                    ?: obj.text("author_name")
+                    ?: if (parts.size == 2) parts[0].trim() else "云盘曲目"
+                val title = obj.text("song_name")
+                    ?: obj.text("songname")
+                    ?: if (parts.size == 2) stripKnownAudioExtension(parts[1]) else stripKnownAudioExtension(rawName)
+                val kvId = obj.longVal("kv_id") ?: obj.longVal("fileid") ?: obj.longVal("id") ?: 0L
+                val fSize = obj.longVal("size") ?: obj.longVal("filesize") ?: 0L
+                val durRaw = obj.longVal("timelen") ?: obj.longVal("duration") ?: 0L
+                val durMs = if (durRaw in 1L..10_000L) durRaw * 1000L else durRaw
+                val brRaw = obj.number("bitrate") ?: 0
+                val brKbps = if (brRaw > 10_000) brRaw / 1000 else brRaw
+                val ext = obj.text("extname") ?: rawName.substringAfterLast('.', "").takeIf { it.length <= 5 }.orEmpty()
+                val cover = imageUrl(obj.text("cover") ?: obj.text("sizable_cover") ?: obj.text("union_cover") ?: "")
+                val addTimeSec = obj.longVal("addtime") ?: obj.longVal("add_time") ?: 0L
+                items.add(
+                    CloudSongItem(
+                        kvId = kvId,
+                        hash = hash,
+                        name = rawName,
+                        title = title.ifBlank { rawName },
+                        artist = artist.ifBlank { "云盘曲目" },
+                        album = obj.text("album_name") ?: "",
+                        fileSize = fSize,
+                        durationMs = durMs,
+                        bitrate = brKbps,
+                        extName = ext,
+                        albumAudioId = obj.longVal("album_audio_id") ?: obj.longVal("mixsongid") ?: 0L,
+                        audioId = obj.longVal("audio_id") ?: 0L,
+                        coverUrl = cover,
+                        addTime = formatEpochSeconds(addTimeSec)
+                    )
+                )
+            }
+        }
+        val total = dataNode.number("total") ?: dataNode.number("count") ?: root.number("total") ?: items.size
+        val used = dataNode.longVal("used_size") ?: dataNode.longVal("used_space") ?: 0L
+        val max = dataNode.longVal("max_size") ?: dataNode.longVal("total_space") ?: 0L
+        CloudDiskSummary(
+            songs = items,
+            totalCount = maxOf(total, items.size),
+            usedBytes = used,
+            maxBytes = max,
+            hasMore = items.size >= pageSize && page * pageSize < total
+        )
+    }
+}
+
+suspend fun MusicApiRepository.resolveUserCloudPlayback(song: Song): PlaybackResult = auth { ctx ->
+    val session = ctx.session
+    val hashLower = song.hash.trim().lowercase(Locale.ROOT)
+    if (hashLower.isBlank()) throw IOException("云盘曲目缺少有效 Hash")
+    val resp = transport.call(
+        path = "/bsstrackercdngz/v2/query_musicclound_url",
+        session = session,
+        method = "GET",
+        query = mapOf(
+            "hash" to hashLower,
+            "ssa_flag" to "is_fromtrack",
+            "version" to "20102",
+            "ssl" to "1",
+            "album_audio_id" to song.albumAudioId.toString(),
+            "pid" to "20026",
+            "audio_id" to song.audioId.toString(),
+            "kv_id" to (song.cloudKvId.takeIf { it > 0L } ?: 2L).toString(),
+            "key" to KugouSigner.signCloudKey(hashLower, 20026),
+            "bucket" to "musicclound",
+            "name" to "${song.artist} - ${song.title}",
+            "with_res_tag" to "0"
+        )
+    )
+    if (resp.code == 20010) {
+        throw ApiFailure(20010, resp.errorMsg())
+    }
+    val root = resp.data
+    val directUrl = root.text("url")
+        ?: root.arr("url")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
+        ?: root.arr("backupUrl")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
+        ?: resp.body.text("url")
+        ?: resp.body.arr("url")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
+        ?: ""
+    if (directUrl.isBlank()) {
+        throw IOException("无法获取该云盘歌曲播放链接，请稍后重试")
+    }
+    val fSize = root.longVal("fileSize") ?: root.longVal("filesize") ?: song.fileSizeByte
+    val br = root.number("bitRate") ?: root.number("bitrate") ?: song.bitrateKbps
+    val ext = root.text("extName") ?: root.text("extname")
+    val (q, kbps) = deduceQuality(directUrl, br.toLong(), fSize, song.durationMs, ext)
+    PlaybackResult(
+        url = directUrl,
+        actualQuality = q,
+        bitrateKbps = kbps,
+        fileSizeByte = fSize,
+        resolvedHash = hashLower
+    )
+}
+
+suspend fun MusicApiRepository.deleteUserCloudSongs(items: List<CloudSongItem>): Boolean = auth { ctx ->
+    if (items.isEmpty()) return@auth false
+    val session = ctx.session
     val d = device()
     val clientTime = System.currentTimeMillis() / 1000
-    val dataObj = JsonObject().apply {
-        addProperty("page", page.coerceAtLeast(1))
-        addProperty("pagesize", pageSize.coerceIn(1, 100))
-        addProperty("getkmr", 1)
+    val arr = JsonArray()
+    items.forEach { item ->
+        if (item.kvId > 0L) {
+            arr.add(JsonObject().apply {
+                addProperty("kv_id", item.kvId)
+                addProperty("album_audio_id", item.albumAudioId)
+            })
+        }
     }
+    if (arr.size() == 0) return@auth false
+    val dataObj = JsonObject().apply { add("data", arr) }
     val (aesKey, cipherBytes) = KugouSigner.playlistAesEncryptBytes(KugouSigner.gson.toJson(dataObj))
     val pJson = KugouSigner.gson.toJson(
         mapOf(
@@ -812,232 +1157,83 @@ suspend fun MusicApiRepository.fetchUserCloudDisk(
         "appid" to KugouSigner.APP_ID.toString(),
         "p" to p
     )
-    val rawBytes = suspendRunCatching {
-        transport.requestBinaryBytes(
-            path = "/v1/get_list",
-            session = session,
-            query = query,
-            rawBodyBytes = cipherBytes,
-            host = "https://mcloudservice.kugou.com",
-            method = "POST",
-            sign = false,
-            includeDefaultParams = false,
-            device = d
-        )
-    }.getOrNull() ?: return CloudDiskSummary()
-
-    val root = decodeEncryptedJsonResponse(rawBytes, aesKey) ?: return CloudDiskSummary()
-    val dataNode = root.obj("data") ?: root
-    val listArr = dataNode.arr("list") ?: dataNode.arr("info") ?: root.arr("list")
-    val items = mutableListOf<CloudSongItem>()
-    if (listArr != null) {
-        for (el in listArr) {
-            if (!el.isJsonObject) continue
-            val obj = el.asJsonObject
-            val hash = (obj.text("hash") ?: obj.text("file_hash") ?: "").trim()
-            if (hash.isBlank()) continue
-            val rawName = obj.text("name") ?: obj.text("filename") ?: obj.text("songname") ?: "未命名云盘曲目"
-            val parts = rawName.split(" - ", limit = 2)
-            val artist = obj.text("singer_name")
-                ?: obj.text("author_name")
-                ?: if (parts.size == 2) parts[0].trim() else "云盘曲目"
-            val title = obj.text("song_name")
-                ?: obj.text("songname")
-                ?: if (parts.size == 2) parts[1].substringBeforeLast(".").trim() else rawName.substringBeforeLast(".").trim()
-            val kvId = obj.longVal("kv_id") ?: obj.longVal("fileid") ?: obj.longVal("id") ?: 0L
-            val fSize = obj.longVal("size") ?: obj.longVal("filesize") ?: 0L
-            val durRaw = obj.longVal("timelen") ?: obj.longVal("duration") ?: 0L
-            val durMs = if (durRaw in 1L..10_000L) durRaw * 1000L else durRaw
-            val brRaw = obj.number("bitrate") ?: 0
-            val brKbps = if (brRaw > 10_000) brRaw / 1000 else brRaw
-            val ext = obj.text("extname") ?: rawName.substringAfterLast('.', "").takeIf { it.length <= 5 }.orEmpty()
-            val cover = imageUrl(obj.text("cover") ?: obj.text("sizable_cover") ?: obj.text("union_cover") ?: "")
-            val addTimeSec = obj.longVal("addtime") ?: obj.longVal("add_time") ?: 0L
-            items.add(
-                CloudSongItem(
-                    kvId = kvId,
-                    hash = hash,
-                    name = rawName,
-                    title = title.ifBlank { rawName },
-                    artist = artist.ifBlank { "云盘曲目" },
-                    album = obj.text("album_name") ?: "",
-                    fileSize = fSize,
-                    durationMs = durMs,
-                    bitrate = brKbps,
-                    extName = ext,
-                    albumAudioId = obj.longVal("album_audio_id") ?: obj.longVal("mixsongid") ?: 0L,
-                    audioId = obj.longVal("audio_id") ?: 0L,
-                    coverUrl = cover,
-                    addTime = formatEpochSeconds(addTimeSec)
-                )
-            )
-        }
-    }
-    val total = dataNode.number("total") ?: dataNode.number("count") ?: root.number("total") ?: items.size
-    val used = dataNode.longVal("used_size") ?: dataNode.longVal("used_space") ?: 0L
-    val max = dataNode.longVal("max_size") ?: dataNode.longVal("total_space") ?: 0L
-    return CloudDiskSummary(
-        songs = items,
-        totalCount = maxOf(total, items.size),
-        usedBytes = used,
-        maxBytes = max,
-        hasMore = items.size >= pageSize && page * pageSize < total
-    )
-}
-
-suspend fun MusicApiRepository.resolveUserCloudPlayback(song: Song): PlaybackResult {
-    val session = accounts.context()?.session
-        ?: throw ApiFailure(20010, "请先登录酷狗账号后播放云盘歌曲")
-    val hashLower = song.hash.trim().lowercase(Locale.ROOT)
-    if (hashLower.isBlank()) throw IOException("云盘曲目缺少有效 Hash")
-    val resp = transport.call(
-        path = "/bsstrackercdngz/v2/query_musicclound_url",
+    val rawBytes = transport.requestBinaryBytes(
+        path = "/v1/del_files",
         session = session,
-        method = "GET",
-        query = mapOf(
-            "hash" to hashLower,
-            "ssa_flag" to "is_fromtrack",
-            "version" to "20102",
-            "ssl" to "0",
-            "album_audio_id" to song.albumAudioId.toString(),
-            "pid" to "20026",
-            "audio_id" to song.audioId.toString(),
-            "kv_id" to (song.cloudKvId.takeIf { it > 0L } ?: 2L).toString(),
-            "key" to KugouSigner.signCloudKey(hashLower, 20026),
-            "bucket" to "musicclound",
-            "name" to "${song.artist} - ${song.title}",
-            "with_res_tag" to "0"
-        )
+        query = query,
+        rawBodyBytes = cipherBytes,
+        host = "https://mcloudservice.kugou.com",
+        method = "POST",
+        sign = false,
+        includeDefaultParams = false,
+        device = d
     )
-    val root = resp.data
-    val directUrl = root.text("url")
-        ?: root.arr("url")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
-        ?: root.arr("backupUrl")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
-        ?: resp.body.text("url")
-        ?: resp.body.arr("url")?.firstOrNull()?.takeIf { it.isJsonPrimitive }?.asString
-        ?: ""
-    if (directUrl.isBlank()) {
-        throw IOException("无法获取该云盘歌曲播放链接，请稍后重试")
-    }
-    val fSize = root.longVal("fileSize") ?: root.longVal("filesize") ?: song.fileSizeByte
-    val br = root.number("bitRate") ?: root.number("bitrate") ?: song.bitrateKbps
-    val ext = root.text("extName") ?: root.text("extname")
-    val (q, kbps) = deduceQuality(directUrl, br.toLong(), fSize, song.durationMs, ext)
-    return PlaybackResult(
-        url = directUrl,
-        actualQuality = q,
-        bitrateKbps = kbps,
-        fileSizeByte = fSize,
-        resolvedHash = hashLower
-    )
-}
-
-suspend fun MusicApiRepository.deleteUserCloudSongs(items: List<CloudSongItem>): Boolean {
-    if (items.isEmpty()) return false
-    val session = accounts.context()?.session ?: throw ApiFailure(20010, "请先登录酷狗账号")
-    val d = device()
-    val clientTime = System.currentTimeMillis() / 1000
-    val arr = JsonArray()
-    items.forEach { item ->
-        if (item.kvId > 0L) {
-            arr.add(JsonObject().apply {
-                addProperty("kv_id", item.kvId)
-                addProperty("album_audio_id", item.albumAudioId)
-            })
-        }
-    }
-    if (arr.size() == 0) return false
-    val dataObj = JsonObject().apply { add("data", arr) }
-    val (aesKey, cipherBytes) = KugouSigner.playlistAesEncryptBytes(KugouSigner.gson.toJson(dataObj))
-    val pJson = KugouSigner.gson.toJson(
-        mapOf(
-            "aes" to aesKey,
-            "uid" to session.userId,
-            "token" to session.token
-        )
-    )
-    val p = KugouSigner.rsaPkcs1(pJson, lite = true).uppercase(Locale.ROOT)
-    val query = linkedMapOf(
-        "clienttime" to clientTime.toString(),
-        "mid" to d.mid,
-        "key" to KugouSigner.paramsKey(clientTime),
-        "clientver" to KugouSigner.CLIENT_VERSION.toString(),
-        "appid" to KugouSigner.APP_ID.toString(),
-        "p" to p
-    )
-    val rawBytes = suspendRunCatching {
-        transport.requestBinaryBytes(
-            path = "/v1/del_files",
-            session = session,
-            query = query,
-            rawBodyBytes = cipherBytes,
-            host = "https://mcloudservice.kugou.com",
-            method = "POST",
-            sign = false,
-            includeDefaultParams = false,
-            device = d
-        )
-    }.getOrNull() ?: return false
-    val resp = decodeEncryptedJsonResponse(rawBytes, aesKey) ?: return false
+    val resp = decodeEncryptedJsonResponse(rawBytes, aesKey) ?: return@auth false
     val errCode = resp.number("err_code") ?: resp.number("error_code") ?: resp.number("errcode") ?: 0
-    return resp.number("status") == 1 && errCode == 0
+    if (errCode == 20010) {
+        throw ApiFailure(20010, resp.text("error_msg") ?: "登录已过期")
+    }
+    resp.number("status") == 1 && errCode == 0
 }
 
 // =========================================================================
 // Tier 2 #8：个人听歌排行（近一周 / 全部累计）— user_listen.js
 // =========================================================================
 suspend fun MusicApiRepository.fetchUserListenRank(type: Int = 0): List<ListenRankItem> {
-    val session = accounts.context()?.session ?: return emptyList()
-    val clientTime = System.currentTimeMillis() / 1000
-    val pPayload = KugouSigner.gson.toJson(mapOf("clienttime" to clientTime, "token" to session.token))
-    val p = KugouSigner.rsa(pPayload, useStandardKey = false).uppercase(Locale.ROOT)
-    val body = JsonObject().apply {
-        addProperty("t_userid", session.userId)
-        addProperty("userid", session.userId)
-        addProperty("list_type", if (type == 1) 1 else 0)
-        addProperty("area_code", 1)
-        addProperty("cover", 2)
-        addProperty("p", p)
-    }
-    val resp = suspendRunCatching {
-        transport.call(
+    if (accounts.context()?.session == null) return emptyList()
+    return auth { ctx ->
+        val session = ctx.session
+        val clientTime = System.currentTimeMillis() / 1000
+        val uidLong = session.userId.toLongOrNull() ?: 0L
+        val pPayload = KugouSigner.gson.toJson(mapOf("clienttime" to clientTime, "token" to session.token))
+        val p = KugouSigner.rsa(pPayload, useStandardKey = false).uppercase(Locale.ROOT)
+        val body = JsonObject().apply {
+            addProperty("t_userid", uidLong)
+            addProperty("userid", uidLong)
+            addProperty("list_type", if (type == 1) 1 else 0)
+            addProperty("area_code", 1)
+            addProperty("cover", 2)
+            addProperty("p", p)
+        }
+        val resp = transport.call(
             path = "/v2/get_list",
-            host = "https://listenservice.kugou.com",
             session = session,
             method = "POST",
             query = mapOf("clienttime" to clientTime.toString(), "plat" to "0"),
-            body = body
+            body = body,
+            headers = mapOf("x-router" to "listenservice.kugou.com")
         )
-    }.getOrNull() ?: return emptyList()
+        if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
 
-    val dataObj = resp.data
-    val arr = dataObj.arr("lists")
-        ?: dataObj.arr("list")
-        ?: dataObj.arr("songs")
-        ?: dataObj.arr("info")
-        ?: resp.body.arr("data")
-    val rawPairs = mutableListOf<Pair<Song, Int>>()
-    if (arr != null) {
-        for (el in arr) {
-            if (!el.isJsonObject) continue
-            val obj = el.asJsonObject
-            val song = parseSong(obj)
-            val count = obj.number("nums")
-                ?: obj.number("play_count")
-                ?: obj.number("pc")
-                ?: obj.number("count")
-                ?: 0
-            if (song.title.isNotBlank() || song.hash.isNotBlank()) {
-                rawPairs.add(song.copy(playCount = count) to count)
+        val dataObj = resp.data
+        val arr = dataObj.arr("lists")
+            ?: dataObj.arr("list")
+            ?: dataObj.arr("songs")
+            ?: dataObj.arr("info")
+            ?: resp.body.arr("data")
+        val rawPairs = mutableListOf<Pair<Song, Int>>()
+        if (arr != null) {
+            for (el in arr) {
+                if (!el.isJsonObject) continue
+                val obj = el.asJsonObject
+                val song = parseSong(obj)
+                val count = obj.number("nums")
+                    ?: obj.number("play_count")
+                    ?: obj.number("pc")
+                    ?: obj.number("count")
+                    ?: 0
+                if (song.title.isNotBlank() || song.hash.isNotBlank()) {
+                    rawPairs.add(song.copy(playCount = count) to count)
+                }
             }
         }
-    }
-    if (rawPairs.isEmpty()) return emptyList()
-    val enriched = suspendRunCatching { enrichSongsPrivilegeLite(rawPairs.map { it.first }) }
-        .getOrDefault(rawPairs.map { it.first })
-    return enriched.mapIndexed { idx, s ->
-        val count = rawPairs.getOrNull(idx)?.second ?: s.playCount
-        ListenRankItem(rank = idx + 1, song = s.copy(playCount = count), playCount = count)
+        if (rawPairs.isEmpty()) return@auth emptyList()
+        val enriched = suspendRunCatching { enrichSongsPrivilegeLite(rawPairs.map { it.first }) }
+            .getOrDefault(rawPairs.map { it.first })
+        enriched.mapIndexed { idx, s ->
+            val count = rawPairs.getOrNull(idx)?.second ?: s.playCount
+            ListenRankItem(rank = idx + 1, song = s.copy(playCount = count), playCount = count)
+        }
     }
 }
 
@@ -1051,10 +1247,11 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
 ): List<Song> {
     val session = accounts.context()?.session
     val d = device()
-    val nowMs = System.currentTimeMillis()
+    // 严格使用 10 位秒级时间戳，与 MusicRepository.personalFm 及 transport query/header 保持一致
+    val nowSec = System.currentTimeMillis() / 1000L
     val body = JsonObject().apply {
         addProperty("appid", KugouSigner.APP_ID)
-        addProperty("clienttime", nowMs)
+        addProperty("clienttime", nowSec)
         addProperty("mid", d.mid)
         addProperty("action", action)
         addProperty("recommend_source_locked", 0)
@@ -1068,7 +1265,7 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
         addProperty("is_overplay", 0)
         addProperty("mode", "normal")
         addProperty("fakem", "ca981cfc583a4c37f28d2d49000013c16a0a")
-        addProperty("key", KugouSigner.paramsKey(nowMs))
+        addProperty("key", KugouSigner.paramsKey(nowSec))
         if (session != null) {
             val uidNum = session.userId.toLongOrNull() ?: 0L
             addProperty("userid", uidNum)
@@ -1076,8 +1273,11 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
             addProperty("token", session.token)
         }
         if (song != null) {
-            if (song.hash.isNotBlank()) addProperty("hash", song.hash)
-            val sid = song.albumAudioId.takeIf { it > 0L } ?: song.audioId.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()
+            val lowerHash = song.hash.trim().lowercase(Locale.ROOT)
+            if (lowerHash.isNotBlank()) addProperty("hash", lowerHash)
+            val sid = song.audioId.takeIf { it > 0L }
+                ?: song.albumAudioId.takeIf { it > 0L }
+                ?: song.mixSongId.toLongOrNull()
             if (sid != null && sid > 0L) addProperty("songid", sid)
         }
     }
@@ -1100,7 +1300,7 @@ suspend fun MusicApiRepository.fetchUserListeningPreference(): UserListeningPref
     val clientTime = System.currentTimeMillis() / 1000
     val strG2 = KugouSigner.random(16)
     val pPayload = KugouSigner.gson.toJson(mapOf("key" to strG2, "clienttime" to clientTime.toString()))
-    val p = KugouSigner.rsaPkcs1(pPayload, lite = true)
+    val p = KugouSigner.rsaPkcs1(pPayload, lite = true).uppercase(Locale.ROOT)
     val encParams = KugouSigner.encrypt(KugouSigner.gson.toJson(mapOf("token" to session.token)), temporaryKey = strG2).ciphertext
     val body = JsonObject().apply {
         addProperty("plat", 1)
@@ -1150,8 +1350,8 @@ suspend fun MusicApiRepository.updateUserListeningPreference(
     langRaw: String? = null,
     styleRaw: String? = null,
     songLangRaw: String? = null
-): Boolean {
-    val session = accounts.context()?.session ?: throw ApiFailure(20010, "请先登录酷狗账号")
+): Boolean = auth { ctx ->
+    val session = ctx.session
     val d = device()
     val clientTime = System.currentTimeMillis() / 1000
     val dataObj = JsonObject().apply {
@@ -1160,10 +1360,10 @@ suspend fun MusicApiRepository.updateUserListeningPreference(
         if (styleRaw != null) addProperty("style", styleRaw)
         if (songLangRaw != null) addProperty("song_lang", songLangRaw)
     }
-    if (dataObj.size() == 0) return false
+    if (dataObj.size() == 0) return@auth false
     val strG2 = KugouSigner.random(16)
     val pPayload = KugouSigner.gson.toJson(mapOf("key" to strG2, "clienttime" to clientTime.toString()))
-    val p = KugouSigner.rsaPkcs1(pPayload, lite = true)
+    val p = KugouSigner.rsaPkcs1(pPayload, lite = true).uppercase(Locale.ROOT)
     val encParams = KugouSigner.encrypt(KugouSigner.gson.toJson(mapOf("token" to session.token)), temporaryKey = strG2).ciphertext
     val body = JsonObject().apply {
         addProperty("plat", 1)
@@ -1172,31 +1372,30 @@ suspend fun MusicApiRepository.updateUserListeningPreference(
         add("data", dataObj)
         addProperty("params", encParams)
     }
-    val resp = suspendRunCatching {
-        transport.callAdvanced(
-            path = "/userpreferservice/v1/update_user_conf",
-            session = session,
-            method = "POST",
-            query = mapOf(
-                "appid" to KugouSigner.APP_ID.toString(),
-                "clientver" to KugouSigner.CLIENT_VERSION.toString(),
-                "clienttime" to clientTime.toString(),
-                "mid" to d.mid,
-                "dfid" to d.dfid,
-                "uuid" to "-"
-            ),
-            body = body,
-            headers = mapOf(
-                "Content-Type" to "application/json",
-                "User-Agent" to "Android15-1070-${KugouSigner.CLIENT_VERSION}-201-0-update_user_conf-wifi",
-                "KG-Rec" to "1",
-                "KG-RC" to "1"
-            ),
-            sign = true,
-            includeDefaultParams = false
-        )
-    }.getOrNull() ?: return false
-    return resp.success || resp.status == 1 || resp.code == 0
+    val resp = transport.callAdvanced(
+        path = "/userpreferservice/v1/update_user_conf",
+        session = session,
+        method = "POST",
+        query = mapOf(
+            "appid" to KugouSigner.APP_ID.toString(),
+            "clientver" to KugouSigner.CLIENT_VERSION.toString(),
+            "clienttime" to clientTime.toString(),
+            "mid" to d.mid,
+            "dfid" to d.dfid,
+            "uuid" to "-"
+        ),
+        body = body,
+        headers = mapOf(
+            "Content-Type" to "application/json",
+            "User-Agent" to "Android15-1070-${KugouSigner.CLIENT_VERSION}-201-0-update_user_conf-wifi",
+            "KG-Rec" to "1",
+            "KG-RC" to "1"
+        ),
+        sign = true,
+        includeDefaultParams = false
+    )
+    if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
+    resp.success
 }
 
 suspend fun MusicApiRepository.fetchContentBlacklist(
@@ -1204,69 +1403,78 @@ suspend fun MusicApiRepository.fetchContentBlacklist(
     page: Int = 1,
     pageSize: Int = 100
 ): List<BlacklistEntry> {
-    val session = accounts.context()?.session ?: return emptyList()
-    val clientTime = System.currentTimeMillis() / 1000
-    val normalizedLabel = if (label == "singer") "singer" else "song"
-    val source = if (normalizedLabel == "singer") 4 else 3
-    val pPayload = KugouSigner.gson.toJson(mapOf("clienttime" to clientTime, "token" to session.token))
-    val p = KugouSigner.rsa(pPayload, useStandardKey = false)
-    val body = JsonObject().apply {
-        addProperty("userid", session.userId.toLongOrNull() ?: 0L)
-        addProperty("source", source)
-        addProperty("label", normalizedLabel)
-        addProperty("p", p)
-        addProperty("page", page.coerceAtLeast(1))
-        addProperty("pagesize", pageSize.coerceIn(1, 500))
-    }
-    val resp = suspendRunCatching {
-        transport.call(
+    if (accounts.context()?.session == null) return emptyList()
+    return auth { ctx ->
+        val session = ctx.session
+        val clientTime = System.currentTimeMillis() / 1000
+        val normalizedLabel = if (label == "singer") "singer" else "song"
+        val source = if (normalizedLabel == "singer") 4 else 3
+        val pPayload = KugouSigner.gson.toJson(mapOf("clienttime" to clientTime, "token" to session.token))
+        // 对齐同域名 relationuser.kugou.com 已验证实现：PKCS#1 v1.5 + 大写 HEX + 网关转发容灾
+        val p = KugouSigner.rsaPkcs1(pPayload, lite = true).uppercase(Locale.ROOT)
+        val body = JsonObject().apply {
+            addProperty("userid", session.userId.toLongOrNull() ?: 0L)
+            addProperty("source", source)
+            addProperty("label", normalizedLabel)
+            addProperty("p", p)
+            addProperty("page", page.coerceAtLeast(1))
+            addProperty("pagesize", pageSize.coerceIn(1, 500))
+        }
+        val resp = transport.call(
             path = "/v2/get_list_items",
-            host = "https://relationuser.kugou.com",
             session = session,
             method = "POST",
             body = body,
-            headers = mapOf("KG-TID" to "473")
-        )
-    }.getOrNull() ?: return emptyList()
-
-    val entries = mutableListOf<BlacklistEntry>()
-    val arr = resp.data.arr("items")
-        ?: resp.data.arr("list")
-        ?: resp.data.arr("lists")
-        ?: resp.body.arr("data")
-    if (arr != null) {
-        for (el in arr) {
-            if (!el.isJsonObject) continue
-            val obj = el.asJsonObject
-            val key = if (normalizedLabel == "singer") {
-                obj.text("singer_k") ?: obj.text("k") ?: ""
-            } else {
-                obj.text("song_k") ?: obj.text("k") ?: ""
-            }.trim()
-            if (key.isBlank()) continue
-            val rawV = if (normalizedLabel == "singer") {
-                obj.text("singer_v") ?: obj.text("v") ?: ""
-            } else {
-                obj.text("song_v") ?: obj.text("v") ?: ""
-            }
-            val parsedV = runCatching {
-                if (rawV.trim().startsWith("{")) JsonParser.parseString(rawV).asJsonObject else null
-            }.getOrNull()
-            val name = parsedV?.text("n")?.takeIf { it.isNotBlank() } ?: rawV.ifBlank { key }
-            val mixId = parsedV?.text("m").orEmpty()
-            val ts = parsedV?.longVal("t") ?: obj.longVal("t") ?: 0L
-            entries.add(
-                BlacklistEntry(
-                    key = key,
-                    name = name,
-                    label = normalizedLabel,
-                    mixSongId = mixId,
-                    addedAtSec = ts
-                )
+            headers = mapOf(
+                "x-router" to "relationuser.kugou.com",
+                "KG-TID" to "473"
             )
+        )
+        if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
+
+        val entries = mutableListOf<BlacklistEntry>()
+        val arr = resp.data.arr("items")
+            ?: resp.data.arr("list")
+            ?: resp.data.arr("lists")
+            ?: resp.body.arr("data")
+        if (arr != null) {
+            for (el in arr) {
+                if (!el.isJsonObject) continue
+                val obj = el.asJsonObject
+                val rawKey = if (normalizedLabel == "singer") {
+                    obj.text("singer_k") ?: obj.text("k") ?: ""
+                } else {
+                    obj.text("song_k") ?: obj.text("k") ?: ""
+                }.trim()
+                val key = if (normalizedLabel == "song") rawKey.lowercase(Locale.ROOT) else rawKey
+                if (key.isBlank()) continue
+                val vFieldName = if (normalizedLabel == "singer") "singer_v" else "song_v"
+                val vEl = obj.get(vFieldName) ?: obj.get("v")
+                val parsedV = when {
+                    vEl != null && vEl.isJsonObject -> vEl.asJsonObject
+                    vEl != null && vEl.isJsonPrimitive -> {
+                        val s = vEl.asString.trim()
+                        if (s.startsWith("{")) runCatching { JsonParser.parseString(s).asJsonObject }.getOrNull() else null
+                    }
+                    else -> null
+                }
+                val rawVText = if (vEl != null && vEl.isJsonPrimitive) vEl.asString else ""
+                val name = parsedV?.text("n")?.takeIf { it.isNotBlank() } ?: rawVText.ifBlank { key }
+                val mixId = parsedV?.text("m").orEmpty()
+                val ts = parsedV?.longVal("t") ?: obj.longVal("t") ?: 0L
+                entries.add(
+                    BlacklistEntry(
+                        key = key,
+                        name = name,
+                        label = normalizedLabel,
+                        mixSongId = mixId,
+                        addedAtSec = ts
+                    )
+                )
+            }
         }
+        entries.distinctBy { it.key }
     }
-    return entries.distinctBy { it.key }
 }
 
 suspend fun MusicApiRepository.editContentBlacklist(
@@ -1276,13 +1484,13 @@ suspend fun MusicApiRepository.editContentBlacklist(
     mixSongId: String = "",
     isDelete: Boolean = false,
     moduleId: Int = 473
-): Boolean {
-    val session = accounts.context()?.session ?: throw ApiFailure(20010, "请先登录酷狗账号")
+): Boolean = auth { ctx ->
+    val session = ctx.session
     val normalizedLabel = if (label == "singer") "singer" else "song"
     val source = if (normalizedLabel == "singer") 4 else 3
     val clientTime = System.currentTimeMillis() / 1000
     val cleanKey = if (normalizedLabel == "song") key.trim().lowercase(Locale.ROOT) else key.trim()
-    if (cleanKey.isBlank()) return false
+    if (cleanKey.isBlank()) return@auth false
 
     val vObj = JsonObject().apply {
         addProperty("n", name)
@@ -1296,7 +1504,7 @@ suspend fun MusicApiRepository.editContentBlacklist(
         })
     }
     val pPayload = KugouSigner.gson.toJson(mapOf("clienttime" to clientTime, "token" to session.token))
-    val p = KugouSigner.rsa(pPayload, useStandardKey = false)
+    val p = KugouSigner.rsaPkcs1(pPayload, lite = true).uppercase(Locale.ROOT)
     val body = JsonObject().apply {
         addProperty("userid", session.userId.toLongOrNull() ?: 0L)
         addProperty("source", source)
@@ -1305,17 +1513,18 @@ suspend fun MusicApiRepository.editContentBlacklist(
         addProperty("action", if (isDelete) "delete" else "add")
         addProperty("p", p)
     }
-    val resp = suspendRunCatching {
-        transport.call(
-            path = "/v1/edit_list_items",
-            host = "https://relationuser.kugou.com",
-            session = session,
-            method = "POST",
-            body = body,
-            headers = mapOf("KG-TID" to moduleId.toString())
+    val resp = transport.call(
+        path = "/v1/edit_list_items",
+        session = session,
+        method = "POST",
+        body = body,
+        headers = mapOf(
+            "x-router" to "relationuser.kugou.com",
+            "KG-TID" to moduleId.toString()
         )
-    }.getOrNull() ?: return false
-    return resp.success || resp.status == 1 || resp.code == 0
+    )
+    if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
+    resp.success
 }
 
 // =========================================================================
@@ -1331,8 +1540,9 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
     fun addSongsForSource(rawSource: String?, rawDeviceName: String?, arr: JsonArray?, fallbackTs: Long = 0L) {
         if (arr == null || arr.size() == 0) return
         val (sType, sLabel) = normalizeCrossDeviceSource(rawSource, rawDeviceName)
-        val parsed = mutableListOf<Song>()
+        val parsedWithTs = mutableListOf<Pair<Song, Long>>()
         var latestTs = fallbackTs
+        var hasExplicitItemTs = false
         for (el in arr) {
             if (!el.isJsonObject) continue
             val obj = el.asJsonObject
@@ -1341,13 +1551,19 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
             val (_, itemLabel) = normalizeCrossDeviceSource(itemSource, itemDevName)
             val ts = obj.longVal("ot") ?: obj.longVal("play_time") ?: obj.longVal("update_time") ?: 0L
             val tsMs = if (ts in 1L..9_999_999_999L) ts * 1000L else ts
+            if (tsMs > 0L) hasExplicitItemTs = true
             if (tsMs > latestTs) latestTs = tsMs
             val s = parseSong(obj)
             if (s.title.isNotBlank() || s.hash.isNotBlank()) {
-                parsed.add(s.copy(sourceDeviceLabel = itemLabel))
+                parsedWithTs.add(s.copy(sourceDeviceLabel = itemLabel) to tsMs)
             }
         }
-        val unique = parsed.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
+        val ordered = if (hasExplicitItemTs) {
+            parsedWithTs.sortedByDescending { it.second }.map { it.first }
+        } else {
+            parsedWithTs.map { it.first }
+        }
+        val unique = ordered.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
         if (unique.isNotEmpty()) {
             sessions.add(
                 CrossDeviceSession(
@@ -1364,7 +1580,7 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
 
     // 1. 尝试识别按来源类型分桶结构（如 data.pc / data.mobile / data.tv / data.car 或 data.sources[] / data.devices[]）
     val dataObj = root.obj("data") ?: root
-    for (bucketKey in listOf("pc", "mobile", "tv", "car")) {
+    for (bucketKey in listOf("pc", "mobile", "tablet", "tv", "car")) {
         val bucketEl: JsonElement? = dataObj.get(bucketKey)
         when {
             bucketEl == null -> Unit
@@ -1379,10 +1595,14 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
         }
     }
 
-    // 2. 尝试识别设备对象数组（如 list/devices/queues 中每项含 source + songs）
-    val containerArr = dataObj.arr("devices") ?: dataObj.arr("queues") ?: dataObj.arr("sources") ?: dataObj.arr("list")
+    // 2. 尝试识别设备对象数组（含顶层 {"status":1,"data":[...]} 以及 devices/queues/sources/list）
+    val containerArr = dataObj.arr("devices")
+        ?: dataObj.arr("queues")
+        ?: dataObj.arr("sources")
+        ?: dataObj.arr("list")
+        ?: root.arr("data")
     if (sessions.isEmpty() && containerArr != null) {
-        val groupedBySource = LinkedHashMap<Pair<String, String>, MutableList<Song>>()
+        val groupedBySource = LinkedHashMap<Pair<String, String>, MutableList<Pair<Song, Long>>>()
         val groupedLatestTs = HashMap<Pair<String, String>, Long>()
         for (el in containerArr) {
             if (!el.isJsonObject) continue
@@ -1401,13 +1621,15 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
                 val tsMs = if (ts in 1L..9_999_999_999L) ts * 1000L else ts
                 val s = parseSong(obj)
                 if (s.title.isNotBlank() || s.hash.isNotBlank()) {
-                    groupedBySource.getOrPut(key) { mutableListOf() }.add(s.copy(sourceDeviceLabel = key.second))
+                    groupedBySource.getOrPut(key) { mutableListOf() }.add(s.copy(sourceDeviceLabel = key.second) to tsMs)
                     groupedLatestTs[key] = maxOf(groupedLatestTs[key] ?: 0L, tsMs)
                 }
             }
         }
         groupedBySource.forEach { (key, list) ->
-            val unique = list.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
+            val hasTs = list.any { it.second > 0L }
+            val ordered = if (hasTs) list.sortedByDescending { it.second }.map { it.first } else list.map { it.first }
+            val unique = ordered.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
             if (unique.isNotEmpty()) {
                 sessions.add(
                     CrossDeviceSession(
@@ -1444,9 +1666,11 @@ internal fun MusicApiRepository.parseCrossDeviceContinueSnapshot(
 
     val sortedSessions = sessions.sortedWith(
         compareByDescending<CrossDeviceSession> { it.updatedAtMs }
-            .thenBy { if (it.sourceType == "pc") 0 else if (it.sourceType == "car") 1 else 2 }
+            .thenBy { if (it.sourceType == "pc") 0 else if (it.sourceType == "tablet") 1 else if (it.sourceType == "car") 2 else 3 }
     )
-    val mergedQueue = allSongs.distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
+    // 合并队列严格按照活跃设备顺序生成，确保 primarySong 与 queue.first() 一致
+    val mergedQueue = (if (sortedSessions.isNotEmpty()) sortedSessions.flatMap { it.songs } else allSongs)
+        .distinctBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
     val primarySession = sortedSessions.firstOrNull()
     val primarySong = primarySession?.latestSong ?: mergedQueue.firstOrNull()
     return ContinuePlaySnapshot(
@@ -1475,6 +1699,7 @@ suspend fun MusicApiRepository.fetchCrossDeviceContinuePlay(pageSize: Int = 30):
         addProperty("pagesize", pageSize.coerceIn(1, 50))
     }
 
+    var devQueErr: Throwable? = null
     val devQueResp = suspendRunCatching {
         transport.call(
             path = "/playque/devque/v1/get_latest_songs",
@@ -1482,12 +1707,13 @@ suspend fun MusicApiRepository.fetchCrossDeviceContinuePlay(pageSize: Int = 30):
             method = "POST",
             body = body
         )
-    }.getOrNull()
+    }.onFailure { devQueErr = it }.getOrNull()
 
     var snapshot = devQueResp?.let { parseCrossDeviceContinueSnapshot(it.body) } ?: ContinuePlaySnapshot()
 
     // 兜底：若 devque 暂无跨端队列，降级拉取云端最近播放列表，保障「继续播放」始终可用
     if (!snapshot.hasPlayableContent) {
+        var historyErr: Throwable? = null
         val historyResp = suspendRunCatching {
             transport.call(
                 path = "/playhistory/v1/get_songs",
@@ -1500,7 +1726,10 @@ suspend fun MusicApiRepository.fetchCrossDeviceContinuePlay(pageSize: Int = 30):
                     "to_subdivide_sr" to 1
                 )
             )
-        }.getOrNull()
+        }.onFailure { historyErr = it }.getOrNull()
+        if (devQueResp == null && historyResp == null) {
+            throw (devQueErr ?: historyErr ?: IOException("拉取跨设备队列失败，请检查网络连接"))
+        }
         val historySongs = historyResp?.let { parseSongs(it.data) }.orEmpty()
             .take(pageSize.coerceIn(1, 30))
             .map { it.copy(sourceDeviceLabel = "云端最近播放") }
@@ -1526,11 +1755,22 @@ suspend fun MusicApiRepository.fetchCrossDeviceContinuePlay(pageSize: Int = 30):
 
     if (!snapshot.hasPlayableContent) return snapshot
 
-    // 为跨设备队列批量补齐高音质 Hash 与封面，点「一键续听」秒播无损
+    // 为跨设备队列批量补齐高音质 Hash 与封面：用「原队列全档位 hash + id」建立映射表，
+    // 彻底避免 enrichSongsPrivilegeLite 升级主 hash 为 FLAC/Hi-Res 后按旧 hash 查表 miss 丢弃补全结果！
     val enrichedQueue = suspendRunCatching { enrichSongsPrivilegeLite(snapshot.queue) }.getOrDefault(snapshot.queue)
-    val enrichedByKey = enrichedQueue.associateBy { (it.hash.ifBlank { it.id }).lowercase(Locale.ROOT) }
+    val enrichedByAnyKey = HashMap<String, Song>()
+    snapshot.queue.forEachIndexed { idx, orig ->
+        val enriched = enrichedQueue.getOrNull(idx) ?: return@forEachIndexed
+        val mergedSong = enriched.copy(sourceDeviceLabel = orig.sourceDeviceLabel.ifBlank { enriched.sourceDeviceLabel })
+        orig.allLowercaseHashes().forEach { h -> enrichedByAnyKey[h] = mergedSong }
+        enriched.allLowercaseHashes().forEach { h -> enrichedByAnyKey.putIfAbsent(h, mergedSong) }
+        if (orig.id.isNotBlank()) enrichedByAnyKey[orig.id.lowercase(Locale.ROOT)] = mergedSong
+        if (enriched.id.isNotBlank()) enrichedByAnyKey.putIfAbsent(enriched.id.lowercase(Locale.ROOT), mergedSong)
+    }
     fun mapEnriched(s: Song): Song {
-        val hit = enrichedByKey[(s.hash.ifBlank { s.id }).lowercase(Locale.ROOT)] ?: return s
+        val hit = s.allLowercaseHashes().firstNotNullOfOrNull { enrichedByAnyKey[it] }
+            ?: s.id.takeIf { it.isNotBlank() }?.let { enrichedByAnyKey[it.lowercase(Locale.ROOT)] }
+            ?: return s
         return hit.copy(sourceDeviceLabel = s.sourceDeviceLabel.ifBlank { hit.sourceDeviceLabel })
     }
     val updatedGroups = snapshot.deviceGroups.map { grp ->
@@ -1546,82 +1786,85 @@ suspend fun MusicApiRepository.fetchCrossDeviceContinuePlay(pageSize: Int = 30):
 }
 
 suspend fun MusicApiRepository.fetchLoginDevices(): List<LoginDeviceItem> {
-    val session = accounts.context()?.session ?: return emptyList()
-    val currentMid = device().mid
-    val clientTimeMs = System.currentTimeMillis()
-    val encrypted = KugouSigner.encrypt(KugouSigner.gson.toJson(mapOf("token" to session.token)))
-    val pkPayload = KugouSigner.gson.toJson(mapOf("clienttime_ms" to clientTimeMs, "key" to encrypted.key))
-    val pk = KugouSigner.rsa(pkPayload, useStandardKey = false).uppercase(Locale.ROOT)
-    val body = JsonObject().apply {
-        addProperty("plat", 1)
-        addProperty("userid", session.userId.toLongOrNull() ?: 0L)
-        addProperty("clienttime_ms", clientTimeMs)
-        addProperty("pk", pk)
-        addProperty("params", encrypted.ciphertext)
-    }
-    val resp = suspendRunCatching {
-        transport.call(
+    if (accounts.context()?.session == null) return emptyList()
+    return auth { ctx ->
+        val session = ctx.session
+        val currentMid = device().mid
+        val clientTimeMs = System.currentTimeMillis()
+        val encrypted = KugouSigner.encrypt(KugouSigner.gson.toJson(mapOf("token" to session.token)))
+        val pkPayload = KugouSigner.gson.toJson(mapOf("clienttime_ms" to clientTimeMs, "key" to encrypted.key))
+        val pk = KugouSigner.rsa(pkPayload, useStandardKey = false).uppercase(Locale.ROOT)
+        val body = JsonObject().apply {
+            addProperty("plat", 1)
+            addProperty("userid", session.userId.toLongOrNull() ?: 0L)
+            addProperty("clienttime_ms", clientTimeMs)
+            addProperty("pk", pk)
+            addProperty("params", encrypted.ciphertext)
+        }
+        val resp = transport.call(
             path = "/v2/get_dev",
             host = "https://userinfoservice.kugou.com",
             session = session,
             method = "POST",
             body = body
         )
-    }.getOrNull() ?: return emptyList()
+        if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
 
-    val items = mutableListOf<LoginDeviceItem>()
-    val arr = resp.data.arr("list")
-        ?: resp.data.arr("dev_list")
-        ?: resp.data.arr("devices")
-        ?: resp.body.arr("data")
-    if (arr != null) {
-        for (el in arr) {
-            if (!el.isJsonObject) continue
-            val obj = el.asJsonObject
-            val mid = obj.text("mid") ?: obj.text("t_mid") ?: ""
-            val devName = obj.text("dev_name")
-                ?: obj.text("device_name")
-                ?: obj.text("model")
-                ?: obj.text("dev")
-                ?: "酷狗客户端设备"
-            val appId = obj.text("appid") ?: obj.text("t_appid") ?: ""
-            val clientVer = obj.text("clientver") ?: obj.text("t_clientver") ?: ""
-            val platRaw = obj.text("plat") ?: obj.text("platform") ?: ""
-            val platLabel = when {
-                appId == "3116" -> "酷狗概念版"
-                platRaw.contains("win", ignoreCase = true) || platRaw == "0" -> "Windows / PC"
-                platRaw.contains("ios", ignoreCase = true) || platRaw == "2" -> "iOS"
-                platRaw.contains("mac", ignoreCase = true) -> "macOS"
-                else -> "Android"
-            }
-            val loginTimeSec = obj.longVal("login_time") ?: obj.longVal("time") ?: obj.longVal("t") ?: 0L
-            val loginTimeStr = obj.text("login_time_str")
-                ?: if (loginTimeSec > 0L) formatEpochSeconds(loginTimeSec) else ""
-            val tVal = obj.text("t") ?: loginTimeSec.takeIf { it > 0L }?.toString().orEmpty()
-            items.add(
-                LoginDeviceItem(
-                    mid = mid,
-                    deviceName = devName,
-                    platform = platLabel,
-                    appId = appId,
-                    clientVer = clientVer,
-                    loginTime = loginTimeStr,
-                    t = tVal,
-                    isCurrentDevice = mid.isNotBlank() && mid == currentMid
+        val items = mutableListOf<LoginDeviceItem>()
+        val arr = resp.data.arr("list")
+            ?: resp.data.arr("dev_list")
+            ?: resp.data.arr("devices")
+            ?: resp.body.arr("data")
+        if (arr != null) {
+            for (el in arr) {
+                if (!el.isJsonObject) continue
+                val obj = el.asJsonObject
+                val mid = obj.text("mid") ?: obj.text("t_mid") ?: ""
+                val devName = obj.text("dev_name")
+                    ?: obj.text("device_name")
+                    ?: obj.text("model")
+                    ?: obj.text("dev")
+                    ?: "酷狗客户端设备"
+                val appId = obj.text("appid") ?: obj.text("t_appid") ?: ""
+                val clientVer = obj.text("clientver") ?: obj.text("t_clientver") ?: ""
+                val platRaw = obj.text("plat") ?: obj.text("platform") ?: ""
+                val platLabel = when {
+                    appId == "3116" -> "酷狗概念版"
+                    platRaw.contains("win", ignoreCase = true) || platRaw == "0" -> "Windows / PC"
+                    platRaw.contains("ios", ignoreCase = true) || platRaw == "2" -> "iOS"
+                    platRaw.contains("mac", ignoreCase = true) -> "macOS"
+                    else -> "Android"
+                }
+                val loginTimeSec = obj.longVal("login_time") ?: obj.longVal("time") ?: obj.longVal("t") ?: 0L
+                val loginTimeStr = obj.text("login_time_str")
+                    ?: if (loginTimeSec > 0L) formatEpochSeconds(loginTimeSec) else ""
+                val tVal = obj.text("t") ?: loginTimeSec.takeIf { it > 0L }?.toString().orEmpty()
+                items.add(
+                    LoginDeviceItem(
+                        mid = mid,
+                        deviceName = devName,
+                        platform = platLabel,
+                        appId = appId,
+                        clientVer = clientVer,
+                        loginTime = loginTimeStr,
+                        t = tVal,
+                        isCurrentDevice = mid.isNotBlank() && mid == currentMid
+                    )
                 )
-            )
+            }
         }
+        items.sortedByDescending { it.isCurrentDevice }
     }
-    return items.sortedByDescending { it.isCurrentDevice }
 }
 
-suspend fun MusicApiRepository.kickLoginDevice(target: LoginDeviceItem): Boolean {
-    val session = accounts.context()?.session?.takeIf { it.token.isNotBlank() }
-        ?: throw ApiFailure(20010, "请先登录酷狗账号")
-    if (target.mid.isBlank()) return false
+suspend fun MusicApiRepository.kickLoginDevice(target: LoginDeviceItem): Boolean = auth { ctx ->
+    val session = ctx.session
+    if (session.token.isBlank()) throw ApiFailure(20010, "请先登录酷狗账号")
+    if (target.mid.isBlank()) return@auth false
     val d = device()
     val clientTimeMs = System.currentTimeMillis()
-    val h5Token = KugouSigner.rsaNoPadLiteToken(session.token)
+    val h5Token = runCatching { KugouSigner.rsaNoPadLiteToken(session.token) }
+        .getOrElse { return@auth false }
     val query = linkedMapOf(
         "appid" to KugouSigner.APP_ID.toString(),
         "clientver" to KugouSigner.CLIENT_VERSION.toString(),
@@ -1639,15 +1882,14 @@ suspend fun MusicApiRepository.kickLoginDevice(target: LoginDeviceItem): Boolean
         "t_clientver" to target.clientVer.ifBlank { KugouSigner.CLIENT_VERSION.toString() }
     )
     query["signature"] = KugouSigner.signature(query, web = true)
-    val resp = suspendRunCatching {
-        transport.callAdvanced(
-            path = "/loginservice/v1/dev_logout",
-            session = session,
-            query = query,
-            method = "GET",
-            sign = false,
-            includeDefaultParams = false
-        )
-    }.getOrNull() ?: return false
-    return resp.success || resp.status == 1 || resp.code == 0
+    val resp = transport.callAdvanced(
+        path = "/loginservice/v1/dev_logout",
+        session = session,
+        query = query,
+        method = "GET",
+        sign = false,
+        includeDefaultParams = false
+    )
+    if (resp.code == 20010) throw ApiFailure(20010, resp.errorMsg())
+    resp.success
 }

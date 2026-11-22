@@ -57,7 +57,12 @@ object FocusPodManager {
     private var prefs: SharedPreferences? = null
     private var timerJob: Job? = null
     private var ambientObserverJob: Job? = null
+
+    @Volatile
     private var previousSyncWithMusicBeforePod: Boolean? = null
+
+    @Volatile
+    private var ambientTakenOverByPod: Boolean = false
 
     private val _state = MutableStateFlow(FocusPodState())
     val state = _state.asStateFlow()
@@ -151,7 +156,10 @@ object FocusPodManager {
         }
 
         if (_state.value.autoMixAmbient) {
-            previousSyncWithMusicBeforePod = AmbientSoundManager.state.value.syncWithMusic
+            if (!ambientTakenOverByPod) {
+                previousSyncWithMusicBeforePod = AmbientSoundManager.state.value.syncWithMusic
+                ambientTakenOverByPod = true
+            }
             AmbientSoundManager.setCoexistWithAppMusic(_state.value.autoPlaySceneMusic)
             AmbientSoundManager.setSyncWithMusic(false)
             AmbientSoundManager.applyQuickScene(preset.ambientSceneKey)
@@ -194,12 +202,7 @@ object FocusPodManager {
                     completedPodsToday = newPods
                 )
             }
-            if (_state.value.autoMixAmbient) {
-                AmbientSoundManager.setCoexistWithAppMusic(false)
-                previousSyncWithMusicBeforePod?.let { AmbientSoundManager.setSyncWithMusic(it) }
-                previousSyncWithMusicBeforePod = null
-                AmbientSoundManager.setMasterEnabled(false)
-            }
+            releasePodAmbientTakeover()
         }
     }
 
@@ -213,12 +216,16 @@ object FocusPodManager {
                 remainingSeconds = preset.minutes * 60L
             )
         }
-        if (_state.value.autoMixAmbient) {
-            AmbientSoundManager.setCoexistWithAppMusic(false)
-            previousSyncWithMusicBeforePod?.let { AmbientSoundManager.setSyncWithMusic(it) }
-            previousSyncWithMusicBeforePod = null
-            AmbientSoundManager.setMasterEnabled(false)
-        }
+        releasePodAmbientTakeover()
+    }
+
+    private fun releasePodAmbientTakeover() {
+        if (!ambientTakenOverByPod) return
+        ambientTakenOverByPod = false
+        AmbientSoundManager.setCoexistWithAppMusic(false)
+        previousSyncWithMusicBeforePod?.let { AmbientSoundManager.setSyncWithMusic(it) }
+        previousSyncWithMusicBeforePod = null
+        AmbientSoundManager.setMasterEnabled(false)
     }
 
     private fun saveStats(pods: Int, mins: Int) {

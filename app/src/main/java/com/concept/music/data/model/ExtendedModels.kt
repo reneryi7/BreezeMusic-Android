@@ -188,7 +188,12 @@ data class ContinuePlaySnapshot(
         val sameTitleArtist = remote.title.equals(currentSong.title, ignoreCase = true) &&
             remote.artist.equals(currentSong.artist, ignoreCase = true)
         if (sameHash || sameId || sameTitleArtist) return false
-        return !isCurrentlyPlaying || primarySourceType == "pc" || primarySourceType == "car" || primarySourceType == "tv" || deviceGroups.size > 1
+        return !isCurrentlyPlaying ||
+            primarySourceType == "pc" ||
+            primarySourceType == "car" ||
+            primarySourceType == "tv" ||
+            primarySourceType == "tablet" ||
+            deviceGroups.size > 1
     }
 }
 

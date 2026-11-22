@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.6-00E5FF?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.0-00E5FF?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--34)-3898FF?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Language-Kotlin%201.9-7F52FF?style=flat-square" alt="Kotlin" />
   <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20%2B%20120fps%20Spring-0EA5E9?style=flat-square" alt="Compose" />
@@ -32,7 +32,8 @@
 
 ### 1. 纯端侧直连、曲库生态与双端双向分享
 * **零后端端侧直连**：纯 Kotlin 实现概念版协议签名、RSA/AES 加解密与设备风控注册，所有请求由手机/平板直连官方网关，内置多通道容灾路由。
-* **完整曲库生态与双向同步**：覆盖每日推荐（含当前播放一键居中定位）、私人 FM、新歌速递（华语 / 欧美 / 日韩 / 粤语四大精准语种 + 吸顶时间轴）、官方巅峰排行榜、随心听电台广场、实时热搜榜、歌手/专辑详情、多级楼中楼评论区以及歌单双向实时收藏同步。
+* **完整曲库生态与双向同步**：覆盖每日推荐（支持下拉回溯历史日期与当前播放一键居中定位）、私人 FM（支持推荐策略偏好与 4.5s 撤销负反馈）、新歌速递（华语 / 欧美 / 日韩 / 粤语四大精准语种 + 吸顶时间轴）、官方巅峰排行榜、随心听电台广场、实时热搜榜与歌词搜歌（关键词高亮）、歌手/专辑详情与关注歌手新歌动态、个人音乐云盘、云端听歌排行、歌曲「更多版本」原位切播、歌单云端编辑与长按拖拽排序、歌曲/歌单/专辑评论区以及实时歌曲/歌手黑名单过滤。
+* **跨设备「继续播放」接力与设备管理**：智能感知 PC / 手机 / 平板 / 车载 / TV 端活跃播放队列并支持一键无缝接力与推送当前播放至云端；账号管理页支持查看在线登录设备与远程安全下线。
 * **酷狗双端双向分享与解析**：支持标准版与概念版双向唤醒分享，内置 `KugouShareLinkParser` 零网络离线解码与短链安全解析，支持单曲即刻播放与外部歌单预览/一键批量导入。
 * **账号权益状态同步与低功耗守护**：支持手机短信验证码登录（自动识别同手机号下多账号切换）与二维码扫码登录，支持账号权益状态同步、CSCC 真实听歌时长心跳上报及基于系统 `JobScheduler` 的低功耗定时同步任务。
 
@@ -82,8 +83,8 @@
 
 | 安装包变体 | 文件名示例 | 包名与特性说明 |
 | :--- | :--- | :--- |
-| **手机版（推荐手机用户）** | `BreezeMusic-phone-v1.3.6.apk` | 包名 `com.concept.music`，竖屏交互优化，支持由历史手机版直接覆盖升级 |
-| **平板版（推荐平板/大屏用户）** | `BreezeMusic-tablet-v1.3.6.apk` | 独立包名 `com.concept.music.tablet` 与独立签名，大屏双栏与自由旋转，可与手机版共存 |
+| **手机版（推荐手机用户）** | `BreezeMusic-phone-v1.4.0.apk` | 包名 `com.concept.music`，竖屏交互优化，支持由历史手机版直接覆盖升级 |
+| **平板版（推荐平板/大屏用户）** | `BreezeMusic-tablet-v1.4.0.apk` | 独立包名 `com.concept.music.tablet` 与独立签名，大屏双栏与自由旋转，可与手机版共存 |
 
 > [!TIP]
 > **安装与校验提示**
@@ -138,7 +139,7 @@ BreezeMusic-Android/
 ├── .github/
 │   └── ISSUE_TEMPLATE/                              # Bug 反馈与功能建议表单模板
 ├── app/
-│   ├── build.gradle.kts                             # 模块级 Gradle 构建配置 (v1.3.6, phone/tablet 双变体独立签名与安全回退)
+│   ├── build.gradle.kts                             # 模块级 Gradle 构建配置 (v1.4.0, phone/tablet 双变体独立签名与安全回退)
 │   ├── proguard-rules.pro                           # Release 混淆、R8 精简与日志剥离规则
 │   └── src/
 │       ├── main/

@@ -498,8 +498,12 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
                     else eqFilters[i].setBypass()
                 }
                 PeqFilterType.BAND_PASS -> {
-                    val focusDb = if (abs(gainDb) >= 0.5) gainDb.coerceIn(-8.0, 8.0) else 3.0
-                    eqFilters[i].configurePeaking(freq, sr, focusDb, q = (qVal * 1.35).coerceIn(0.5, 8.0))
+                    if (dspActive) {
+                        val focusDb = if (abs(gainDb) >= 0.5) gainDb.coerceIn(-8.0, 8.0) else 3.0
+                        eqFilters[i].configurePeaking(freq, sr, focusDb, q = (qVal * 1.35).coerceIn(0.5, 8.0))
+                    } else {
+                        eqFilters[i].setBypass()
+                    }
                 }
             }
         }

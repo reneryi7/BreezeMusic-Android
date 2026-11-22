@@ -108,7 +108,8 @@ fun RadioScreen(
     }
     LaunchedEffect(fmChannels) {
         if (fmChannels.isNotEmpty() && fmChannels.none { it.id == selectedChannelId }) {
-            if (initialChannelId.isBlank() || initialChannelId == "all") {
+            val isExplicitInitial = initialChannelId.isNotBlank() && initialChannelId != "all" && selectedChannelId == initialChannelId
+            if (!isExplicitInitial) {
                 selectedChannelId = fmChannels.first().id
             }
         }

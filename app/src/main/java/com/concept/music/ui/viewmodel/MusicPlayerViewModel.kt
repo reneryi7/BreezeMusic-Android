@@ -421,8 +421,16 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             VipManager.history.add(currentUser, song)
         }
         KugouCsccReporter.onSongStart(song)
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { VipManager.music.uploadPlayHistory(song) }
+        // 仅在实际开始新曲播放（非每 60s CSCC 检查点、且非云盘本地文件）时按 15s 节流上报云端播放历史
+        if (recordHistory && !song.isCloudSong) {
+            val nowMs = System.currentTimeMillis()
+            if (song.id != lastCloudHandoffSongId || nowMs - lastCloudHandoffAtMs > 15_000L) {
+                lastCloudHandoffSongId = song.id
+                lastCloudHandoffAtMs = nowMs
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching { VipManager.music.uploadPlayHistory(song) }
+                }
+            }
         }
         if (recordHistory) {
             AudioCacheManager.refreshCacheSize(getApplication())
@@ -474,8 +482,10 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     clearActiveSong = false,
                     notifySongCompleted = true
                 )
-                // 单曲循环下也严格响应「定时结束播完当前歌曲即停」
-                if (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) {
+                // 单曲循环下也严格响应「定时结束播完当前歌曲即停」（包含 Service 先行消费的防竞态确认）
+                val shouldStopForSleep = (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) ||
+                    PlaybackService.consumeViewModelTrackEndStopAck()
+                if (shouldStopForSleep) {
                     activePlayer?.pause()
                     activePlayer?.volume = 1f
                     PlaybackService.consumePendingTrackEndStop()
@@ -507,7 +517,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 clearActiveSong = true,
                 notifySongCompleted = true
             )
-            if (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) {
+            val shouldStopForSleep = (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) ||
+                PlaybackService.consumeViewModelTrackEndStopAck()
+            if (shouldStopForSleep) {
                 activePlayer?.pause()
                 activePlayer?.volume = 1f
                 PlaybackService.consumePendingTrackEndStop()
@@ -758,6 +770,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                         activePlayer?.pause()
                         activePlayer?.clearMediaItems()
                         songsByMediaId.clear()
+                        lastCloudHandoffSongId = ""
+                        lastCloudHandoffAtMs = 0L
+                        lastWidgetSongId = ""
                         VipManager.music.onAccountChanged()
                         mutableState.value = PlayerUiState()
                         mutablePositionFlow.value = PlaybackPositionSnapshot()
@@ -1023,7 +1038,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             fun sanitizePersistedSong(rawSong: Song): Song {
                 val s = rawSong.sanitizeFromJson()
-                if (!s.isHiRes) return s
+                // 云盘曲目所有档位指向同一原始文件 Hash，豁免伪 Hi-Res 清洗
+                if (!s.isHiRes || s.isCloudSong) return s
                 val realHiRes = s.hashHiRes.isNotBlank() &&
                     !s.hashHiRes.equals(s.hash320, ignoreCase = true) &&
                     !s.hashHiRes.equals(s.hash128, ignoreCase = true)
@@ -1311,15 +1327,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             lyricLine = "",
             isPlaying = true
         )
-        // 跨设备继续播放接力：切歌后立即异步同步最近播放至云端（限流防抖，避免短时间重复上报）
-        val nowMs = System.currentTimeMillis()
-        if (!song.isCloudSong && (song.id != lastCloudHandoffSongId || nowMs - lastCloudHandoffAtMs > 15_000L)) {
-            lastCloudHandoffSongId = song.id
-            lastCloudHandoffAtMs = nowMs
-            viewModelScope.launch(Dispatchers.IO) {
-                runCatching { VipManager.music.uploadPlayHistory(song) }
-            }
-        }
+        PlaybackService.clearViewModelTrackEndStopAck()
 
         resolveJob = viewModelScope.launch {
             try {
@@ -1346,6 +1354,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     full.distinct().sortedBy { it.ordinal }
                 }
                 val isTrulyHiRes = resolvedQuality == AudioQuality.HI_RES ||
+                    (song.isCloudSong && song.isHiRes) ||
                     (song.isHiRes && song.hashHiRes.isNotBlank() && !song.hashHiRes.equals(song.hash320, ignoreCase = true))
                 val sanitizedQualities = if (!isTrulyHiRes) {
                     fullQualities.filter { it != AudioQuality.HI_RES }.ifEmpty { listOf(AudioQuality.STANDARD) }
@@ -1397,6 +1406,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     player.setMediaItem(item)
                 }
                 player.repeatMode = if (mutableState.value.playMode == PlayMode.REPEAT_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                AmbientSoundManager.prepareForAppMusicPlayback()
                 player.prepare()
                 if (mutableState.value.climaxModeEnabled && seekToPositionMs == 0L) {
                     triggerClimaxSmoothFadeIn()
@@ -1520,6 +1530,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             }
         } else {
             isPausingWithFade = false
+            PlaybackService.clearViewModelTrackEndStopAck()
+            AmbientSoundManager.prepareForAppMusicPlayback()
             if (player.playbackState == Player.STATE_ENDED) {
                 player.seekTo(0)
             }
@@ -1543,6 +1555,41 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
+     * 在保留用户当前播放队列的前提下切换至歌曲的其他版本（Live / 翻唱 / DJ / 伴奏等）：
+     * - 若原歌位于当前队列，原地替换为新版本并立即切播，绝不覆盖/清空原有歌单队列；
+     * - 若原歌不在当前队列但队列非空，紧邻当前播放位置之后插入并切播；
+     * - 仅当当前队列为空时以单曲队列起播。
+     */
+    fun playVersionInCurrentQueue(versionSong: Song, originalSong: Song) {
+        val curQueue = mutableState.value.playlistQueue
+        if (curQueue.isEmpty()) {
+            playSong(versionSong, listOf(versionSong))
+            return
+        }
+        val origIdx = curQueue.indexOfFirst {
+            it.id == originalSong.id ||
+                (originalSong.hash.isNotBlank() && it.hash.equals(originalSong.hash, ignoreCase = true))
+        }
+        val nextQueue = curQueue.toMutableList()
+        if (origIdx >= 0) {
+            nextQueue[origIdx] = versionSong
+            playSong(versionSong, nextQueue)
+        } else {
+            val curPlayingIdx = mutableState.value.currentIndex.coerceIn(0, nextQueue.lastIndex)
+            val existingVersionIdx = nextQueue.indexOfFirst {
+                it.id == versionSong.id ||
+                    (versionSong.hash.isNotBlank() && it.hash.equals(versionSong.hash, ignoreCase = true))
+            }
+            if (existingVersionIdx >= 0) {
+                playSong(nextQueue[existingVersionIdx], nextQueue)
+            } else {
+                nextQueue.add((curPlayingIdx + 1).coerceAtMost(nextQueue.size), versionSong)
+                playSong(versionSong, nextQueue)
+            }
+        }
+    }
+
+    /**
      * 显式开始播放（供 Bluetooth/车载 KEYCODE_MEDIA_PLAY 调用，若已在播则保持幂等不误暂停）
      */
     fun ensurePlaying() {
@@ -1558,11 +1605,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * 显式暂停播放（供 Bluetooth/车载 KEYCODE_MEDIA_PAUSE 调用，若已暂停则保持幂等不误恢复）
+     * 显式暂停播放（供 Bluetooth/车载 KEYCODE_MEDIA_PAUSE 调用，覆盖缓冲态 playWhenReady=true）
      */
     fun ensurePaused() {
         val player = activePlayer ?: return
-        if (!player.isPlaying || isPausingWithFade) return
+        if ((!player.isPlaying && !player.playWhenReady) || isPausingWithFade) return
         togglePlayPause()
     }
 
@@ -1809,6 +1856,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         activePlayer?.stop()
         activePlayer?.clearMediaItems()
         songsByMediaId.clear()
+        if (playerOverride == null) {
+            PlaybackService.cancelServiceSleepTimer()
+        }
         val st = mutableState.value
         val remainingRecent = st.recentQueues.filterNot { it.id == st.activeQueueId }
         mutablePositionFlow.value = PlaybackPositionSnapshot(playbackSpeed = st.playbackSpeed)
@@ -2054,6 +2104,18 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             com.concept.music.service.AppPermissionType.MOTION_ORIENTATION,
             enabled
         )
+        persistPlaybackStateAsync()
+    }
+
+    fun restoreDefaultCorePermissions() {
+        val appCtx = runCatching { getApplication<Application>() }.getOrNull()
+        com.concept.music.service.AppPermissionManager.restoreDefaultCorePermissions(appCtx)
+        mutableState.value = mutableState.value.copy(motionOrientationPermissionEnabled = true)
+        PlaybackService.updateHandleAudioBecomingNoisy(mutableState.value.pauseOnHeadsetDisconnect)
+        syncEffectiveLyricOffsetToBridge()
+        updateLyricIndex(currentSmoothPositionMs())
+        PlaybackService.updateKeepPlayingOnTaskRemoved(mutableState.value.keepPlayingOnTaskRemoved)
+        PlaybackService.refreshMediaNotificationCustomLayout()
         persistPlaybackStateAsync()
     }
 
@@ -2702,11 +2764,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             onComplete(false, "评论标识无效")
             return
         }
+        val numericTargetId = song.albumAudioId.takeIf { it > 0L }?.toString()
+            ?: song.mixSongId.trim().takeIf { it.isNotBlank() && it.all(Char::isDigit) }
+            ?: ""
         viewModelScope.launch {
             runCatching {
                 val ok = VipManager.music.deleteComment(
                     targetType = CommentTargetType.SONG,
-                    targetId = song.mixSongId.ifBlank { song.hash },
+                    targetId = numericTargetId,
                     commentId = commentId,
                     tid = tid,
                     song = song
@@ -2715,27 +2780,30 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     onComplete(false, "删除评论失败，请确认该评论由当前账号发布")
                     return@launch
                 }
-                var removedCount = 0
-                val updated = mutableState.value.comments.mapNotNull { root ->
-                    if (root.id == commentId) {
-                        removedCount += 1
-                        null
-                    } else {
-                        val beforeSize = root.replies.size
-                        val filteredReplies = root.replies.filterNot { it.id == commentId }
-                        if (filteredReplies.size < beforeSize) {
-                            removedCount += (beforeSize - filteredReplies.size)
-                            root.copy(
-                                replies = filteredReplies,
-                                replyCount = (root.replyCount - (beforeSize - filteredReplies.size)).coerceAtLeast(0)
-                            )
-                        } else root
+                val activeCommentSongId = (mutableState.value.commentTargetSong ?: mutableState.value.currentSong)?.id
+                if (activeCommentSongId == song.id) {
+                    var removedCount = 0
+                    val updated = mutableState.value.comments.mapNotNull { root ->
+                        if (root.id == commentId) {
+                            removedCount += 1
+                            null
+                        } else {
+                            val beforeSize = root.replies.size
+                            val filteredReplies = root.replies.filterNot { it.id == commentId }
+                            if (filteredReplies.size < beforeSize) {
+                                removedCount += (beforeSize - filteredReplies.size)
+                                root.copy(
+                                    replies = filteredReplies,
+                                    replyCount = (root.replyCount - (beforeSize - filteredReplies.size)).coerceAtLeast(0)
+                                )
+                            } else root
+                        }
                     }
+                    mutableState.value = mutableState.value.copy(
+                        comments = updated,
+                        commentCount = (mutableState.value.commentCount - removedCount.coerceAtLeast(1)).coerceAtLeast(0)
+                    )
                 }
-                mutableState.value = mutableState.value.copy(
-                    comments = updated,
-                    commentCount = (mutableState.value.commentCount - removedCount.coerceAtLeast(1)).coerceAtLeast(0)
-                )
                 onComplete(true, "评论已删除")
             }.onFailure { err ->
                 onComplete(false, err.message ?: "删除评论失败，请稍后重试")
@@ -2883,7 +2951,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 notifySongCompleted = true
             )
         }
-        if (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) {
+        val shouldStopForSleep = (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) ||
+            PlaybackService.consumeViewModelTrackEndStopAck()
+        if (shouldStopForSleep) {
             activePlayer?.pause()
             activePlayer?.volume = 1f
             PlaybackService.consumePendingTrackEndStop()

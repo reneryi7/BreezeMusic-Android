@@ -119,6 +119,12 @@ class SearchViewModel(
         }
     }
 
+    private val tabCurrentPages = mutableMapOf<SearchTab, Int>()
+    private val tabHasMore = mutableMapOf<SearchTab, Boolean>()
+
+    private fun songDedupKey(song: Song): String =
+        song.hash.trim().ifBlank { song.id.trim() }.lowercase()
+
     fun selectTab(tab: SearchTab) {
         if (_selectedTab.value == tab) return
         _selectedTab.value = tab
@@ -136,14 +142,14 @@ class SearchViewModel(
                 SearchTab.LYRIC -> _lyricResults.value.isNotEmpty()
             }
             if (hasWarmCache) {
-                currentPage = 1
-                _hasMore.value = tab != SearchTab.COMPLEX
+                currentPage = tabCurrentPages[tab] ?: 1
+                _hasMore.value = tabHasMore[tab] ?: (tab != SearchTab.COMPLEX)
                 when (tab) {
-                    SearchTab.SONG -> if (_songResults.value.size < pageSize) performSearchForCurrentTab(currentKw, silent = true)
-                    SearchTab.ARTIST -> if (_artistResults.value.size < 10) performSearchForCurrentTab(currentKw, silent = true)
-                    SearchTab.ALBUM -> if (_albumResults.value.size < 12) performSearchForCurrentTab(currentKw, silent = true)
-                    SearchTab.PLAYLIST -> if (_playlistResults.value.size < 12) performSearchForCurrentTab(currentKw, silent = true)
-                    SearchTab.LYRIC -> if (_lyricResults.value.size < pageSize) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.SONG -> if (_songResults.value.size < pageSize && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.ARTIST -> if (_artistResults.value.size < 10 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.ALBUM -> if (_albumResults.value.size < 12 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.PLAYLIST -> if (_playlistResults.value.size < 12 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
+                    SearchTab.LYRIC -> if (_lyricResults.value.size < pageSize && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.COMPLEX -> {}
                 }
             } else {
@@ -168,6 +174,8 @@ class SearchViewModel(
         _lastSearchedKeyword.value = trimmed
         // 每次发起新搜索时始终默认回归「综合」结果页，避免残留上一次的分类记忆
         _selectedTab.value = SearchTab.COMPLEX
+        tabCurrentPages.clear()
+        tabHasMore.clear()
         _lyricResults.value = emptyList()
         _hasSearched.value = true
 
@@ -295,7 +303,10 @@ class SearchViewModel(
                     SearchTab.LYRIC -> {
                         val res = VipManager.music.searchByLyric(keyword, page = 1, pageSize = pageSize)
                         _lyricResults.value = res.songs
-                        _hasMore.value = res.hasMore || res.songs.size >= pageSize
+                        val more = res.hasMore || res.songs.size >= pageSize
+                        tabCurrentPages[SearchTab.LYRIC] = 1
+                        tabHasMore[SearchTab.LYRIC] = more
+                        _hasMore.value = more
                     }
                 }
             } catch (_: Exception) {
@@ -319,55 +330,80 @@ class SearchViewModel(
                     SearchTab.SONG -> {
                         val res = VipManager.music.searchSongs(currentQuery, page = nextPage, pageSize = pageSize)
                         if (res.songs.isNotEmpty()) {
+                            val existingKeys = _songResults.value.map(::songDedupKey).toSet()
+                            val newItems = res.songs.filter { songDedupKey(it) !in existingKeys }
                             currentPage = nextPage
-                            val existingHashes = _songResults.value.map { it.hash.lowercase() }.toSet()
-                            _songResults.value = _songResults.value + res.songs.filter { it.hash.lowercase() !in existingHashes }
-                            _hasMore.value = res.hasMore || res.songs.size >= pageSize
+                            tabCurrentPages[SearchTab.SONG] = nextPage
+                            _songResults.value = _songResults.value + newItems
+                            val more = newItems.isNotEmpty() && (res.hasMore || res.songs.size >= pageSize)
+                            tabHasMore[SearchTab.SONG] = more
+                            _hasMore.value = more
                         } else {
+                            tabHasMore[SearchTab.SONG] = false
                             _hasMore.value = false
                         }
                     }
                     SearchTab.ARTIST -> {
                         val res = VipManager.music.searchArtists(currentQuery, page = nextPage, pageSize = pageSize)
                         if (res.isNotEmpty()) {
-                            currentPage = nextPage
                             val existingIds = _artistResults.value.map { it.id }.toSet()
-                            _artistResults.value = _artistResults.value + res.filter { it.id !in existingIds }
-                            _hasMore.value = res.size >= pageSize
+                            val newItems = res.filter { it.id !in existingIds }
+                            currentPage = nextPage
+                            tabCurrentPages[SearchTab.ARTIST] = nextPage
+                            _artistResults.value = _artistResults.value + newItems
+                            val more = newItems.isNotEmpty() && res.size >= pageSize
+                            tabHasMore[SearchTab.ARTIST] = more
+                            _hasMore.value = more
                         } else {
+                            tabHasMore[SearchTab.ARTIST] = false
                             _hasMore.value = false
                         }
                     }
                     SearchTab.ALBUM -> {
                         val res = VipManager.music.searchAlbums(currentQuery, page = nextPage, pageSize = pageSize)
                         if (res.isNotEmpty()) {
-                            currentPage = nextPage
                             val existingIds = _albumResults.value.map { it.id }.toSet()
-                            _albumResults.value = _albumResults.value + res.filter { it.id !in existingIds }
-                            _hasMore.value = res.size >= pageSize
+                            val newItems = res.filter { it.id !in existingIds }
+                            currentPage = nextPage
+                            tabCurrentPages[SearchTab.ALBUM] = nextPage
+                            _albumResults.value = _albumResults.value + newItems
+                            val more = newItems.isNotEmpty() && res.size >= pageSize
+                            tabHasMore[SearchTab.ALBUM] = more
+                            _hasMore.value = more
                         } else {
+                            tabHasMore[SearchTab.ALBUM] = false
                             _hasMore.value = false
                         }
                     }
                     SearchTab.PLAYLIST -> {
                         val res = VipManager.music.searchPlaylists(currentQuery, page = nextPage, pageSize = pageSize)
                         if (res.isNotEmpty()) {
-                            currentPage = nextPage
                             val existingIds = _playlistResults.value.map { it.id }.toSet()
-                            _playlistResults.value = _playlistResults.value + res.filter { it.id !in existingIds }
-                            _hasMore.value = res.size >= pageSize
+                            val newItems = res.filter { it.id !in existingIds }
+                            currentPage = nextPage
+                            tabCurrentPages[SearchTab.PLAYLIST] = nextPage
+                            _playlistResults.value = _playlistResults.value + newItems
+                            val more = newItems.isNotEmpty() && res.size >= pageSize
+                            tabHasMore[SearchTab.PLAYLIST] = more
+                            _hasMore.value = more
                         } else {
+                            tabHasMore[SearchTab.PLAYLIST] = false
                             _hasMore.value = false
                         }
                     }
                     SearchTab.LYRIC -> {
                         val res = VipManager.music.searchByLyric(currentQuery, page = nextPage, pageSize = pageSize)
                         if (res.songs.isNotEmpty()) {
+                            val existingKeys = _lyricResults.value.map(::songDedupKey).toSet()
+                            val newItems = res.songs.filter { songDedupKey(it) !in existingKeys }
                             currentPage = nextPage
-                            val existingHashes = _lyricResults.value.map { it.hash.lowercase() }.toSet()
-                            _lyricResults.value = _lyricResults.value + res.songs.filter { it.hash.lowercase() !in existingHashes }
-                            _hasMore.value = res.hasMore || res.songs.size >= pageSize
+                            tabCurrentPages[SearchTab.LYRIC] = nextPage
+                            _lyricResults.value = _lyricResults.value + newItems
+                            val more = newItems.isNotEmpty() && (res.hasMore || res.songs.size >= pageSize)
+                            tabHasMore[SearchTab.LYRIC] = more
+                            _hasMore.value = more
                         } else {
+                            tabHasMore[SearchTab.LYRIC] = false
                             _hasMore.value = false
                         }
                     }
