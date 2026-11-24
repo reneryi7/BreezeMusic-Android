@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material3.Icon
@@ -130,6 +131,11 @@ fun SongItemRow(
     modifier: Modifier = Modifier,
     isPlaying: Boolean = false,
     orderIndex: Int? = null,
+    isReorderMode: Boolean = false,
+    isDraggingRow: Boolean = false,
+    dragHandleModifier: Modifier = Modifier,
+    trailingActionContent: (@Composable () -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     onMoreClick: (() -> Unit)? = null
 ) {
     val isDark = LocalIsDarkTheme.current
@@ -159,19 +165,56 @@ fun SongItemRow(
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 2.dp)
             .drawBehind {
-                if (isPlaying) {
+                if (isDraggingRow || isPlaying) {
                     val r = 16.dp.toPx()
                     drawRoundRect(
-                        color = ActiveRowBgColor,
+                        color = if (isDraggingRow) ConceptPrimary.copy(alpha = 0.18f) else ActiveRowBgColor,
                         cornerRadius = CornerRadius(r, r)
                     )
                 }
             }
-            .softClickable(pressScale = 0.985f, pressAlpha = 0.88f, onClick = onClick)
+            .then(
+                if (isReorderMode) {
+                    Modifier
+                } else {
+                    Modifier.softClickable(
+                        pressScale = 0.985f,
+                        pressAlpha = 0.88f,
+                        onLongClick = onLongClick,
+                        onClick = onClick
+                    )
+                }
+            )
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (orderIndex != null) {
+        if (isReorderMode) {
+            Box(
+                modifier = Modifier
+                    .width(38.dp)
+                    .padding(end = 6.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isDraggingRow) ConceptPrimary.copy(alpha = 0.24f)
+                            else ConceptPrimary.copy(alpha = 0.10f)
+                        )
+                        .then(dragHandleModifier),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DragHandle,
+                        contentDescription = "拖动调整顺序",
+                        tint = if (isDraggingRow) ConceptPrimary else ConceptPrimary.copy(alpha = 0.88f),
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+            }
+        } else if (orderIndex != null) {
             Box(
                 modifier = Modifier.width(32.dp),
                 contentAlignment = Alignment.CenterStart
@@ -214,7 +257,7 @@ fun SongItemRow(
                 )
             }
 
-            if (orderIndex == null && isPlaying) {
+            if (orderIndex == null && !isReorderMode && isPlaying) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -234,8 +277,8 @@ fun SongItemRow(
             Text(
                 text = song.title,
                 style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.SemiBold,
-                    color = if (isPlaying) ConceptPrimary else MaterialTheme.colorScheme.onSurface
+                    fontWeight = if (isPlaying || isDraggingRow) FontWeight.Bold else FontWeight.SemiBold,
+                    color = if (isPlaying || isDraggingRow) ConceptPrimary else MaterialTheme.colorScheme.onSurface
                 ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -270,7 +313,12 @@ fun SongItemRow(
             }
         }
 
-        if (onMoreClick != null) {
+        if (trailingActionContent != null) {
+            Spacer(modifier = Modifier.width(6.dp))
+            trailingActionContent()
+        }
+
+        if (onMoreClick != null && !isReorderMode) {
             Box(
                 modifier = Modifier
                     .size(38.dp)

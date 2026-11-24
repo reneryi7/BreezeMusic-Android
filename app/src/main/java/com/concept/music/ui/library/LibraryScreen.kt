@@ -47,6 +47,8 @@ import com.concept.music.data.model.*
 import com.concept.music.data.vip.VipManager
 import com.concept.music.service.FocusPodManager
 import com.concept.music.ui.components.BadgeTag
+import com.concept.music.ui.components.LibraryShortcutGlyph
+import com.concept.music.ui.components.RefinedShortcutBadge
 import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
 import com.concept.music.ui.components.CreatePlaylistDialog
 import com.concept.music.ui.components.FocusPodBottomSheet
@@ -99,7 +101,8 @@ fun LibraryScreen(
     onOpenArtist: (String) -> Unit = {},
     onOpenAlbum: (String) -> Unit = {},
     onPlaySong: (Song, List<Song>) -> Unit = { _, _ -> },
-    onOpenCloudDiskSheet: (() -> Unit)? = null,
+    onOpenCloudDisk: () -> Unit = {},
+    onOpenListenRank: () -> Unit = {},
     onOpenPlaylistSortSheet: ((Boolean) -> Unit)? = null,
     isOverlayOpen: Boolean = false,
     onSubSheetOpenChanged: (Boolean) -> Unit = {},
@@ -118,19 +121,16 @@ fun LibraryScreen(
     val isGradeSyncing by viewModel.isGradeSyncing.collectAsState()
     val libraryLoading by viewModel.libraryLoading.collectAsState()
     val followedArtists by viewModel.followedArtists.collectAsState()
-    val followedArtistNewReleases by viewModel.followedArtistNewReleases.collectAsState()
-    val followedNewReleasesLoading by viewModel.followedNewReleasesLoading.collectAsState()
     val purchasedSongs by viewModel.purchasedSongs.collectAsState()
     val purchasedAlbums by viewModel.purchasedAlbums.collectAsState()
     val cloudDiskSummary by viewModel.cloudDiskSummary.collectAsState()
-    val cloudDiskLoading by viewModel.cloudDiskLoading.collectAsState()
-    val cloudDiskLoadingMore by viewModel.cloudDiskLoadingMore.collectAsState()
-    val cloudDiskError by viewModel.cloudDiskError.collectAsState()
-    val listenRankWeek by viewModel.listenRankWeek.collectAsState()
+    val localListenStatsVersion by VipManager.listenStats.statsVersion.collectAsState()
+    val localListenTotalCount = remember(account.currentId, localListenStatsVersion) {
+        VipManager.listenStats.getTotalPlayCount(account.currentId)
+    }
 
     val selectedTab by viewModel.selectedAssetTab.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
-    var followSubTab by remember { mutableIntStateOf(0) }
 
     val myPlaylists = remember(playlists) { playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isDefaultCollect } }
     val favoritePlaylists = remember(playlists) { playlists.filter { it.isFavorite && !it.isDefaultCollect } }
@@ -145,7 +145,6 @@ fun LibraryScreen(
     var importRawText by remember { mutableStateOf("") }
     var showVipCenterSheet by remember { mutableStateOf(false) }
     var showFocusPodSheet by remember { mutableStateOf(false) }
-    var showCloudDiskSheet by remember { mutableStateOf(false) }
     var playlistSortTargetTab by remember { mutableStateOf<Int?>(null) }
     var showAssetToolsMenu by remember { mutableStateOf(false) }
     var isLibrarySubSheetDismissing by remember { mutableStateOf(false) }
@@ -155,19 +154,18 @@ fun LibraryScreen(
         if (isOverlayOpen) {
             showFocusPodSheet = false
             showVipCenterSheet = false
-            showCloudDiskSheet = false
             playlistSortTargetTab = null
             isLibrarySubSheetDismissing = false
         }
     }
 
-    LaunchedEffect(showFocusPodSheet, showVipCenterSheet, showCloudDiskSheet, playlistSortTargetTab) {
-        if (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || playlistSortTargetTab != null) {
+    LaunchedEffect(showFocusPodSheet, showVipCenterSheet, playlistSortTargetTab) {
+        if (showFocusPodSheet || showVipCenterSheet || playlistSortTargetTab != null) {
             isLibrarySubSheetDismissing = false
         }
     }
 
-    val anyLibrarySubSheetOpen = (showFocusPodSheet || showVipCenterSheet || showCloudDiskSheet || playlistSortTargetTab != null) && !isOverlayOpen && !isLibrarySubSheetDismissing
+    val anyLibrarySubSheetOpen = (showFocusPodSheet || showVipCenterSheet || playlistSortTargetTab != null) && !isOverlayOpen && !isLibrarySubSheetDismissing
     LaunchedEffect(anyLibrarySubSheetOpen) {
         onSubSheetOpenChanged(anyLibrarySubSheetOpen)
     }
@@ -306,7 +304,7 @@ fun LibraryScreen(
                         MediaShortcutCard(
                             title = "我喜欢",
                             subtitle = "${likedPlaylist?.trackCount ?: 0} 首歌曲",
-                            icon = Icons.Rounded.Favorite,
+                            glyph = LibraryShortcutGlyph.FAVORITE,
                             iconTint = ConceptCoralAccent,
                             gradientColors = likeGradient,
                             onClick = { onOpenPlaylist("like") },
@@ -315,7 +313,7 @@ fun LibraryScreen(
                         MediaShortcutCard(
                             title = "最近播放",
                             subtitle = "$historyCount 首记录",
-                            icon = Icons.Rounded.History,
+                            glyph = LibraryShortcutGlyph.HISTORY,
                             iconTint = ConceptPrimary,
                             gradientColors = historyGradient,
                             onClick = { onOpenPlaylist("history") },
@@ -329,29 +327,26 @@ fun LibraryScreen(
                         MediaShortcutCard(
                             title = "音乐云盘",
                             subtitle = if (cloudDiskSummary.totalCount > 0) "${cloudDiskSummary.totalCount} 首曲目" else "私有云端曲库",
-                            icon = Icons.Rounded.CloudQueue,
+                            glyph = LibraryShortcutGlyph.CLOUD_DISK,
                             iconTint = cyanAccent,
                             gradientColors = cloudGradient,
                             onClick = {
                                 if (!isLoggedIn) {
                                     Toast.makeText(context, "请先登录酷狗账号查看音乐云盘", Toast.LENGTH_SHORT).show()
                                     onLogin()
-                                } else if (onOpenCloudDiskSheet != null) {
-                                    onOpenCloudDiskSheet()
                                 } else {
-                                    showCloudDiskSheet = true
-                                    viewModel.loadCloudDisk(force = false)
+                                    onOpenCloudDisk()
                                 }
                             },
                             modifier = Modifier.weight(1f)
                         )
                         MediaShortcutCard(
                             title = "听歌排行",
-                            subtitle = if (listenRankWeek.isNotEmpty()) "本周 Top ${listenRankWeek.size}" else "周榜与累计榜",
-                            icon = Icons.Rounded.Leaderboard,
+                            subtitle = if (localListenTotalCount > 0) "累计播放 $localListenTotalCount 次" else "微风本机听歌统计",
+                            glyph = LibraryShortcutGlyph.LISTEN_RANK,
                             iconTint = goldAccent,
                             gradientColors = rankGradient,
-                            onClick = { onOpenPlaylist("listen_rank") },
+                            onClick = onOpenListenRank,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -573,15 +568,14 @@ fun LibraryScreen(
                                         onClick = {
                                             assetRefreshSpin += 1
                                             if (selectedTab == 2) {
-                                                if (followSubTab == 0) viewModel.refreshFollowedArtists()
-                                                else viewModel.loadFollowedArtistNewReleases(force = true)
+                                                viewModel.refreshFollowedArtists()
                                             } else if (selectedTab == 3) viewModel.refreshPurchasedAssets()
                                         },
                                         modifier = Modifier.size(38.dp)
                                     ) {
                                         ConceptFluidRefreshIcon(
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            isRefreshing = libraryLoading || (selectedTab == 2 && followSubTab == 1 && followedNewReleasesLoading),
+                                            isRefreshing = libraryLoading,
                                             spinTrigger = assetRefreshSpin,
                                             modifier = Modifier.size(17.dp)
                                         )
@@ -688,185 +682,7 @@ fun LibraryScreen(
                                 }
                             }
                             2 -> {
-                                // 关注歌手 + 新歌动态双子切换（无外框开放式行排版 + 极光薄荷绿点缀）
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = 6.dp, bottom = 8.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    listOf(
-                                        0 to "关注歌手 (${followedArtists.size})",
-                                        1 to "新歌动态${if (followedArtistNewReleases.isNotEmpty()) " (${followedArtistNewReleases.size})" else ""}"
-                                    ).forEach { (idx, label) ->
-                                        val selected = followSubTab == idx
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = if (selected) ConceptMintAccent.copy(alpha = 0.16f) else elevatedColor,
-                                            modifier = Modifier.softCardClickable(shape = RoundedCornerShape(12.dp)) {
-                                                followSubTab = idx
-                                                if (idx == 1 && isLoggedIn && followedArtistNewReleases.isEmpty()) {
-                                                    viewModel.loadFollowedArtistNewReleases(force = false)
-                                                }
-                                            }
-                                        ) {
-                                            Text(
-                                                text = label,
-                                                color = if (selected) ConceptMintAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontSize = 12.sp,
-                                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                if (followSubTab == 1) {
-                                    LaunchedEffect(isLoggedIn, followSubTab) {
-                                        if (isLoggedIn && followSubTab == 1 && followedArtistNewReleases.isEmpty()) {
-                                            viewModel.loadFollowedArtistNewReleases(force = false)
-                                        }
-                                    }
-                                    if (followedNewReleasesLoading && followedArtistNewReleases.isEmpty()) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 36.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            CircularProgressIndicator(color = ConceptMintAccent, strokeWidth = 2.5.dp, modifier = Modifier.size(28.dp))
-                                        }
-                                    } else if (followedArtistNewReleases.isEmpty()) {
-                                        Column(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 36.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Text(
-                                                text = if (isLoggedIn) "近期暂无已关注歌手的新歌动态" else "请先登录查看关注歌手新歌动态",
-                                                style = MaterialTheme.typography.bodyMedium.copy(
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            )
-                                            if (isLoggedIn) {
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                TextButton(onClick = { viewModel.loadFollowedArtistNewReleases(force = true) }) {
-                                                    Text("刷新动态", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ConceptMintAccent)
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        val releaseQueue = remember(followedArtistNewReleases) {
-                                            followedArtistNewReleases.mapNotNull { it.song }
-                                        }
-                                        followedArtistNewReleases.forEach { release ->
-                                            val relThumb = rememberOptimizedAsyncImageModel(rawUrl = release.coverUrl, sizePx = 156, targetCdnSize = "150")
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .softClickable {
-                                                        val s = release.song
-                                                        if (s != null) {
-                                                            onPlaySong(s, releaseQueue.ifEmpty { listOf(s) })
-                                                        } else if (release.albumId.isNotBlank()) {
-                                                            onOpenAlbum(release.albumId)
-                                                        } else if (release.artistId.isNotBlank()) {
-                                                            onOpenArtist(release.artistId)
-                                                        }
-                                                    }
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    if (relThumb != null) {
-                                                        AsyncImage(
-                                                            model = relThumb,
-                                                            contentDescription = release.title,
-                                                            contentScale = ContentScale.Crop,
-                                                            filterQuality = FilterQuality.Low,
-                                                            modifier = Modifier
-                                                                .size(54.dp)
-                                                                .clip(RoundedCornerShape(13.dp))
-                                                                .background(elevatedColor)
-                                                        )
-                                                    } else {
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .size(54.dp)
-                                                                .clip(RoundedCornerShape(13.dp))
-                                                                .background(ConceptMintAccent.copy(alpha = 0.16f)),
-                                                            contentAlignment = Alignment.Center
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = if (release.isAlbum) Icons.Rounded.Album else Icons.Rounded.MusicNote,
-                                                                contentDescription = null,
-                                                                tint = ConceptMintAccent,
-                                                                modifier = Modifier.size(24.dp)
-                                                            )
-                                                        }
-                                                    }
-                                                    Spacer(modifier = Modifier.width(13.dp))
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                        ) {
-                                                            Text(
-                                                                text = release.title,
-                                                                color = MaterialTheme.colorScheme.onSurface,
-                                                                fontWeight = FontWeight.Bold,
-                                                                fontSize = 14.5.sp,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis,
-                                                                modifier = Modifier.weight(1f, fill = false)
-                                                            )
-                                                            val tagGold = conceptGoldAccentColor()
-                                                            Surface(
-                                                                shape = RoundedCornerShape(6.dp),
-                                                                color = (if (release.isAlbum) tagGold else ConceptMintAccent).copy(alpha = 0.16f)
-                                                            ) {
-                                                                Text(
-                                                                    text = if (release.isAlbum) "新专辑" else "新歌",
-                                                                    color = if (release.isAlbum) tagGold else ConceptMintAccent,
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp)
-                                                                )
-                                                            }
-                                                        }
-                                                        Spacer(modifier = Modifier.height(3.dp))
-                                                        Text(
-                                                            text = listOfNotNull(
-                                                                release.artistName.takeIf { it.isNotBlank() },
-                                                                release.publishDate.takeIf { it.isNotBlank() }
-                                                            ).joinToString(" · "),
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                            fontSize = 12.sp,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                    }
-                                                    Icon(
-                                                        imageVector = if (release.song != null) Icons.Rounded.PlayCircleOutline else Icons.Rounded.ChevronRight,
-                                                        contentDescription = null,
-                                                        tint = ConceptMintAccent.copy(alpha = 0.8f),
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                }
-                                                HorizontalDivider(
-                                                    modifier = Modifier.padding(start = 71.dp, end = 4.dp),
-                                                    thickness = 0.5.dp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
-                                                )
-                                            }
-                                        }
-                                    }
-                                } else if (followedArtists.isEmpty()) {
+                                if (followedArtists.isEmpty()) {
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -1375,29 +1191,6 @@ fun LibraryScreen(
             )
         }
 
-        if (showCloudDiskSheet && !isOverlayOpen) {
-            CloudDiskBottomSheet(
-                summary = cloudDiskSummary,
-                loading = cloudDiskLoading,
-                loadingMore = cloudDiskLoadingMore,
-                errorMessage = cloudDiskError,
-                onRefresh = { viewModel.loadCloudDisk(force = true) },
-                onLoadMore = { viewModel.loadMoreCloudDisk() },
-                onPlaySong = { item, allItems ->
-                    val queue = allItems.map { it.toSong() }
-                    val target = item.toSong()
-                    onPlaySong(target, queue.ifEmpty { listOf(target) })
-                },
-                onDeleteSong = { item ->
-                    viewModel.deleteCloudSong(item) { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onDismiss = { showCloudDiskSheet = false },
-                onDismissStart = { isLibrarySubSheetDismissing = true }
-            )
-        }
-
         val sortTab = playlistSortTargetTab
         if (sortTab != null && !isOverlayOpen) {
             val isCreatedByMe = sortTab == 0
@@ -1732,7 +1525,7 @@ private fun UnifiedProfileAndGradeCard(
 private fun MediaShortcutCard(
     title: String,
     subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    glyph: LibraryShortcutGlyph,
     iconTint: Color,
     gradientColors: List<Color>,
     onClick: () -> Unit,
@@ -1756,21 +1549,12 @@ private fun MediaShortcutCard(
                 .padding(horizontal = 13.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                modifier = Modifier.size(38.dp),
-                shape = CircleShape,
-                color = iconTint.copy(alpha = 0.16f)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = title,
-                        tint = iconTint,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.width(10.dp))
+            RefinedShortcutBadge(
+                glyph = glyph,
+                accentColor = iconTint,
+                size = 40.dp
+            )
+            Spacer(modifier = Modifier.width(11.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,

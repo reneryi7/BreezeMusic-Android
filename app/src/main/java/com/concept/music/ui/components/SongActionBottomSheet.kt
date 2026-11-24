@@ -63,9 +63,6 @@ fun SongActionBottomSheet(
     onOpenArtist: (() -> Unit)? = null,
     onOpenAlbum: (() -> Unit)? = null,
     onOpenSongDetail: (() -> Unit)? = null,
-    onOpenMoreVersions: (() -> Unit)? = null,
-    onBlockSong: (() -> Unit)? = null,
-    onBlockArtist: (() -> Unit)? = null,
     onRemoveFromCurrentPlaylist: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -348,8 +345,7 @@ fun SongActionBottomSheet(
 
                     val hasDiscoveryGroup = onOpenComments != null ||
                         (onOpenArtist != null && song.artist.isNotBlank()) ||
-                        onOpenAlbum != null ||
-                        (onOpenMoreVersions != null && !song.isCloudSong)
+                        onOpenAlbum != null
                     if (hasDiscoveryGroup) {
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
@@ -386,48 +382,15 @@ fun SongActionBottomSheet(
                         )
                     }
 
-                    if (onOpenMoreVersions != null && !song.isCloudSong) {
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.LibraryMusic,
-                            title = "更多版本 (Live / 翻唱 / 伴奏)",
-                            onClick = { dismissWithAction { onOpenMoreVersions() } }
-                        )
-                    }
-
-                    val hasTechOrNegativeGroup = onOpenSongDetail != null ||
-                        (onBlockSong != null && !song.isCloudSong) ||
-                        (onBlockArtist != null && !song.isCloudSong && song.artist.isNotBlank())
-                    if (hasTechOrNegativeGroup) {
+                    if (onOpenSongDetail != null) {
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
                             modifier = Modifier.padding(vertical = 4.dp)
                         )
-                    }
-
-                    if (onOpenSongDetail != null) {
                         SongActionMenuItem(
                             icon = Icons.Rounded.Info,
                             title = "音频技术参数与特征码",
                             onClick = { dismissWithAction { onOpenSongDetail() } }
-                        )
-                    }
-
-                    if (onBlockSong != null && !song.isCloudSong) {
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.NotInterested,
-                            title = "屏蔽此曲，减少相似推荐",
-                            onClick = { dismissWithAction { onBlockSong() } }
-                        )
-                    }
-
-                    if (onBlockArtist != null && !song.isCloudSong && song.artist.isNotBlank()) {
-                        val primaryArtist = remember(song.artist) {
-                            parseSongArtistNames(song.artist).firstOrNull().orEmpty().ifBlank { song.artist }
-                        }
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.PersonOff,
-                            title = "屏蔽歌手「$primaryArtist」，减少推荐",
-                            onClick = { dismissWithAction { onBlockArtist() } }
                         )
                     }
 

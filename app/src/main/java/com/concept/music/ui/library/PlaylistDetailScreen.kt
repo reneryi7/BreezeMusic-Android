@@ -1,15 +1,21 @@
 package com.concept.music.ui.library
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -36,7 +42,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -52,7 +57,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
-import com.concept.music.data.model.ListenRankItem
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.Song
 import com.concept.music.service.AppPermissionManager
@@ -60,7 +64,6 @@ import com.concept.music.service.AppPermissionType
 import com.concept.music.ui.components.AddToPlaylistDialog
 import com.concept.music.ui.components.ArtworkDownloadCategory
 import com.concept.music.ui.components.ArtworkSaveResult
-import com.concept.music.ui.components.BadgeTag
 import com.concept.music.ui.components.ConceptAdaptiveBottomSheetContainer
 import com.concept.music.ui.components.ConceptListDragReorderState
 import com.concept.music.ui.components.CreatePlaylistDialog
@@ -68,7 +71,6 @@ import com.concept.music.ui.components.FloatingScrollToTopButton
 import com.concept.music.ui.components.HdArtworkPreviewDialog
 import com.concept.music.ui.components.HdArtworkSaver
 import com.concept.music.ui.components.SongItemRow
-import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
 import com.concept.music.ui.components.rememberProgressiveSongList
 import com.concept.music.ui.components.smoothFastScrollToItem
 import com.concept.music.ui.theme.ConceptCategoryTabItem
@@ -81,11 +83,9 @@ import com.concept.music.ui.theme.ConceptPrimaryDark
 import com.concept.music.ui.theme.ConceptSlidingCategoryTabs
 import com.concept.music.ui.theme.ConceptStageBackground
 import com.concept.music.ui.theme.LocalConceptAdaptiveInfo
-import com.concept.music.ui.theme.VipGold
 import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import com.concept.music.ui.theme.conceptFloatingCardColor
-import com.concept.music.ui.theme.conceptGoldAccentColor
 import com.concept.music.ui.theme.conceptSheetContainerColor
 import com.concept.music.ui.theme.rememberCategorySwitchGraphicModifier
 import com.concept.music.ui.theme.softCardClickable
@@ -96,7 +96,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 歌单内排序模式（无门槛直接标配，不设 200 首门槛限制）
+ * 歌单内排序模式（无门槛直接标配，不设 200 首门槛限制；自建歌单云端自定义排序保存后直接作为「默认顺序」呈现）
  */
 private fun Song.selectionKey(): String = "${id}_${hash}"
 
@@ -107,6 +107,11 @@ enum class PlaylistSortMode(val label: String) {
     DURATION_DESC("时长最长")
 }
 
+private data class SortableTrackEntry(
+    val stableKey: String,
+    val song: Song
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistDetailScreen(
@@ -114,6 +119,7 @@ fun PlaylistDetailScreen(
     playlistId: String,
     onBack: () -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
+    onAddNextPlay: ((Song) -> Unit)? = null,
     currentSong: Song? = null,
     onSongMoreClick: ((Song, (() -> Unit)?) -> Unit)? = null,
     onSharePlaylist: ((Playlist) -> Unit)? = null,
@@ -123,33 +129,89 @@ fun PlaylistDetailScreen(
 ) {
     val context = LocalContext.current
     val adaptiveInfo = LocalConceptAdaptiveInfo.current
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val playlists by viewModel.playlists.collectAsState()
     val songs by viewModel.librarySongs.collectAsState()
     val loading by viewModel.libraryLoading.collectAsState()
     val error by viewModel.libraryError.collectAsState()
-    val listenRankWeek by viewModel.listenRankWeek.collectAsState()
-    val listenRankAll by viewModel.listenRankAll.collectAsState()
-    val listenRankWeekLoading by viewModel.listenRankWeekLoading.collectAsState()
-    val listenRankAllLoading by viewModel.listenRankAllLoading.collectAsState()
 
-    val isHistoryOrRank = playlistId == "history" || playlistId == "listen_rank"
+    val isHistory = playlistId == "history"
     var searchQuery by remember { mutableStateOf("") }
     var sortMode by remember { mutableStateOf(PlaylistSortMode.DEFAULT) }
     var isMultiSelectMode by remember { mutableStateOf(false) }
     var selectedSongIds by remember { mutableStateOf(setOf<String>()) }
     var showBatchAddToPlaylistDialog by remember { mutableStateOf(false) }
+    var showBatchRemoveDialog by remember { mutableStateOf(false) }
+    var isBatchRemoving by remember { mutableStateOf(false) }
     var showPlaylistCoverPreview by remember { mutableStateOf(false) }
     var showEditPlaylistDialog by remember { mutableStateOf(false) }
-    var showCloudTrackSortSheet by remember { mutableStateOf(false) }
     var showManageSheet by remember { mutableStateOf(false) }
     var isSubSheetDismissing by remember { mutableStateOf(false) }
-    var historySubTab by remember(playlistId) {
-        mutableIntStateOf(if (playlistId == "listen_rank") 1 else 0)
-    } // 0: 最近播放, 1: 听歌排行
-    var listenRankType by remember { mutableIntStateOf(0) } // 0: 近一周, 1: 累计总榜
-    val activeListenRankLoading = if (listenRankType == 0) listenRankWeekLoading else listenRankAllLoading
+
+    // 页内直接拖拽排序状态（点击外置「排序」后直接在歌单页内将列表序号变为可拖动手柄，并出现取消/完成按钮）
+    var isInlineReorderMode by remember(playlistId) { mutableStateOf(false) }
+    var initialReorderEntries by remember(playlistId) { mutableStateOf<List<SortableTrackEntry>>(emptyList()) }
+    var workingReorderEntries by remember(playlistId) { mutableStateOf<List<SortableTrackEntry>>(emptyList()) }
+    var savingInlineReorder by remember { mutableStateOf(false) }
+
+    val hasInlineOrderChanges = remember(workingReorderEntries, initialReorderEntries) {
+        workingReorderEntries.map { it.stableKey } != initialReorderEntries.map { it.stableKey }
+    }
+
+    fun moveInlineEntry(fromIdx: Int, toIdx: Int) {
+        if (fromIdx == toIdx || fromIdx !in workingReorderEntries.indices || toIdx !in workingReorderEntries.indices) return
+        val next = workingReorderEntries.toMutableList()
+        val moved = next.removeAt(fromIdx)
+        next.add(toIdx, moved)
+        workingReorderEntries = next
+    }
+
+    fun enterInlineReorderMode() {
+        if (songs.size < 2) {
+            Toast.makeText(context, "至少包含 2 首歌曲才能调整顺序", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isMultiSelectMode = false
+        selectedSongIds = emptySet()
+        searchQuery = ""
+        sortMode = PlaylistSortMode.DEFAULT
+        val snapshot = songs.mapIndexed { idx, s -> SortableTrackEntry("${idx}_${s.id}_${s.hash}", s) }
+        initialReorderEntries = snapshot
+        workingReorderEntries = snapshot
+        isInlineReorderMode = true
+    }
+
+    fun cancelInlineReorderMode() {
+        if (savingInlineReorder) return
+        workingReorderEntries = initialReorderEntries
+        isInlineReorderMode = false
+    }
+
+    BackHandler(enabled = isInlineReorderMode) {
+        cancelInlineReorderMode()
+    }
+    BackHandler(enabled = isMultiSelectMode && !isInlineReorderMode) {
+        isMultiSelectMode = false
+        selectedSongIds = emptySet()
+    }
+
+    // 排序模式下已移除中间横条，双栏右侧列表头为 0 项，单栏列表头仅含 pl_header (1 项)
+    val headerCountInList = if (adaptiveInfo.useTwoPaneDetailLayout) 0 else 1
+    val latestHeaderCount by rememberUpdatedState(headerCountInList)
+    val inlineReorderState = remember(listState, coroutineScope) {
+        ConceptListDragReorderState(
+            listState = listState,
+            scope = coroutineScope,
+            defaultRowHeightPx = with(density) { 64.dp.toPx() },
+            itemCountProvider = { workingReorderEntries.size },
+            onCommitMove = { from, to -> moveInlineEntry(from, to) },
+            headerItemCountProvider = { latestHeaderCount },
+            onTargetIndexChanged = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+        )
+    }
 
     val filteredAndSortedSongs = remember(songs, searchQuery, sortMode) {
         val q = searchQuery.trim()
@@ -176,10 +238,10 @@ fun PlaylistDetailScreen(
     }
 
     var lastKnownPlaylist by remember(playlistId) { mutableStateOf<Playlist?>(null) }
-    val currentPlaylist = remember(playlists, playlistId, songs, lastKnownPlaylist, historySubTab) {
+    val currentPlaylist = remember(playlists, playlistId, songs, lastKnownPlaylist) {
         val matched = when (playlistId) {
             "like" -> playlists.firstOrNull { it.isLiked } ?: Playlist("like", "我喜欢的音乐", isLiked = true)
-            "history", "listen_rank" -> Playlist("history", if (historySubTab == 1) "听歌排行" else "最近播放")
+            "history" -> Playlist("history", "最近播放")
             else -> {
                 val directMatch = playlists.firstOrNull { it.matchesIdentifier(playlistId) }
                 val fallbackMatch = if (directMatch == null && lastKnownPlaylist != null) {
@@ -210,17 +272,39 @@ fun PlaylistDetailScreen(
         }
     }
 
-    val isCustomCreated = remember(currentPlaylist, playlistId, isHistoryOrRank) {
-        currentPlaylist != null && currentPlaylist.isCreatedByMe && !currentPlaylist.isLiked && playlistId != "like" && !isHistoryOrRank
+    val isCustomCreated = remember(currentPlaylist, playlistId, isHistory) {
+        currentPlaylist != null && currentPlaylist.isCreatedByMe && !currentPlaylist.isLiked && playlistId != "like" && !isHistory
     }
 
-    val isExternalPlaylist = remember(currentPlaylist, playlistId, isHistoryOrRank) {
-        currentPlaylist != null && !currentPlaylist.isCreatedByMe && playlistId != "like" && !isHistoryOrRank
+    val isExternalPlaylist = remember(currentPlaylist, playlistId, isHistory) {
+        currentPlaylist != null && !currentPlaylist.isCreatedByMe && playlistId != "like" && !isHistory
     }
 
     val effectivePlaylistCoverUrl = remember(currentPlaylist?.coverUrl, songs) {
         currentPlaylist?.coverUrl?.takeIf { it.isNotBlank() }
             ?: songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+    }
+
+    val commitInlineReorder: () -> Unit = {
+        val targetPl = currentPlaylist
+        if (targetPl == null || savingInlineReorder) {
+            // ignore
+        } else if (!hasInlineOrderChanges) {
+            sortMode = PlaylistSortMode.DEFAULT
+            isInlineReorderMode = false
+            Toast.makeText(context, "顺序未变动，已保持默认顺序", Toast.LENGTH_SHORT).show()
+        } else {
+            savingInlineReorder = true
+            val reorderedSongs = workingReorderEntries.map { it.song }
+            viewModel.reorderPlaylistSongs(targetPl, reorderedSongs) { ok, msg ->
+                savingInlineReorder = false
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                if (ok) {
+                    sortMode = PlaylistSortMode.DEFAULT
+                    isInlineReorderMode = false
+                }
+            }
+        }
     }
 
     var showDeletePlaylistDialog by remember { mutableStateOf(false) }
@@ -230,7 +314,7 @@ fun PlaylistDetailScreen(
     var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
     var showCreateDialogFromAdd by remember { mutableStateOf(false) }
 
-    val hasAnySubSheet = showCloudTrackSortSheet || showManageSheet || showSharePlaylistSheet
+    val hasAnySubSheet = showManageSheet || showSharePlaylistSheet
     LaunchedEffect(hasAnySubSheet, isSubSheetDismissing) {
         if (!hasAnySubSheet) isSubSheetDismissing = false
         onSubSheetOpenChanged(hasAnySubSheet && !isSubSheetDismissing)
@@ -242,13 +326,10 @@ fun PlaylistDetailScreen(
     LaunchedEffect(playlistId) {
         val section = when (playlistId) {
             "like" -> "我喜欢"
-            "history", "listen_rank" -> "最近"
+            "history" -> "最近"
             else -> "歌单:$playlistId"
         }
         viewModel.openLibrarySection(section)
-        if (playlistId == "listen_rank") {
-            viewModel.loadListenRank(listenRankType, force = false)
-        }
     }
 
     ConceptStageBackground(modifier = modifier.fillMaxSize()) {
@@ -257,137 +338,196 @@ fun PlaylistDetailScreen(
                 containerColor = Color.Transparent,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 topBar = {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                    ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .statusBarsPadding()
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = onBack) {
+                        IconButton(
+                            onClick = {
+                                when {
+                                    isInlineReorderMode -> cancelInlineReorderMode()
+                                    isMultiSelectMode -> {
+                                        isMultiSelectMode = false
+                                        selectedSongIds = emptySet()
+                                    }
+                                    else -> onBack()
+                                }
+                            }
+                        ) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                                contentDescription = "返回"
+                                imageVector = if (isMultiSelectMode) Icons.Rounded.Close else Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = when {
+                                    isInlineReorderMode -> "退出排序"
+                                    isMultiSelectMode -> "退出多选"
+                                    else -> "返回"
+                                }
                             )
                         }
-                        Text(
-                            text = currentPlaylist?.title ?: "歌单详情",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = when {
+                                    isInlineReorderMode -> "自定义默认排序"
+                                    isMultiSelectMode -> "已选 ${selectedSongIds.size} 首"
+                                    else -> currentPlaylist?.title ?: "歌单详情"
+                                },
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (isInlineReorderMode) {
+                                Text(
+                                    text = if (hasInlineOrderChanges) "顺序已修改 · 点击完成同步云端" else "按住左侧手柄上下拖动 · 共 ${workingReorderEntries.size} 首",
+                                    fontSize = 11.sp,
+                                    color = if (hasInlineOrderChanges) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            } else if (isMultiSelectMode) {
+                                Text(
+                                    text = "共 ${filteredAndSortedSongs.size} 首 · 点击歌曲行即可勾选",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
 
-                        if (songs.isNotEmpty() && !(isHistoryOrRank && historySubTab == 1)) {
+                        if (isInlineReorderMode) {
                             TextButton(
-                                onClick = {
-                                    isMultiSelectMode = !isMultiSelectMode
-                                    if (!isMultiSelectMode) selectedSongIds = emptySet()
-                                }
+                                enabled = !savingInlineReorder,
+                                onClick = { cancelInlineReorderMode() },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                             ) {
                                 Text(
-                                    text = if (isMultiSelectMode) "完成 (${selectedSongIds.size})" else "多选",
-                                    color = ConceptPrimary,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp
+                                    text = "取消",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.5.sp
                                 )
                             }
-                        }
-
-                        if (isHistoryOrRank && historySubTab == 0 && songs.isNotEmpty()) {
-                            IconButton(onClick = viewModel::clearHistory) {
-                                Icon(
-                                    imageVector = Icons.Rounded.DeleteOutline,
-                                    contentDescription = "清空历史",
-                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.85f)
-                                )
-                            }
-                        }
-
-                        if (!isHistoryOrRank && playlistId != "like" && currentPlaylist != null && onOpenPlaylistComments != null) {
-                            IconButton(
-                                onClick = {
-                                    val targetPl = currentPlaylist.copy(
-                                        coverUrl = effectivePlaylistCoverUrl,
-                                        trackCount = if (currentPlaylist.trackCount > 0) currentPlaylist.trackCount else songs.size
-                                    )
-                                    onOpenPlaylistComments(targetPl)
-                                }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Button(
+                                enabled = !savingInlineReorder,
+                                onClick = commitInlineReorder,
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ConceptPrimary,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .padding(end = 6.dp)
+                                    .height(34.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.Comment,
-                                    contentDescription = "歌单评论",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(19.dp)
-                                )
+                                if (savingInlineReorder) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("同步中", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                                } else {
+                                    Text("完成", fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
+                                }
                             }
-                        }
-
-                        if (isHistoryOrRank) {
-                            var plRefreshSpin by remember { mutableIntStateOf(0) }
+                        } else if (isMultiSelectMode) {
+                            val allSelected = filteredAndSortedSongs.isNotEmpty() && selectedSongIds.size == filteredAndSortedSongs.size
                             IconButton(
                                 onClick = {
-                                    plRefreshSpin += 1
-                                    if (historySubTab == 1) {
-                                        viewModel.loadListenRank(listenRankType, force = true)
+                                    selectedSongIds = if (allSelected) {
+                                        emptySet()
                                     } else {
-                                        viewModel.refreshCurrentPlaylistOnly("history")
+                                        filteredAndSortedSongs.map { it.selectionKey() }.toSet()
                                     }
                                 }
                             ) {
-                                ConceptFluidRefreshIcon(
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    isRefreshing = if (historySubTab == 1) activeListenRankLoading else loading,
-                                    spinTrigger = plRefreshSpin,
-                                    modifier = Modifier.size(19.dp)
-                                )
-                            }
-                        } else if (currentPlaylist != null) {
-                            IconButton(
-                                onClick = {
-                                    isSubSheetDismissing = false
-                                    showManageSheet = true
-                                }
-                            ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.MoreVert,
-                                    contentDescription = "更多管理",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(21.dp)
+                                    imageVector = if (allSelected) Icons.Rounded.RemoveDone else Icons.Rounded.DoneAll,
+                                    contentDescription = if (allSelected) "取消全选" else "全选",
+                                    tint = ConceptPrimary
                                 )
                             }
-                        }
-                    }
-
-                    if (isHistoryOrRank) {
-                        val historyTabs = remember {
-                            listOf(
-                                ConceptCategoryTabItem("history", "最近播放", accentColor = ConceptPrimary),
-                                ConceptCategoryTabItem("rank", "听歌排行", accentColor = ConceptPrimary)
-                            )
-                        }
-                        ConceptSlidingCategoryTabs(
-                            tabs = historyTabs,
-                            selectedKey = if (historySubTab == 1) "rank" else "history",
-                            onSelectTab = { key ->
-                                val idx = if (key == "rank") 1 else 0
-                                historySubTab = idx
-                                if (idx == 1) {
-                                    isMultiSelectMode = false
-                                    selectedSongIds = emptySet()
-                                    viewModel.loadListenRank(listenRankType, force = false)
+                        } else {
+                            if (songs.isNotEmpty()) {
+                                IconButton(
+                                    onClick = {
+                                        isMultiSelectMode = true
+                                        selectedSongIds = emptySet()
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Checklist,
+                                        contentDescription = "批量多选",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
-                            },
-                            itemSpacing = 22.dp,
-                            fontSize = 14.5.sp,
-                            indicatorWidth = 22.dp,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
-                        )
-                    }
+                            }
+
+                            if (isHistory && songs.isNotEmpty()) {
+                                IconButton(onClick = viewModel::clearHistory) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteOutline,
+                                        contentDescription = "清空历史",
+                                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.85f)
+                                    )
+                                }
+                            }
+
+                            if (!isHistory && playlistId != "like" && currentPlaylist != null && onOpenPlaylistComments != null) {
+                                IconButton(
+                                    onClick = {
+                                        val targetPl = currentPlaylist.copy(
+                                            coverUrl = effectivePlaylistCoverUrl,
+                                            trackCount = if (currentPlaylist.trackCount > 0) currentPlaylist.trackCount else songs.size
+                                        )
+                                        onOpenPlaylistComments(targetPl)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.Comment,
+                                        contentDescription = "歌单评论",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                            }
+
+                            if (isHistory) {
+                                var plRefreshSpin by remember { mutableIntStateOf(0) }
+                                IconButton(
+                                    onClick = {
+                                        plRefreshSpin += 1
+                                        viewModel.refreshCurrentPlaylistOnly("history")
+                                    }
+                                ) {
+                                    ConceptFluidRefreshIcon(
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        isRefreshing = loading,
+                                        spinTrigger = plRefreshSpin,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                            } else if (currentPlaylist != null) {
+                                IconButton(
+                                    onClick = {
+                                        isSubSheetDismissing = false
+                                        showManageSheet = true
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.MoreVert,
+                                        contentDescription = "更多管理",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             ) { innerPadding ->
@@ -418,32 +558,7 @@ fun PlaylistDetailScreen(
                     }
                 }
 
-                if (isHistoryOrRank && historySubTab == 1) {
-                    LaunchedEffect(listenRankType) {
-                        viewModel.loadListenRank(listenRankType, force = false)
-                    }
-                    ListenRankSectionBody(
-                        rankType = listenRankType,
-                        onSelectRankType = { nextType ->
-                            listenRankType = nextType
-                            viewModel.loadListenRank(nextType, force = false)
-                        },
-                        onRetry = { viewModel.loadListenRank(listenRankType, force = true) },
-                        items = if (listenRankType == 0) listenRankWeek else listenRankAll,
-                        loading = activeListenRankLoading,
-                        currentSong = currentSong,
-                        onSongClick = onSongClick,
-                        onSongMoreClick = { s ->
-                            if (onSongMoreClick != null) onSongMoreClick(s, null)
-                            else selectedSongForMenu = s
-                        },
-                        useTwoColumns = adaptiveInfo.useTwoColumnSongOrCardGrid,
-                        maxWidth = adaptiveInfo.singleColumnMaxWidth,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    )
-                } else if (adaptiveInfo.useTwoPaneDetailLayout) {
+                if (adaptiveInfo.useTwoPaneDetailLayout) {
                     // 平板横屏 / 宽屏双栏布局：左栏固定歌单信息卡片 + 右栏独立滚动曲目列表
                     Row(
                         modifier = Modifier
@@ -457,12 +572,16 @@ fun PlaylistDetailScreen(
                             effectiveCoverUrl = effectivePlaylistCoverUrl,
                             songCount = songs.size,
                             isExternal = isExternalPlaylist,
+                            isCustomCreated = isCustomCreated,
+                            isInlineReorderMode = isInlineReorderMode,
                             onPlayAll = {
                                 if (filteredAndSortedSongs.isNotEmpty()) {
                                     onSongClick(filteredAndSortedSongs.first(), filteredAndSortedSongs)
                                 }
                             },
                             onCollectClick = onCollectToggle,
+                            onEditMetaClick = { showEditPlaylistDialog = true },
+                            onStartInlineSortClick = { enterInlineReorderMode() },
                             onCoverClick = {
                                 if (effectivePlaylistCoverUrl.isNotBlank()) {
                                     showPlaylistCoverPreview = true
@@ -472,155 +591,164 @@ fun PlaylistDetailScreen(
 
                         LazyColumn(
                             state = listState,
+                            userScrollEnabled = !(isInlineReorderMode && inlineReorderState.isDragging),
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight(),
-                            contentPadding = PaddingValues(bottom = 128.dp)
+                            contentPadding = PaddingValues(bottom = if (isMultiSelectMode) 172.dp else 128.dp)
                         ) {
-                            item(key = "pl_toolbar", contentType = "pl_toolbar") {
-                                PlaylistToolbarSection(
-                                    searchQuery = searchQuery,
-                                    onSearchQueryChange = { searchQuery = it },
-                                    sortMode = sortMode,
-                                    onSortModeChange = { sortMode = it },
-                                    isMultiSelectMode = isMultiSelectMode,
-                                    selectedSongIds = selectedSongIds,
-                                    filteredAndSortedSongs = filteredAndSortedSongs,
-                                    onToggleSelectAll = {
-                                        selectedSongIds = if (selectedSongIds.size == filteredAndSortedSongs.size) {
-                                            emptySet()
-                                        } else {
-                                            filteredAndSortedSongs.map { it.selectionKey() }.toSet()
-                                        }
-                                    },
-                                    onPlaySelected = {
-                                        val chosen = filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
-                                        if (chosen.isNotEmpty()) {
-                                            onSongClick(chosen.first(), chosen)
-                                            isMultiSelectMode = false
-                                            selectedSongIds = emptySet()
-                                        }
-                                    },
-                                    onBatchAddSelected = { showBatchAddToPlaylistDialog = true }
-                                )
-                            }
-
-                            if (loading && songs.isEmpty()) {
-                                item {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                                        color = ConceptPrimary
+                            if (!isInlineReorderMode) {
+                                item(key = "pl_toolbar", contentType = "pl_toolbar") {
+                                    PlaylistToolbarSection(
+                                        searchQuery = searchQuery,
+                                        onSearchQueryChange = { searchQuery = it },
+                                        sortMode = sortMode,
+                                        onSortModeChange = { sortMode = it }
                                     )
                                 }
                             }
 
-                            if (error != null) {
-                                item {
-                                    Text(
-                                        text = error ?: "加载失败",
-                                        color = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            if (isInlineReorderMode) {
+                                itemsIndexed(
+                                    items = workingReorderEntries,
+                                    key = { _, entry -> entry.stableKey },
+                                    contentType = { _, _ -> "reorder_song_row" }
+                                ) { idx, entry ->
+                                    InlineDraggableSongRow(
+                                        idx = idx,
+                                        totalCount = workingReorderEntries.size,
+                                        entry = entry,
+                                        saving = savingInlineReorder,
+                                        reorderState = inlineReorderState,
+                                        onResolveLiveIndex = { key -> workingReorderEntries.indexOfFirst { it.stableKey == key } },
+                                        onMoveItem = { from, to -> moveInlineEntry(from, to) },
+                                        onHapticStart = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
                                     )
                                 }
-                            }
+                            } else {
+                                if (loading && songs.isEmpty()) {
+                                    item {
+                                        LinearProgressIndicator(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                                            color = ConceptPrimary
+                                        )
+                                    }
+                                }
 
-                            if (!loading && error == null && filteredAndSortedSongs.isEmpty()) {
-                                item {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .then(sortSwitchAnimMod)
-                                            .padding(vertical = 48.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
+                                if (error != null) {
+                                    item {
                                         Text(
-                                            text = if (searchQuery.isNotBlank()) "未找到匹配「$searchQuery」的歌曲" else "歌单内暂无歌曲",
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = error ?: "加载失败",
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                         )
                                     }
                                 }
-                            }
 
-                            itemsIndexed(
-                                items = displayedPlaylistSongs,
-                                key = { idx, s -> "${s.id}_${s.hash}_$idx" },
-                                contentType = { _, _ -> "song_row" }
-                            ) { index, song ->
-                                val isCurrentTrack = curPlaylistPlayingId != null && (
-                                    curPlaylistPlayingId == song.id ||
-                                        (curPlaylistPlayingHash.isNotEmpty() && curPlaylistPlayingHash.equals(song.hash, ignoreCase = true))
-                                    )
-                                val handleMore: () -> Unit = {
-                                    if (onSongMoreClick != null) {
-                                        val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
-                                            {
-                                                viewModel.removeSongFromPlaylist(currentPlaylist.listId, song) { _, msg ->
-                                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                if (!loading && error == null && filteredAndSortedSongs.isEmpty()) {
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .then(sortSwitchAnimMod)
+                                                .padding(vertical = 48.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (searchQuery.isNotBlank()) "未找到匹配「$searchQuery」的歌曲" else "歌单内暂无歌曲",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+
+                                itemsIndexed(
+                                    items = displayedPlaylistSongs,
+                                    key = { idx, s -> "${s.id}_${s.hash}_$idx" },
+                                    contentType = { _, _ -> "song_row" }
+                                ) { index, song ->
+                                    val isCurrentTrack = curPlaylistPlayingId != null && (
+                                        curPlaylistPlayingId == song.id ||
+                                            (curPlaylistPlayingHash.isNotEmpty() && curPlaylistPlayingHash.equals(song.hash, ignoreCase = true))
+                                        )
+                                    val handleMore: () -> Unit = {
+                                        if (onSongMoreClick != null) {
+                                            val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
+                                                {
+                                                    viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), song) { _, msg ->
+                                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                                    }
                                                 }
+                                            } else null
+                                            onSongMoreClick(song, removeAction)
+                                        } else {
+                                            selectedSongForMenu = song
+                                        }
+                                    }
+
+                                    if (isMultiSelectMode) {
+                                        val songKey = song.selectionKey()
+                                        val isSelected = selectedSongIds.contains(songKey)
+                                        val toggleSongSelection = {
+                                            selectedSongIds = if (isSelected) selectedSongIds - songKey else selectedSongIds + songKey
+                                        }
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp)
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .background(if (isSelected) ConceptPrimary.copy(alpha = 0.11f) else Color.Transparent)
+                                                .then(sortSwitchAnimMod),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            IconButton(
+                                                onClick = toggleSongSelection,
+                                                modifier = Modifier.size(40.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isSelected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                                                    contentDescription = if (isSelected) "取消选中" else "选中",
+                                                    tint = if (isSelected) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                                                    modifier = Modifier.size(22.dp)
+                                                )
                                             }
-                                        } else null
-                                        onSongMoreClick(song, removeAction)
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                SongItemRow(
+                                                    song = song,
+                                                    orderIndex = null,
+                                                    isPlaying = isCurrentTrack,
+                                                    onClick = toggleSongSelection,
+                                                    onMoreClick = null
+                                                )
+                                            }
+                                        }
                                     } else {
-                                        selectedSongForMenu = song
-                                    }
-                                }
-
-                                if (isMultiSelectMode) {
-                                    val songKey = song.selectionKey()
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .then(sortSwitchAnimMod),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Checkbox(
-                                            checked = selectedSongIds.contains(songKey),
-                                            onCheckedChange = { checked ->
-                                                selectedSongIds = if (checked) {
-                                                    selectedSongIds + songKey
-                                                } else {
-                                                    selectedSongIds - songKey
-                                                }
-                                            },
-                                            colors = CheckboxDefaults.colors(checkedColor = ConceptPrimary),
-                                            modifier = Modifier.padding(start = 8.dp)
-                                        )
-                                        Box(modifier = Modifier.weight(1f)) {
+                                        val songKey = song.selectionKey()
+                                        Box(modifier = sortSwitchAnimMod) {
                                             SongItemRow(
                                                 song = song,
                                                 orderIndex = index + 1,
                                                 isPlaying = isCurrentTrack,
                                                 onClick = {
-                                                    selectedSongIds = if (selectedSongIds.contains(songKey)) {
-                                                        selectedSongIds - songKey
-                                                    } else {
-                                                        selectedSongIds + songKey
-                                                    }
+                                                    onSongClick(song, latestFilteredAndSortedSongs)
+                                                },
+                                                onLongClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    isMultiSelectMode = true
+                                                    selectedSongIds = setOf(songKey)
                                                 },
                                                 onMoreClick = handleMore
                                             )
                                         }
-                                    }
-                                } else {
-                                    Box(modifier = sortSwitchAnimMod) {
-                                        SongItemRow(
-                                            song = song,
-                                            orderIndex = index + 1,
-                                            isPlaying = isCurrentTrack,
-                                            onClick = {
-                                                onSongClick(song, latestFilteredAndSortedSongs)
-                                            },
-                                            onMoreClick = handleMore
-                                        )
                                     }
                                 }
                             }
                         }
                     }
                 } else {
-                    // 手机竖屏或平板竖屏/分屏单栏模式（平板竖屏下居中受控最大宽度）
+                    // 手机竖屏或平板竖屏/分屏单栏模式
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -629,6 +757,7 @@ fun PlaylistDetailScreen(
                     ) {
                         LazyColumn(
                             state = listState,
+                            userScrollEnabled = !(isInlineReorderMode && inlineReorderState.isDragging),
                             modifier = Modifier
                                 .then(
                                     if (adaptiveInfo.singleColumnMaxWidth != Dp.Unspecified) {
@@ -636,21 +765,25 @@ fun PlaylistDetailScreen(
                                     } else Modifier
                                 )
                                 .fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 128.dp)
+                            contentPadding = PaddingValues(bottom = if (isMultiSelectMode) 176.dp else 128.dp)
                         ) {
-                            // 1. 歌单头部 Header（点击封面弹出高清预览与保存）
+                            // 1. 歌单头部 Header（外置自建歌单「编辑」与「排序」入口）
                             item(key = "pl_header", contentType = "pl_header") {
                                 PlaylistHeaderCard(
                                     playlist = currentPlaylist,
                                     effectiveCoverUrl = effectivePlaylistCoverUrl,
                                     songCount = songs.size,
                                     isExternal = isExternalPlaylist,
+                                    isCustomCreated = isCustomCreated,
+                                    isInlineReorderMode = isInlineReorderMode,
                                     onPlayAll = {
                                         if (filteredAndSortedSongs.isNotEmpty()) {
                                             onSongClick(filteredAndSortedSongs.first(), filteredAndSortedSongs)
                                         }
                                     },
                                     onCollectClick = onCollectToggle,
+                                    onEditMetaClick = { showEditPlaylistDialog = true },
+                                    onStartInlineSortClick = { enterInlineReorderMode() },
                                     onCoverClick = {
                                         if (effectivePlaylistCoverUrl.isNotBlank()) {
                                             showPlaylistCoverPreview = true
@@ -659,146 +792,154 @@ fun PlaylistDetailScreen(
                                 )
                             }
 
-                            // 2. 歌单内搜索 + 排序切换 + 批量多选栏
-                            item(key = "pl_toolbar", contentType = "pl_toolbar") {
-                                PlaylistToolbarSection(
-                                    searchQuery = searchQuery,
-                                    onSearchQueryChange = { searchQuery = it },
-                                    sortMode = sortMode,
-                                    onSortModeChange = { sortMode = it },
-                                    isMultiSelectMode = isMultiSelectMode,
-                                    selectedSongIds = selectedSongIds,
-                                    filteredAndSortedSongs = filteredAndSortedSongs,
-                                    onToggleSelectAll = {
-                                        selectedSongIds = if (selectedSongIds.size == filteredAndSortedSongs.size) {
-                                            emptySet()
-                                        } else {
-                                            filteredAndSortedSongs.map { it.selectionKey() }.toSet()
-                                        }
-                                    },
-                                    onPlaySelected = {
-                                        val chosen = filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
-                                        if (chosen.isNotEmpty()) {
-                                            onSongClick(chosen.first(), chosen)
-                                            isMultiSelectMode = false
-                                            selectedSongIds = emptySet()
-                                        }
-                                    },
-                                    onBatchAddSelected = { showBatchAddToPlaylistDialog = true }
-                                )
-                            }
-
-                            // 3. 状态提示
-                            if (loading && songs.isEmpty()) {
-                                item {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                                        color = ConceptPrimary
+                            // 2. 歌单内搜索 + 排序切换栏（排序模式下直接进入可拖动列表，不再显示冗余横条）
+                            if (!isInlineReorderMode) {
+                                item(key = "pl_toolbar", contentType = "pl_toolbar") {
+                                    PlaylistToolbarSection(
+                                        searchQuery = searchQuery,
+                                        onSearchQueryChange = { searchQuery = it },
+                                        sortMode = sortMode,
+                                        onSortModeChange = { sortMode = it }
                                     )
                                 }
                             }
 
-                            if (error != null) {
-                                item {
-                                    Text(
-                                        text = error ?: "加载失败",
-                                        color = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            if (isInlineReorderMode) {
+                                itemsIndexed(
+                                    items = workingReorderEntries,
+                                    key = { _, entry -> entry.stableKey },
+                                    contentType = { _, _ -> "reorder_song_row" }
+                                ) { idx, entry ->
+                                    InlineDraggableSongRow(
+                                        idx = idx,
+                                        totalCount = workingReorderEntries.size,
+                                        entry = entry,
+                                        saving = savingInlineReorder,
+                                        reorderState = inlineReorderState,
+                                        onResolveLiveIndex = { key -> workingReorderEntries.indexOfFirst { it.stableKey == key } },
+                                        onMoveItem = { from, to -> moveInlineEntry(from, to) },
+                                        onHapticStart = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
                                     )
                                 }
-                            }
+                            } else {
+                                // 3. 状态提示
+                                if (loading && songs.isEmpty()) {
+                                    item {
+                                        LinearProgressIndicator(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                                            color = ConceptPrimary
+                                        )
+                                    }
+                                }
 
-                            if (!loading && error == null && filteredAndSortedSongs.isEmpty()) {
-                                item {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .then(sortSwitchAnimMod)
-                                            .padding(vertical = 40.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
+                                if (error != null) {
+                                    item {
                                         Text(
-                                            text = if (searchQuery.isNotBlank()) "未找到匹配「$searchQuery」的歌曲" else "歌单内暂无歌曲",
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = error ?: "加载失败",
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                         )
                                     }
                                 }
-                            }
 
-                            // 4. 歌曲列表
-                            itemsIndexed(
-                                items = displayedPlaylistSongs,
-                                key = { idx, s -> "${s.id}_${s.hash}_$idx" },
-                                contentType = { _, _ -> "song_row" }
-                            ) { index, song ->
-                                val isCurrentTrack = curPlaylistPlayingId != null && (
-                                    curPlaylistPlayingId == song.id ||
-                                        (curPlaylistPlayingHash.isNotEmpty() && curPlaylistPlayingHash.equals(song.hash, ignoreCase = true))
-                                    )
-                                val handleMore: () -> Unit = {
-                                    if (onSongMoreClick != null) {
-                                        val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
-                                            {
-                                                viewModel.removeSongFromPlaylist(currentPlaylist.listId, song) { _, msg ->
-                                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                if (!loading && error == null && filteredAndSortedSongs.isEmpty()) {
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .then(sortSwitchAnimMod)
+                                                .padding(vertical = 40.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (searchQuery.isNotBlank()) "未找到匹配「$searchQuery」的歌曲" else "歌单内暂无歌曲",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // 4. 歌曲列表
+                                itemsIndexed(
+                                    items = displayedPlaylistSongs,
+                                    key = { idx, s -> "${s.id}_${s.hash}_$idx" },
+                                    contentType = { _, _ -> "song_row" }
+                                ) { index, song ->
+                                    val isCurrentTrack = curPlaylistPlayingId != null && (
+                                        curPlaylistPlayingId == song.id ||
+                                            (curPlaylistPlayingHash.isNotEmpty() && curPlaylistPlayingHash.equals(song.hash, ignoreCase = true))
+                                        )
+                                    val handleMore: () -> Unit = {
+                                        if (onSongMoreClick != null) {
+                                            val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
+                                                {
+                                                    viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), song) { _, msg ->
+                                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                                    }
                                                 }
+                                            } else null
+                                            onSongMoreClick(song, removeAction)
+                                        } else {
+                                            selectedSongForMenu = song
+                                        }
+                                    }
+
+                                    if (isMultiSelectMode) {
+                                        val songKey = song.selectionKey()
+                                        val isSelected = selectedSongIds.contains(songKey)
+                                        val toggleSongSelection = {
+                                            selectedSongIds = if (isSelected) selectedSongIds - songKey else selectedSongIds + songKey
+                                        }
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp)
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .background(if (isSelected) ConceptPrimary.copy(alpha = 0.11f) else Color.Transparent)
+                                                .then(sortSwitchAnimMod),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            IconButton(
+                                                onClick = toggleSongSelection,
+                                                modifier = Modifier.size(40.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isSelected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                                                    contentDescription = if (isSelected) "取消选中" else "选中",
+                                                    tint = if (isSelected) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                                                    modifier = Modifier.size(22.dp)
+                                                )
                                             }
-                                        } else null
-                                        onSongMoreClick(song, removeAction)
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                SongItemRow(
+                                                    song = song,
+                                                    orderIndex = null,
+                                                    isPlaying = isCurrentTrack,
+                                                    onClick = toggleSongSelection,
+                                                    onMoreClick = null
+                                                )
+                                            }
+                                        }
                                     } else {
-                                        selectedSongForMenu = song
-                                    }
-                                }
-
-                                if (isMultiSelectMode) {
-                                    val songKey = song.selectionKey()
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .then(sortSwitchAnimMod),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Checkbox(
-                                            checked = selectedSongIds.contains(songKey),
-                                            onCheckedChange = { checked ->
-                                                selectedSongIds = if (checked) {
-                                                    selectedSongIds + songKey
-                                                } else {
-                                                    selectedSongIds - songKey
-                                                }
-                                            },
-                                            colors = CheckboxDefaults.colors(checkedColor = ConceptPrimary),
-                                            modifier = Modifier.padding(start = 8.dp)
-                                        )
-                                        Box(modifier = Modifier.weight(1f)) {
+                                        val songKey = song.selectionKey()
+                                        Box(modifier = sortSwitchAnimMod) {
                                             SongItemRow(
                                                 song = song,
                                                 orderIndex = index + 1,
                                                 isPlaying = isCurrentTrack,
                                                 onClick = {
-                                                    selectedSongIds = if (selectedSongIds.contains(songKey)) {
-                                                        selectedSongIds - songKey
-                                                    } else {
-                                                        selectedSongIds + songKey
-                                                    }
+                                                    onSongClick(song, latestFilteredAndSortedSongs)
+                                                },
+                                                onLongClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    isMultiSelectMode = true
+                                                    selectedSongIds = setOf(songKey)
                                                 },
                                                 onMoreClick = handleMore
                                             )
                                         }
-                                    }
-                                } else {
-                                    Box(modifier = sortSwitchAnimMod) {
-                                        SongItemRow(
-                                            song = song,
-                                            orderIndex = index + 1,
-                                            isPlaying = isCurrentTrack,
-                                            onClick = {
-                                                onSongClick(song, latestFilteredAndSortedSongs)
-                                            },
-                                            onMoreClick = handleMore
-                                        )
                                     }
                                 }
                             }
@@ -807,10 +948,10 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            // 右下角悬浮按钮组（听歌排行页使用独立滚动列表，隐藏最近播放的返回顶部与定位按钮）
-            val showScrollToTop by remember(filteredAndSortedSongs.size, isHistoryOrRank, historySubTab) {
+            // 右下角悬浮按钮组（排序与多选态自动让位隐藏）
+            val showScrollToTop by remember(filteredAndSortedSongs.size, isInlineReorderMode, isMultiSelectMode) {
                 derivedStateOf {
-                    !(isHistoryOrRank && historySubTab == 1) && (
+                    !isInlineReorderMode && !isMultiSelectMode && (
                         listState.firstVisibleItemIndex > 2 ||
                             (listState.firstVisibleItemIndex == 2 && listState.firstVisibleItemScrollOffset > 100)
                         )
@@ -834,7 +975,7 @@ fun PlaylistDetailScreen(
                 )
 
                 AnimatedVisibility(
-                    visible = !(isHistoryOrRank && historySubTab == 1) && playingSongIndex >= 0,
+                    visible = !isInlineReorderMode && !isMultiSelectMode && playingSongIndex >= 0,
                     enter = fadeIn() + scaleIn(initialScale = 0.85f),
                     exit = fadeOut() + scaleOut(targetScale = 0.85f)
                 ) {
@@ -896,19 +1037,8 @@ fun PlaylistDetailScreen(
                 PlaylistManageBottomSheet(
                     playlist = currentPlaylist,
                     isCustomCreated = isCustomCreated,
-                    canCloudSort = isCustomCreated && songs.size >= 2,
-                    canShare = !isHistoryOrRank,
+                    canShare = !isHistory,
                     isRefreshing = loading,
-                    onEditMeta = {
-                        showManageSheet = false
-                        isSubSheetDismissing = false
-                        showEditPlaylistDialog = true
-                    },
-                    onOpenCloudSort = {
-                        showManageSheet = false
-                        isSubSheetDismissing = false
-                        showCloudTrackSortSheet = true
-                    },
                     onShare = {
                         showManageSheet = false
                         isSubSheetDismissing = false
@@ -940,27 +1070,124 @@ fun PlaylistDetailScreen(
                 )
             }
 
-            if (showCloudTrackSortSheet && currentPlaylist != null && songs.size >= 2) {
-                PlaylistSongsCloudSortSheet(
-                    playlistTitle = currentPlaylist.title,
-                    songs = songs,
-                    onSaveOrder = { reordered, onDone ->
-                        viewModel.reorderPlaylistSongs(currentPlaylist, reordered) { ok, msg ->
-                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                            if (ok) {
-                                sortMode = PlaylistSortMode.DEFAULT
-                            }
-                            onDone(ok)
+            // 底部常驻悬浮多选操作条（随滚动常驻可见，自动避让迷你播放栏，一步完成播放/下一首/加歌单/移出）
+            AnimatedVisibility(
+                visible = isMultiSelectMode && !isInlineReorderMode,
+                enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 90.dp)
+            ) {
+                val chosenSongs = remember(filteredAndSortedSongs, selectedSongIds) {
+                    filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
+                }
+                val hasSelection = chosenSongs.isNotEmpty()
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = conceptSheetContainerColor().copy(alpha = 0.96f),
+                    shadowElevation = 14.dp,
+                    modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MultiSelectDockAction(
+                            icon = Icons.Rounded.PlayArrow,
+                            label = "播放",
+                            tint = ConceptPrimary,
+                            enabled = hasSelection,
+                            onClick = {
+                                if (chosenSongs.isNotEmpty()) {
+                                    onSongClick(chosenSongs.first(), chosenSongs)
+                                    isMultiSelectMode = false
+                                    selectedSongIds = emptySet()
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (onAddNextPlay != null) {
+                            MultiSelectDockAction(
+                                icon = Icons.Rounded.QueuePlayNext,
+                                label = "下一首",
+                                tint = ConceptMintAccent,
+                                enabled = hasSelection,
+                                onClick = {
+                                    if (chosenSongs.isNotEmpty()) {
+                                        chosenSongs.asReversed().forEach { onAddNextPlay(it) }
+                                        Toast.makeText(context, "已将 ${chosenSongs.size} 首加入下一首播放", Toast.LENGTH_SHORT).show()
+                                        isMultiSelectMode = false
+                                        selectedSongIds = emptySet()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
-                    },
-                    onDismissStart = { isSubSheetDismissing = true },
-                    onDismiss = {
-                        showCloudTrackSortSheet = false
-                        isSubSheetDismissing = false
+                        MultiSelectDockAction(
+                            icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
+                            label = "加歌单",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            enabled = hasSelection,
+                            onClick = { showBatchAddToPlaylistDialog = true },
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (isCustomCreated && currentPlaylist != null) {
+                            MultiSelectDockAction(
+                                icon = Icons.Rounded.DeleteOutline,
+                                label = if (isBatchRemoving) "移出中" else "移出",
+                                tint = MaterialTheme.colorScheme.error,
+                                enabled = hasSelection && !isBatchRemoving,
+                                onClick = { showBatchRemoveDialog = true },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
-                )
+                }
             }
         }
+    }
+
+    // 批量移出自建歌单二次确认
+    if (showBatchRemoveDialog && isCustomCreated && currentPlaylist != null) {
+        val chosenSongs = filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
+        AlertDialog(
+            onDismissRequest = { if (!isBatchRemoving) showBatchRemoveDialog = false },
+            title = { Text("批量移出歌曲") },
+            text = { Text("确定要从歌单「${currentPlaylist.title}」中移出已选的 ${chosenSongs.size} 首歌曲吗？") },
+            confirmButton = {
+                TextButton(
+                    enabled = !isBatchRemoving && chosenSongs.isNotEmpty(),
+                    onClick = {
+                        isBatchRemoving = true
+                        viewModel.removeSongsFromPlaylistBatch(currentPlaylist.resolveEffectiveListId(), chosenSongs) { ok, msg ->
+                            isBatchRemoving = false
+                            showBatchRemoveDialog = false
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            if (ok) {
+                                isMultiSelectMode = false
+                                selectedSongIds = emptySet()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text(if (isBatchRemoving) "移出中..." else "确认移出")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isBatchRemoving,
+                    onClick = { showBatchRemoveDialog = false }
+                ) {
+                    Text("取消")
+                }
+            }
+        )
     }
 
     // 批量添加到歌单弹窗
@@ -973,7 +1200,7 @@ fun PlaylistDetailScreen(
                 playlists = playlists,
                 onSelectPlaylist = { targetPl ->
                     showBatchAddToPlaylistDialog = false
-                    viewModel.addSongsToPlaylistBatch(targetPl.listId, chosenSongs, targetPl.title) { _, msg ->
+                    viewModel.addSongsToPlaylistBatch(targetPl.resolveEffectiveListId(), chosenSongs, targetPl.title) { _, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
                     isMultiSelectMode = false
@@ -1187,7 +1414,7 @@ fun PlaylistDetailScreen(
                             .softClickable {
                                 val s = targetSong
                                 selectedSongForMenu = null
-                                viewModel.removeSongFromPlaylist(currentPlaylist.listId, s) { _, msg ->
+                                viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), s) { _, msg ->
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             }
@@ -1221,7 +1448,7 @@ fun PlaylistDetailScreen(
             playlists = playlists,
             onSelectPlaylist = { targetPl ->
                 songToAddToPlaylist = null
-                viewModel.addSongToPlaylist(targetPl.listId, s, targetPl.title) { _, msg ->
+                viewModel.addSongToPlaylist(targetPl.resolveEffectiveListId(), s, targetPl.title) { _, msg ->
                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                 }
             },
@@ -1245,14 +1472,14 @@ fun PlaylistDetailScreen(
                             when {
                                 pendingSingle != null -> {
                                     songToAddToPlaylist = null
-                                    viewModel.addSongToPlaylist(createdPl.listId, pendingSingle, createdPl.title) { _, addMsg ->
+                                    viewModel.addSongToPlaylist(createdPl.resolveEffectiveListId(), pendingSingle, createdPl.title) { _, addMsg ->
                                         Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
                                     }
                                 }
                                 pendingBatch.isNotEmpty() -> {
                                     isMultiSelectMode = false
                                     selectedSongIds = emptySet()
-                                    viewModel.addSongsToPlaylistBatch(createdPl.listId, pendingBatch, createdPl.title) { _, addMsg ->
+                                    viewModel.addSongsToPlaylistBatch(createdPl.resolveEffectiveListId(), pendingBatch, createdPl.title) { _, addMsg ->
                                         Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
                                     }
                                 }
@@ -1286,17 +1513,177 @@ fun PlaylistDetailScreen(
 }
 
 @Composable
+private fun MultiSelectDockAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val effectiveTint = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .softClickable(enabled = enabled, pressScale = 0.94f, onClick = onClick)
+            .padding(vertical = 7.dp, horizontal = 4.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = effectiveTint,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = label,
+            color = effectiveTint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun InlineDraggableSongRow(
+    idx: Int,
+    totalCount: Int,
+    entry: SortableTrackEntry,
+    saving: Boolean,
+    reorderState: ConceptListDragReorderState,
+    onResolveLiveIndex: (String) -> Int,
+    onMoveItem: (Int, Int) -> Unit,
+    onHapticStart: () -> Unit
+) {
+    val song = entry.song
+    val isActiveReorder = reorderState.isDragging
+    val isDragged = isActiveReorder && reorderState.dragStartIndex == idx
+    val targetNeighborShiftPx = reorderState.targetNeighborShiftPxForIndex(idx)
+    val displayOrderIdx = reorderState.displayOrderIndexFor(idx)
+
+    // 对标 PlayQueueBottomSheet：每行独立 Animatable 弹簧平滑让位，告别生硬阶跃
+    val neighborOffsetAnim = remember(entry.stableKey) { Animatable(0f) }
+    LaunchedEffect(isActiveReorder, targetNeighborShiftPx) {
+        if (!isActiveReorder) {
+            neighborOffsetAnim.snapTo(0f)
+        } else {
+            neighborOffsetAnim.animateTo(
+                targetValue = targetNeighborShiftPx,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+        }
+    }
+
+    val dragScale by animateFloatAsState(
+        targetValue = if (isDragged && !reorderState.isSettlingDrop) 1.028f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "playlistInlineDragScale"
+    )
+    val dragElevation by animateDpAsState(
+        targetValue = if (isDragged && !reorderState.isSettlingDrop) 14.dp else 0.dp,
+        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        label = "playlistInlineDragElevation"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .zIndex(if (isDragged) 12f else 0f)
+            .graphicsLayer {
+                translationY = when {
+                    !isActiveReorder -> 0f
+                    isDragged -> reorderState.activeDragTranslationY()
+                    else -> neighborOffsetAnim.value
+                }
+                scaleX = dragScale
+                scaleY = dragScale
+                shadowElevation = dragElevation.toPx()
+                shape = RoundedCornerShape(16.dp)
+                clip = false
+            }
+            .semantics {
+                contentDescription = "${song.title}，${song.artist}，第 ${displayOrderIdx + 1} 首，共 $totalCount 首"
+                customActions = buildList {
+                    if (idx > 0) {
+                        add(CustomAccessibilityAction("置顶") { onMoveItem(idx, 0); true })
+                        add(CustomAccessibilityAction("上移一位") { onMoveItem(idx, idx - 1); true })
+                    }
+                    if (idx < totalCount - 1) {
+                        add(CustomAccessibilityAction("下移一位") { onMoveItem(idx, idx + 1); true })
+                    }
+                }
+            }
+    ) {
+        SongItemRow(
+            song = song,
+            onClick = {},
+            orderIndex = displayOrderIdx + 1,
+            isReorderMode = true,
+            isDraggingRow = isDragged,
+            dragHandleModifier = Modifier.pointerInput(entry.stableKey, totalCount, saving) {
+                if (saving) return@pointerInput
+                detectDragGestures(
+                    onDragStart = {
+                        val liveIdx = onResolveLiveIndex(entry.stableKey)
+                        if (liveIdx >= 0) {
+                            onHapticStart()
+                            reorderState.startDrag(liveIdx)
+                        }
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        reorderState.onDragDelta(dragAmount.y)
+                    },
+                    onDragEnd = { reorderState.finishDrag() },
+                    onDragCancel = { reorderState.finishDrag() }
+                )
+            },
+            trailingActionContent = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = "#${(displayOrderIdx + 1).toString().padStart(2, '0')}",
+                        color = if (isDragged) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                        fontSize = 11.5.sp,
+                        fontWeight = if (isDragged) FontWeight.ExtraBold else FontWeight.SemiBold,
+                        modifier = Modifier.padding(end = 2.dp)
+                    )
+                    if (idx > 0 && !isActiveReorder) {
+                        IconButton(
+                            enabled = !saving,
+                            onClick = { onMoveItem(idx, 0) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.VerticalAlignTop,
+                                contentDescription = "移至顶部",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
 private fun PlaylistToolbarSection(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     sortMode: PlaylistSortMode,
-    onSortModeChange: (PlaylistSortMode) -> Unit,
-    isMultiSelectMode: Boolean,
-    selectedSongIds: Set<String>,
-    filteredAndSortedSongs: List<Song>,
-    onToggleSelectAll: () -> Unit,
-    onPlaySelected: () -> Unit,
-    onBatchAddSelected: () -> Unit
+    onSortModeChange: (PlaylistSortMode) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1390,56 +1777,6 @@ private fun PlaylistToolbarSection(
                 fillWidth = false
             )
         }
-
-        AnimatedVisibility(visible = isMultiSelectMode) {
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = ConceptPrimary.copy(alpha = 0.15f),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = onToggleSelectAll,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = if (selectedSongIds.size == filteredAndSortedSongs.size) "取消全选" else "全选 (${filteredAndSortedSongs.size})",
-                                color = ConceptPrimary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilledTonalButton(
-                            onClick = onPlaySelected,
-                            enabled = selectedSongIds.isNotEmpty(),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(30.dp)
-                        ) {
-                            Text("播放选中", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-
-                        FilledTonalButton(
-                            onClick = onBatchAddSelected,
-                            enabled = selectedSongIds.isNotEmpty(),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(30.dp)
-                        ) {
-                            Text("批量加歌单", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1449,8 +1786,12 @@ private fun PlaylistSideHeroPane(
     effectiveCoverUrl: String,
     songCount: Int,
     isExternal: Boolean,
+    isCustomCreated: Boolean = false,
+    isInlineReorderMode: Boolean = false,
     onPlayAll: () -> Unit,
     onCollectClick: () -> Unit,
+    onEditMetaClick: () -> Unit = {},
+    onStartInlineSortClick: () -> Unit = {},
     onCoverClick: () -> Unit
 ) {
     val isLikedPlaylist = playlist?.id == "like" || playlist?.isLiked == true
@@ -1460,6 +1801,7 @@ private fun PlaylistSideHeroPane(
         isHistoryPlaylist -> ConceptMintAccent
         else -> ConceptPrimary
     }
+    val cyanAccent = conceptCyanAccentColor()
     val gradientColors = when {
         isLikedPlaylist -> listOf(ConceptCoralAccent, Color(0xFFC2410C))
         isHistoryPlaylist -> listOf(ConceptMintAccent, ConceptPrimaryDark)
@@ -1562,7 +1904,7 @@ private fun PlaylistSideHeroPane(
                     .height(44.dp)
                     .softCardClickable(
                         shape = RoundedCornerShape(22.dp),
-                        enabled = songCount > 0,
+                        enabled = songCount > 0 && !isInlineReorderMode,
                         onClick = onPlayAll
                     )
             ) {
@@ -1584,6 +1926,80 @@ private fun PlaylistSideHeroPane(
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
                     )
+                }
+            }
+
+            if (isCustomCreated) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = ConceptPrimary.copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .softCardClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                enabled = !isInlineReorderMode,
+                                onClick = onEditMetaClick
+                            )
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Edit,
+                                contentDescription = "编辑歌单信息",
+                                tint = ConceptPrimary,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "编辑信息",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ConceptPrimary
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isInlineReorderMode) cyanAccent.copy(alpha = 0.22f) else cyanAccent.copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .softCardClickable(
+                                shape = RoundedCornerShape(16.dp),
+                                enabled = songCount >= 2 && !isInlineReorderMode,
+                                onClick = onStartInlineSortClick
+                            )
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SwapVert,
+                                contentDescription = "自定义排序",
+                                tint = cyanAccent,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (isInlineReorderMode) "排序中..." else "自定义排序",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = cyanAccent
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1657,8 +2073,12 @@ private fun PlaylistHeaderCard(
     effectiveCoverUrl: String = playlist?.coverUrl.orEmpty(),
     songCount: Int,
     isExternal: Boolean = false,
+    isCustomCreated: Boolean = false,
+    isInlineReorderMode: Boolean = false,
     onPlayAll: () -> Unit,
     onCollectClick: () -> Unit = {},
+    onEditMetaClick: () -> Unit = {},
+    onStartInlineSortClick: () -> Unit = {},
     onCoverClick: () -> Unit = {}
 ) {
     var isDescExpanded by remember { mutableStateOf(false) }
@@ -1669,6 +2089,7 @@ private fun PlaylistHeaderCard(
         isHistoryPlaylist -> ConceptMintAccent
         else -> ConceptPrimary
     }
+    val cyanAccent = conceptCyanAccentColor()
     val gradientColors = when {
         isLikedPlaylist -> listOf(ConceptCoralAccent, Color(0xFFC2410C))
         isHistoryPlaylist -> listOf(ConceptMintAccent, ConceptPrimaryDark)
@@ -1747,12 +2168,12 @@ private fun PlaylistHeaderCard(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .softClickable(enabled = songCount > 0, onClick = onPlayAll)
+                            .softClickable(enabled = songCount > 0 && !isInlineReorderMode, onClick = onPlayAll)
                     ) {
                         Box(
                             modifier = Modifier
@@ -1768,13 +2189,73 @@ private fun PlaylistHeaderCard(
                                 modifier = Modifier.size(19.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(7.dp))
                         Text(
                             text = "播放全部",
-                            fontSize = 14.sp,
+                            fontSize = 13.5.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
+                    }
+
+                    if (isCustomCreated) {
+                        Surface(
+                            shape = RoundedCornerShape(15.dp),
+                            color = ConceptPrimary.copy(alpha = 0.12f),
+                            modifier = Modifier.softCardClickable(
+                                shape = RoundedCornerShape(15.dp),
+                                enabled = !isInlineReorderMode,
+                                onClick = onEditMetaClick
+                            )
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "编辑歌单信息",
+                                    tint = ConceptPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "编辑",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ConceptPrimary
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(15.dp),
+                            color = if (isInlineReorderMode) cyanAccent.copy(alpha = 0.22f) else cyanAccent.copy(alpha = 0.12f),
+                            modifier = Modifier.softCardClickable(
+                                shape = RoundedCornerShape(15.dp),
+                                enabled = songCount >= 2 && !isInlineReorderMode,
+                                onClick = onStartInlineSortClick
+                            )
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SwapVert,
+                                    contentDescription = "自定义排序",
+                                    tint = cyanAccent,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "排序",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = cyanAccent
+                                )
+                            }
+                        }
                     }
 
                     if (isExternal && playlist != null) {
@@ -1862,300 +2343,11 @@ private fun PlaylistHeaderCard(
 }
 
 @Composable
-private fun ListenRankSectionBody(
-    rankType: Int,
-    onSelectRankType: (Int) -> Unit,
-    onRetry: () -> Unit,
-    items: List<ListenRankItem>,
-    loading: Boolean,
-    currentSong: Song?,
-    onSongClick: (Song, List<Song>) -> Unit,
-    onSongMoreClick: (Song) -> Unit,
-    useTwoColumns: Boolean,
-    maxWidth: Dp,
-    modifier: Modifier = Modifier
-) {
-    val rankSongs = remember(items) { items.map { it.song } }
-    val curId = currentSong?.id
-    val curHash = currentSong?.hash.orEmpty()
-    val cyanAccent = conceptCyanAccentColor()
-    val goldAccent = conceptGoldAccentColor()
-    val rankTabs = remember(cyanAccent) {
-        listOf(
-            ConceptCategoryTabItem("week", "近一周", accentColor = cyanAccent),
-            ConceptCategoryTabItem("all", "累计总榜", accentColor = cyanAccent)
-        )
-    }
-
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.TopCenter
-    ) {
-        Column(
-            modifier = Modifier
-                .then(if (!useTwoColumns && maxWidth != Dp.Unspecified) Modifier.widthIn(max = maxWidth) else Modifier)
-                .fillMaxSize()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ConceptSlidingCategoryTabs(
-                    tabs = rankTabs,
-                    selectedKey = if (rankType == 1) "all" else "week",
-                    onSelectTab = { key -> onSelectRankType(if (key == "all") 1 else 0) },
-                    itemSpacing = 18.dp,
-                    fontSize = 13.5.sp,
-                    indicatorWidth = 18.dp
-                )
-                if (rankSongs.isNotEmpty()) {
-                    TextButton(
-                        onClick = { onSongClick(rankSongs.first(), rankSongs) },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = ConceptPrimary, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text("播放全部", color = ConceptPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-
-            if (loading && items.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = ConceptPrimary, strokeWidth = 2.5.dp)
-                }
-            } else if (items.isEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = if (rankType == 0) "近一周暂无云端听歌排行数据" else "暂无累计听歌排行数据（请确认已登录酷狗账号）",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 13.5.sp,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(
-                        onClick = onRetry,
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text("重新加载", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (useTwoColumns) {
-                        val rows = items.chunked(2)
-                        itemsIndexed(
-                            items = rows,
-                            key = { rowIdx, pair ->
-                                val first = pair.first()
-                                "rank_row_${rankType}_${rowIdx}_${first.rank}_${first.song.hash.ifBlank { first.song.id }}"
-                            }
-                        ) { _, rowPair ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                rowPair.forEach { item ->
-                                    val s = item.song
-                                    val isPlaying = curId != null && (
-                                        curId == s.id || (curHash.isNotEmpty() && curHash.equals(s.hash, ignoreCase = true))
-                                        )
-                                    Box(modifier = Modifier.weight(1f)) {
-                                        ListenRankItemRow(
-                                            item = item,
-                                            isPlaying = isPlaying,
-                                            goldAccent = goldAccent,
-                                            cyanAccent = cyanAccent,
-                                            onClick = { onSongClick(s, rankSongs) },
-                                            onMoreClick = { onSongMoreClick(s) }
-                                        )
-                                    }
-                                }
-                                if (rowPair.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
-                            }
-                        }
-                    } else {
-                        itemsIndexed(
-                            items = items,
-                            key = { idx, item -> "rank_${rankType}_${item.rank}_${item.song.hash.ifBlank { item.song.id }}_$idx" }
-                        ) { _, item ->
-                            val s = item.song
-                            val isPlaying = curId != null && (
-                                curId == s.id || (curHash.isNotEmpty() && curHash.equals(s.hash, ignoreCase = true))
-                                )
-                            ListenRankItemRow(
-                                item = item,
-                                isPlaying = isPlaying,
-                                goldAccent = goldAccent,
-                                cyanAccent = cyanAccent,
-                                onClick = { onSongClick(s, rankSongs) },
-                                onMoreClick = { onSongMoreClick(s) }
-                            )
-                        }
-                    }
-                    item { Spacer(modifier = Modifier.height(110.dp)) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ListenRankItemRow(
-    item: ListenRankItem,
-    isPlaying: Boolean,
-    goldAccent: Color,
-    cyanAccent: Color,
-    onClick: () -> Unit,
-    onMoreClick: () -> Unit
-) {
-    val s = item.song
-    val imageModel = rememberOptimizedAsyncImageModel(rawUrl = s.coverUrl, sizePx = 144, targetCdnSize = "150")
-    val rankColor = when (item.rank) {
-        1 -> goldAccent
-        2 -> cyanAccent
-        3 -> ConceptCoralAccent
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    val qualityLabel = when {
-        s.isHiRes -> "Hi-Res"
-        s.isLossless -> "SQ"
-        s.quality == "320" -> "HQ"
-        else -> ""
-    }
-    val rowBg = if (isPlaying) ConceptPrimary.copy(alpha = 0.12f) else conceptFloatingCardColor()
-
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = rowBg,
-        modifier = Modifier
-            .fillMaxWidth()
-            .softCardClickable(shape = RoundedCornerShape(16.dp), onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "${item.rank}",
-                color = rankColor,
-                fontSize = if (item.rank <= 3) 16.sp else 13.5.sp,
-                fontWeight = FontWeight.Black,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(28.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                if (imageModel != null) {
-                    AsyncImage(
-                        model = imageModel,
-                        contentDescription = s.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Rounded.MusicNote,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = s.title,
-                    color = if (isPlaying) ConceptPrimary else MaterialTheme.colorScheme.onSurface,
-                    fontSize = 14.sp,
-                    fontWeight = if (isPlaying) FontWeight.ExtraBold else FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    if (qualityLabel.isNotEmpty()) {
-                        BadgeTag(
-                            text = qualityLabel,
-                            color = if (s.isHiRes || s.isLossless) goldAccent else ConceptPrimary
-                        )
-                    }
-                    if (s.isVip) {
-                        BadgeTag(text = "VIP", color = ConceptCoralAccent)
-                    }
-                    Text(
-                        text = s.artist.ifBlank { "未知歌手" },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.5.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                }
-            }
-            if (item.playCount > 0) {
-                Spacer(modifier = Modifier.width(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(9.dp),
-                    color = ConceptPrimary.copy(alpha = 0.12f)
-                ) {
-                    Text(
-                        text = "${item.playCount} 次",
-                        color = ConceptPrimary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                    )
-                }
-            }
-            IconButton(
-                onClick = onMoreClick,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.MoreVert,
-                    contentDescription = "更多操作",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(19.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun PlaylistManageBottomSheet(
     playlist: Playlist,
     isCustomCreated: Boolean,
-    canCloudSort: Boolean,
     canShare: Boolean,
     isRefreshing: Boolean,
-    onEditMeta: () -> Unit,
-    onOpenCloudSort: () -> Unit,
     onShare: () -> Unit,
     onRefresh: () -> Unit,
     onDeletePlaylist: () -> Unit,
@@ -2165,14 +2357,14 @@ private fun PlaylistManageBottomSheet(
     val cardBg = conceptElevatedSurfaceColor()
     val textPrimary = MaterialTheme.colorScheme.onSurface
     val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
-    val cyanAccent = conceptCyanAccentColor()
 
     ConceptAdaptiveBottomSheetContainer(
         onDismiss = onDismiss,
         onDismissStart = onDismissStart,
         zIndex = 90f,
-        portraitMinHeight = 220.dp,
-        portraitMaxHeight = 460.dp
+        portraitMinHeight = 160.dp,
+        portraitMaxHeight = 460.dp,
+        wrapContentHeight = true
     ) { _ ->
         Row(
             modifier = Modifier
@@ -2205,26 +2397,6 @@ private fun PlaylistManageBottomSheet(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (isCustomCreated) {
-                PlaylistManageActionItem(
-                    icon = Icons.Rounded.Edit,
-                    iconTint = ConceptPrimary,
-                    title = "编辑歌单信息",
-                    subtitle = "修改歌单标题与简介并同步至云端",
-                    cardBg = cardBg,
-                    onClick = onEditMeta
-                )
-            }
-            if (canCloudSort) {
-                PlaylistManageActionItem(
-                    icon = Icons.Rounded.SwapVert,
-                    iconTint = cyanAccent,
-                    title = "调整曲目云端排序",
-                    subtitle = "长按拖动或微调顺序，同步酷狗多端",
-                    cardBg = cardBg,
-                    onClick = onOpenCloudSort
-                )
-            }
             if (canShare) {
                 PlaylistManageActionItem(
                     icon = Icons.Rounded.Share,
@@ -2359,265 +2531,11 @@ private fun EditPlaylistMetaDialog(
                     onSave(name.trim(), intro.trim()) { _ -> saving = false }
                 }
             ) {
-                Text(if (saving) "保存中..." else "保存修改", color = ConceptPrimary, fontWeight = FontWeight.Bold)
+                Text(if (saving) "保存中..." else "保存同步", color = ConceptPrimary, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             TextButton(enabled = !saving, onClick = onDismiss) { Text("取消") }
         }
     )
-}
-
-private data class SortableTrackEntry(
-    val stableKey: String,
-    val song: Song
-)
-
-@Composable
-private fun PlaylistSongsCloudSortSheet(
-    playlistTitle: String,
-    songs: List<Song>,
-    onSaveOrder: (List<Song>, (Boolean) -> Unit) -> Unit,
-    onDismissStart: () -> Unit = {},
-    onDismiss: () -> Unit
-) {
-    val cardBg = conceptElevatedSurfaceColor()
-    val textPrimary = MaterialTheme.colorScheme.onSurface
-    val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
-    val haptic = LocalHapticFeedback.current
-    val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
-
-    val initialEntries = remember(songs) {
-        songs.mapIndexed { idx, song -> SortableTrackEntry("${idx}_${song.id}_${song.hash}", song) }
-    }
-    var workingEntries by remember(initialEntries) { mutableStateOf(initialEntries) }
-    var saving by remember { mutableStateOf(false) }
-    var showDiscardDialog by remember { mutableStateOf(false) }
-    val hasChanges = remember(workingEntries, initialEntries) {
-        workingEntries.map { it.stableKey } != initialEntries.map { it.stableKey }
-    }
-
-    fun moveItem(fromIdx: Int, toIdx: Int) {
-        if (fromIdx == toIdx || fromIdx !in workingEntries.indices || toIdx !in workingEntries.indices) return
-        val next = workingEntries.toMutableList()
-        val moved = next.removeAt(fromIdx)
-        next.add(toIdx, moved)
-        workingEntries = next
-    }
-
-    val reorderState = remember(listState, scope) {
-        ConceptListDragReorderState(
-            listState = listState,
-            scope = scope,
-            defaultRowHeightPx = with(density) { 64.dp.toPx() },
-            itemCountProvider = { workingEntries.size },
-            onCommitMove = { from, to -> moveItem(from, to) }
-        )
-    }
-
-    ConceptAdaptiveBottomSheetContainer(
-        onDismiss = onDismiss,
-        onDismissStart = onDismissStart,
-        zIndex = 92f
-    ) { _ ->
-        val safeDismiss = {
-            if (hasChanges && !saving) {
-                showDiscardDialog = true
-            } else {
-                requestDismiss()
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .sheetVerticalDragGesture(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("调整歌单曲目顺序", fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, color = textPrimary)
-                Text(
-                    text = "$playlistTitle · 长按右侧手柄拖拽或点按钮微调",
-                    fontSize = 11.sp,
-                    color = textSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(
-                    enabled = !saving && workingEntries.size >= 2 && hasChanges,
-                    onClick = {
-                        saving = true
-                        onSaveOrder(workingEntries.map { it.song }) { ok ->
-                            saving = false
-                            if (ok) requestDismiss()
-                        }
-                    },
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(if (saving) "同步中..." else "同步云端", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
-                Surface(
-                    shape = CircleShape,
-                    color = cardBg,
-                    modifier = Modifier
-                        .size(38.dp)
-                        .softClickable(onClick = safeDismiss)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = textSecondary, modifier = Modifier.size(18.dp))
-                    }
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(10.dp))
-
-        LazyColumn(
-            state = listState,
-            userScrollEnabled = !reorderState.isDragging,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-            contentPadding = PaddingValues(bottom = 12.dp)
-        ) {
-            itemsIndexed(
-                items = workingEntries,
-                key = { _, entry -> entry.stableKey }
-            ) { idx, entry ->
-                val song = entry.song
-                val isDragged = reorderState.dragStartIndex == idx
-                val transY = reorderState.translationYForIndex(idx)
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (isDragged) ConceptPrimary.copy(alpha = 0.18f) else cardBg,
-                    shadowElevation = if (isDragged) 8.dp else 0.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .zIndex(if (isDragged) 10f else 0f)
-                        .graphicsLayer {
-                            translationY = transY
-                            scaleX = if (isDragged) 1.02f else 1f
-                            scaleY = if (isDragged) 1.02f else 1f
-                        }
-                        .semantics {
-                            contentDescription = "${song.title}，${song.artist}，第 ${idx + 1} 首，共 ${workingEntries.size} 首"
-                            customActions = buildList {
-                                if (idx > 0) {
-                                    add(CustomAccessibilityAction("置顶") { moveItem(idx, 0); true })
-                                    add(CustomAccessibilityAction("上移一位") { moveItem(idx, idx - 1); true })
-                                }
-                                if (idx < workingEntries.lastIndex) {
-                                    add(CustomAccessibilityAction("下移一位") { moveItem(idx, idx + 1); true })
-                                }
-                            }
-                        }
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 12.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${idx + 1}",
-                            color = ConceptPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            modifier = Modifier.width(26.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = song.title,
-                                color = textPrimary,
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = song.artist,
-                                color = textSecondary,
-                                fontSize = 11.5.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        IconButton(
-                            enabled = idx > 0 && !saving,
-                            onClick = { moveItem(idx, 0) },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Rounded.VerticalAlignTop, contentDescription = "置顶", modifier = Modifier.size(17.dp))
-                        }
-                        IconButton(
-                            enabled = idx > 0 && !saving,
-                            onClick = { moveItem(idx, idx - 1) },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "上移", modifier = Modifier.size(19.dp))
-                        }
-                        IconButton(
-                            enabled = idx < workingEntries.lastIndex && !saving,
-                            onClick = { moveItem(idx, idx + 1) },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "下移", modifier = Modifier.size(19.dp))
-                        }
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(40.dp)
-                                .pointerInput(entry.stableKey, workingEntries.size) {
-                                    detectDragGesturesAfterLongPress(
-                                        onDragStart = {
-                                            val liveIdx = workingEntries.indexOfFirst { it.stableKey == entry.stableKey }
-                                            if (liveIdx >= 0) {
-                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                reorderState.startDrag(liveIdx)
-                                            }
-                                        },
-                                        onDrag = { change, dragAmount ->
-                                            change.consume()
-                                            reorderState.onDragDelta(dragAmount.y)
-                                        },
-                                        onDragEnd = { reorderState.finishDrag() },
-                                        onDragCancel = { reorderState.finishDrag() }
-                                    )
-                                }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.DragHandle,
-                                contentDescription = "长按拖动排序",
-                                tint = if (isDragged) ConceptPrimary else textSecondary.copy(alpha = 0.72f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showDiscardDialog) {
-        AlertDialog(
-            onDismissRequest = { showDiscardDialog = false },
-            title = { Text("放弃排序修改？", fontWeight = FontWeight.Bold) },
-            text = { Text("当前曲目顺序尚未同步云端，关闭后修改将不会保留。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDiscardDialog = false
-                    onDismiss()
-                }) {
-                    Text("放弃修改", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDiscardDialog = false }) { Text("继续编辑") }
-            }
-        )
-    }
 }

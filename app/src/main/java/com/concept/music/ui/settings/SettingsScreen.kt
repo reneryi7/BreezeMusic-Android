@@ -769,8 +769,7 @@ private suspend fun checkGitHubLatestRelease(
 fun SettingsScreen(
     viewModel: MusicPlayerViewModel,
     onBackClick: () -> Unit,
-    onOpenViperEffect: () -> Unit = {},
-    onOpenPreferenceSheet: (() -> Unit)? = null
+    onOpenViperEffect: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -1008,18 +1007,6 @@ fun SettingsScreen(
                             selected = highlightedCat == SettingsCategory.SPEED_SLEEP,
                             onClick = { selectCategoryAction(SettingsCategory.SPEED_SLEEP) }
                         )
-                    }
-                    if (onOpenPreferenceSheet != null) {
-                        item {
-                            SettingsActionEntryCard(
-                                title = "推荐偏好与内容屏蔽",
-                                subtitle = "管理私人 FM / 日推算法倾向与屏蔽的歌曲/歌手",
-                                icon = Icons.Rounded.Tune,
-                                accentColor = ConceptMintAccent,
-                                statusText = "偏好管理",
-                                onClick = onOpenPreferenceSheet
-                            )
-                        }
                     }
 
                     item {

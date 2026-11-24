@@ -14,6 +14,8 @@ class AccountRepository(private val store: SessionStore, private val auth: AuthR
     private val transport: KugouTransport, private val clock: Clock = Clock.systemUTC()) {
     private val generation = AtomicLong(0L)
     private val refreshMutex = Mutex()
+    // 记录最近一次成功获取/刷新会话的时间戳（按 userId 隔离），防止并发微服务的 20010 在短时间内连环轰炸 /v5/login_by_token
+    private val lastVerifiedSessionByUser = mutableMapOf<String, Pair<String, Long>>()
     private val mutable = MutableStateFlow(AccountState(accounts = store.accounts(), currentId = store.activeId()))
     val state = mutable.asStateFlow()
     init { select(store.activeId()) }
@@ -35,9 +37,24 @@ class AccountRepository(private val store: SessionStore, private val auth: AuthR
         val saved = (old ?: SavedAccount(result.session.userId)).copy(nickname = result.profile.nickname,
             avatarUrl = result.profile.avatarUrl, needsLogin = false)
         store.saveAccounts(list.filterNot { it.userId == saved.userId } + saved)
-        select(saved.userId)
+        generation.incrementAndGet()
+        store.setActive(saved.userId)
+        synchronized(lastVerifiedSessionByUser) {
+            lastVerifiedSessionByUser[saved.userId] = result.session.token to clock.millis()
+        }
+        // 新登录已直接拿到酷狗登录网关颁发的最新有效会话，直接进入 READY 状态，
+        // 避免刚登录 50ms 内立刻被 restore() 再次冗余调用 /v5/login_by_token
+        mutable.value = AccountState(
+            accounts = store.accounts(),
+            currentId = saved.userId,
+            profile = AccountProfile(saved.userId, saved.nickname, saved.avatarUrl),
+            auth = AuthState.READY,
+            profileFresh = false,
+            message = null
+        )
     }
     fun remove(id: String) {
+        synchronized(lastVerifiedSessionByUser) { lastVerifiedSessionByUser.remove(id) }
         store.removeSession(id)
         store.saveAccounts(store.accounts().filterNot { it.userId == id })
         if (id == state.value.currentId) select(null) else mutable.update { it.copy(accounts = store.accounts()) }
@@ -80,12 +97,23 @@ class AccountRepository(private val store: SessionStore, private val auth: AuthR
         ensureCurrent(context)
         val latest = store.session(context.session.userId) ?: throw ApiFailure(20010, "请重新登录")
         if (latest.token != context.session.token) return@withLock latest
+        val nowMs = clock.millis()
+        val recentlyVerified = synchronized(lastVerifiedSessionByUser) {
+            val rec = lastVerifiedSessionByUser[context.session.userId]
+            rec != null && rec.first == latest.token && (nowMs - rec.second) in 0L..15_000L
+        }
+        if (recentlyVerified && state.value.auth == AuthState.READY) {
+            return@withLock latest
+        }
         val refreshed = auth.refresh(latest)
         ensureCurrent(context)
         if (store.accounts().none { it.userId == context.session.userId }) {
             throw CancellationException("账号已移除")
         }
         store.saveSession(refreshed.session)
+        synchronized(lastVerifiedSessionByUser) {
+            lastVerifiedSessionByUser[context.session.userId] = refreshed.session.token to clock.millis()
+        }
         updateCurrent { it.copy(needsLogin = false) }
         refreshed.session
     }
@@ -95,14 +123,16 @@ class AccountRepository(private val store: SessionStore, private val auth: AuthR
         try { return block(latest).also { ensureCurrent(context) } }
         catch (e: ApiFailure) {
             if (!e.invalidSession) throw e
+            // 仅当权威登录刷新接口 (/v5/login_by_token) 本身明确返回 20010 时才认定账号会话真正失效并置为 NEEDS_LOGIN；
+            // 一旦刷新成功（或刚确认会话有效），单一业务微服务重试仍报 20010 属于该子服务的参数/权限错误，绝不误杀全局登录态！
             val refreshed = try { refreshSession(context.copy(session = latest)) }
             catch (failure: ApiFailure) { if (failure.invalidSession) invalidate(context); throw failure }
-            return try { block(refreshed).also { ensureCurrent(context) } }
-            catch (failure: ApiFailure) { if (failure.invalidSession) invalidate(context); throw failure }
+            return block(refreshed).also { ensureCurrent(context) }
         }
     }
     private fun invalidate(context: AccountContext) {
         ensureCurrent(context)
+        synchronized(lastVerifiedSessionByUser) { lastVerifiedSessionByUser.remove(context.session.userId) }
         updateCurrent { it.copy(needsLogin = true) }
         mutable.update { it.copy(auth = AuthState.NEEDS_LOGIN, profileFresh = false, message = "登录已失效，请重新登录") }
     }

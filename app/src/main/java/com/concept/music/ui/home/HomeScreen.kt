@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -33,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
@@ -57,14 +59,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.concept.music.data.kugou.AuthState
+import com.concept.music.data.model.DailyHistoryEntry
 import com.concept.music.data.model.FmChannel
 import com.concept.music.data.model.RankItem
 import com.concept.music.data.model.Song
 import androidx.compose.ui.graphics.FilterQuality
 import com.concept.music.ui.components.BadgeTag
-import com.concept.music.ui.components.CrossDeviceContinueBanner
-import com.concept.music.ui.components.CrossDeviceContinueSheet
 import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
+import com.concept.music.ui.viewmodel.PersonalFmDislikeUndoToken
 import com.concept.music.ui.components.FloatingScrollToTopButton
 import com.concept.music.ui.components.rememberProgressiveSongList
 import com.concept.music.ui.components.smoothFastScrollToItem
@@ -127,10 +129,6 @@ fun HomeScreen(
     isPlaying: Boolean = false,
     onTogglePlayPause: () -> Unit = {},
     onSongMoreClick: (Song) -> Unit = {},
-    onSyncCurrentSongToCloud: () -> Unit = {},
-    onOpenContinuePlaySheet: (() -> Unit)? = null,
-    onOpenPreferenceSheet: (() -> Unit)? = null,
-    onBlacklistUpdated: (() -> Unit)? = null,
     isOverlayOpen: Boolean = false,
     onSubSheetOpenChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
@@ -140,11 +138,6 @@ fun HomeScreen(
     val personalFmIndex by viewModel.personalFmIndex.collectAsState()
     val personalFmRefreshing by viewModel.personalFmRefreshing.collectAsState()
     val fmSongPoolId by viewModel.fmSongPoolId.collectAsState()
-    val continuePlaySnapshot by viewModel.continuePlaySnapshot.collectAsState()
-    val continuePlayLoading by viewModel.continuePlayLoading.collectAsState()
-    val continuePlayError by viewModel.continuePlayError.collectAsState()
-    val continuePlayDismissedKey by viewModel.continuePlayDismissedKey.collectAsState()
-    val accountState by viewModel.accountState.collectAsState()
     val selectedNewSongPeriod by viewModel.selectedNewSongPeriod.collectAsState()
     val currentNewSongs by viewModel.currentNewSongs.collectAsState()
     val newSongsLoading by viewModel.newSongsLoading.collectAsState()
@@ -184,25 +177,14 @@ fun HomeScreen(
     var showRankGridSheet by remember { mutableStateOf(false) }
     var selectedRankCategory by remember { mutableStateOf("全部") }
 
-    // 跨设备「继续播放」接力弹窗
-    var showContinuePlaySheet by remember { mutableStateOf(false) }
-
-    // FM 负反馈撤销保护状态（4.5 秒后自动消失，防止误触）
-    var recentDislikedFmSong by remember { mutableStateOf<Song?>(null) }
+    // 猜你喜欢专属负反馈防误触撤销快照（4.5 秒后自动消失）
+    var recentDislikeUndoToken by remember { mutableStateOf<PersonalFmDislikeUndoToken?>(null) }
+    var recentDislikeFeedbackMsg by remember { mutableStateOf("") }
     var recentDislikedWasPlayingFm by remember { mutableStateOf(false) }
-    LaunchedEffect(recentDislikedFmSong?.id) {
-        if (recentDislikedFmSong != null) {
+    LaunchedEffect(recentDislikeUndoToken) {
+        if (recentDislikeUndoToken != null) {
             kotlinx.coroutines.delay(4_500L)
-            recentDislikedFmSong = null
-        }
-    }
-
-    val openContinueSheetAction: () -> Unit = {
-        viewModel.refreshContinuePlay(force = false)
-        if (onOpenContinuePlaySheet != null) {
-            onOpenContinuePlaySheet()
-        } else {
-            showContinuePlaySheet = true
+            recentDislikeUndoToken = null
         }
     }
 
@@ -215,18 +197,17 @@ fun HomeScreen(
             showPersonalFmSheet = false
             quickFmStation = null
             showRankGridSheet = false
-            showContinuePlaySheet = false
             isHomeSubSheetDismissing = false
         }
     }
 
-    LaunchedEffect(showPersonalFmSheet, quickFmStation, showRankGridSheet, showContinuePlaySheet) {
-        if (showPersonalFmSheet || quickFmStation != null || showRankGridSheet || showContinuePlaySheet) {
+    LaunchedEffect(showPersonalFmSheet, quickFmStation, showRankGridSheet) {
+        if (showPersonalFmSheet || quickFmStation != null || showRankGridSheet) {
             isHomeSubSheetDismissing = false
         }
     }
 
-    val anyHomeSubSheetOpen = (showPersonalFmSheet || quickFmStation != null || showRankGridSheet || showContinuePlaySheet) && !isOverlayOpen && !isHomeSubSheetDismissing
+    val anyHomeSubSheetOpen = (showPersonalFmSheet || quickFmStation != null || showRankGridSheet) && !isOverlayOpen && !isHomeSubSheetDismissing
     LaunchedEffect(anyHomeSubSheetOpen) {
         onSubSheetOpenChanged(anyHomeSubSheetOpen)
     }
@@ -289,18 +270,13 @@ fun HomeScreen(
         // 仅在平板版安装包且当前发现页容器自身宽度 >= 680dp（如平板竖屏独享整屏宽度）时才将日推与私人FM左右并排；
         // 在平板横屏「发现+我的」双栏平铺（DUAL_PANE_HOME）下，发现页占左半屏，保持上下排布更舒展美观。
         val isWideDiscoverPane = homeAdaptive.isLargeScreenDevice && maxWidth >= 680.dp
-        val primaryContinueKey = continuePlaySnapshot.primarySong?.let { it.hash.ifBlank { it.id } }.orEmpty()
-        val showContinueBanner = accountState.auth == AuthState.READY &&
-            continuePlaySnapshot.shouldSuggestOverCurrentSong(currentSong, isPlaying) &&
-            primaryContinueKey.isNotBlank() &&
-            continuePlayDismissedKey != primaryContinueKey
         LazyColumn(
             modifier = Modifier
                 .widthIn(max = 920.dp)
                 .fillMaxSize()
                 .statusBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 148.dp),
-            verticalArrangement = Arrangement.spacedBy(if (showContinueBanner) 18.dp else 24.dp)
+            verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
             if (loading && dailySongs.isEmpty()) {
                 item {
@@ -315,38 +291,18 @@ fun HomeScreen(
                 }
             }
 
-            // 1. 顶部标题与右上角长圆形搜索按钮 + 跨设备接力入口 + 全时段精细化问候文案
+            // 1. 顶部标题与右上角长圆形搜索按钮 + 全时段精细化问候文案
             item(key = "discover_header", contentType = "discover_header") {
-                val isLoggedInReady = accountState.auth == AuthState.READY
-                DiscoverTopHeader(
-                    onSearchClick = onSearchClick,
-                    showContinueDeviceAction = isLoggedInReady,
-                    hasContinueReady = continuePlaySnapshot.hasPlayableContent,
-                    onOpenContinuePlay = openContinueSheetAction
-                )
-            }
-
-            // 1.5 跨设备「继续播放」轻量接力横幅（仅当云端存在与本机当前播放不同的曲目且未被临时关闭时浮现）
-            if (showContinueBanner) {
-                item(key = "discover_cross_device_continue", contentType = "cross_device_continue") {
-                    CrossDeviceContinueBanner(
-                        snapshot = continuePlaySnapshot,
-                        onContinueNow = { song, queue ->
-                            onSongClick(song, queue)
-                            viewModel.dismissContinuePlayBanner()
-                        },
-                        onOpenSheet = openContinueSheetAction,
-                        onDismiss = { viewModel.dismissContinuePlayBanner() }
-                    )
-                }
+                DiscoverTopHeader(onSearchClick = onSearchClick)
             }
 
             if (isWideDiscoverPane) {
-                // 平板竖屏/分屏或超宽发现页：每日推荐与私人随心听 FM 并排双栏展示，消除单列大横幅过度拉伸
+                // 平板竖屏/分屏或超宽发现页：每日推荐与私人随心听 FM 并排展示
                 item(key = "discover_wide_hero_row", contentType = "discover_wide_hero_row") {
                     val safeIdx = if (fmPool.isEmpty()) 0 else personalFmIndex.coerceIn(0, fmPool.lastIndex)
                     val activeFmSong = fmPool.getOrNull(safeIdx)
                     val nextFmSong = if (fmPool.size > 1) fmPool.getOrNull((safeIdx + 1) % fmPool.size) else null
+                    val canSkipPrev = safeIdx > 0
                     val isCurrentInFm = currentSong != null && activeFmSong != null && (
                         (currentSong.id.isNotBlank() && currentSong.id == activeFmSong.id) ||
                             (currentSong.hash.isNotBlank() && currentSong.hash.equals(activeFmSong.hash, ignoreCase = true))
@@ -356,9 +312,9 @@ fun HomeScreen(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.Top
                     ) {
-                        Box(modifier = Modifier.weight(1f)) {
+                        Box(modifier = Modifier.weight(0.46f)) {
                             DailyRecommendBanner(
                                 songs = dailySongs,
                                 onCardClick = onOpenDailyRecommend,
@@ -371,13 +327,14 @@ fun HomeScreen(
                                 }
                             )
                         }
-                        Box(modifier = Modifier.weight(1f)) {
+                        Box(modifier = Modifier.weight(0.54f)) {
                             PersonalFmPlayerCard(
                                 activeSong = activeFmSong,
                                 nextSong = nextFmSong,
                                 isPlaying = isFmPlayingNow,
                                 isRefreshing = personalFmRefreshing,
                                 fmSongPoolId = fmSongPoolId,
+                                canSkipPrev = canSkipPrev,
                                 onOpenList = { showPersonalFmSheet = true },
                                 onTogglePlayPause = {
                                     if (isCurrentInFm) {
@@ -392,36 +349,50 @@ fun HomeScreen(
                                         }
                                     }
                                 },
+                                onSkipPrev = {
+                                    viewModel.skipToPreviousPersonalFm { prevSong, list ->
+                                        onSongClick(prevSong, list)
+                                    }
+                                },
                                 onSkipNext = {
                                     viewModel.skipToNextPersonalFm { nextSong, list ->
                                         onSongClick(nextSong, list)
                                     }
                                 },
-                                onDislike = {
+                                onDislikeSong = {
                                     if (activeFmSong != null) {
                                         val shouldSwitchPlayer = isCurrentInFm
-                                        recentDislikedFmSong = activeFmSong
                                         recentDislikedWasPlayingFm = shouldSwitchPlayer
-                                        viewModel.dislikeCurrentPersonalFmSong(
+                                        recentDislikeUndoToken = viewModel.dislikeCurrentPersonalFmSong(
                                             song = activeFmSong,
                                             onNextPlay = { nextSong, list ->
                                                 if (shouldSwitchPlayer) onSongClick(nextSong, list)
                                             },
-                                            onFeedbackMessage = { /* 由底部带撤销浮条承接反馈 */ },
-                                            onBlacklistUpdated = onBlacklistUpdated
+                                            onFeedbackMessage = { msg -> recentDislikeFeedbackMsg = msg }
                                         )
                                     }
                                 },
-                                onOpenPreference = onOpenPreferenceSheet,
-                                onCyclePool = {
-                                    val nextPool = (fmSongPoolId + 1) % 3
-                                    val poolName = when (nextPool) {
-                                        1 -> "熟悉红心"
-                                        2 -> "发现尝鲜"
-                                        else -> "AI 默认"
+                                onDislikeArtist = {
+                                    if (activeFmSong != null) {
+                                        val shouldSwitchPlayer = isCurrentInFm
+                                        recentDislikedWasPlayingFm = shouldSwitchPlayer
+                                        recentDislikeUndoToken = viewModel.dislikeCurrentPersonalFmArtist(
+                                            song = activeFmSong,
+                                            onNextPlay = { nextSong, list ->
+                                                if (shouldSwitchPlayer) onSongClick(nextSong, list)
+                                            },
+                                            onFeedbackMessage = { msg -> recentDislikeFeedbackMsg = msg }
+                                        )
                                     }
-                                    viewModel.switchPersonalFmPool(nextPool) { loaded ->
-                                        Toast.makeText(context, "随心听已切换为「$poolName」模式", Toast.LENGTH_SHORT).show()
+                                },
+                                onSelectPool = { targetPool ->
+                                    val poolName = when (targetPool) {
+                                        1 -> "熟悉 · 相似风格未听新曲"
+                                        2 -> "尝鲜 · 跨风味异质探索"
+                                        else -> "平衡 · 智能口味漫游"
+                                    }
+                                    viewModel.switchPersonalFmPool(targetPool) { loaded ->
+                                        Toast.makeText(context, "已切换至「$poolName」", Toast.LENGTH_SHORT).show()
                                         if (loaded.isNotEmpty() && isFmPlayingNow) {
                                             onSongClick(loaded.first(), loaded)
                                         }
@@ -431,7 +402,7 @@ fun HomeScreen(
                                     viewModel.refreshPersonalFm { loaded ->
                                         if (loaded.isNotEmpty()) {
                                             onSongClick(loaded.first(), loaded)
-                                            Toast.makeText(context, "已根据你的听歌口味焕新 ${loaded.size} 首推荐", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "已按当前偏好焕新 ${loaded.size} 首推荐", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 }
@@ -455,11 +426,12 @@ fun HomeScreen(
                     )
                 }
 
-                // 3. 私人随心听 FM
+                // 3. 私人随心听 FM（增大卡片空间 + 人性化负反馈与模式直切）
                 item(key = "discover_personal_fm", contentType = "discover_personal_fm") {
                     val safeIdx = if (fmPool.isEmpty()) 0 else personalFmIndex.coerceIn(0, fmPool.lastIndex)
                     val activeFmSong = fmPool.getOrNull(safeIdx)
                     val nextFmSong = if (fmPool.size > 1) fmPool.getOrNull((safeIdx + 1) % fmPool.size) else null
+                    val canSkipPrev = safeIdx > 0
                     val isCurrentInFm = currentSong != null && activeFmSong != null && (
                         (currentSong.id.isNotBlank() && currentSong.id == activeFmSong.id) ||
                             (currentSong.hash.isNotBlank() && currentSong.hash.equals(activeFmSong.hash, ignoreCase = true))
@@ -472,6 +444,7 @@ fun HomeScreen(
                         isPlaying = isFmPlayingNow,
                         isRefreshing = personalFmRefreshing,
                         fmSongPoolId = fmSongPoolId,
+                        canSkipPrev = canSkipPrev,
                         onOpenList = { showPersonalFmSheet = true },
                         onTogglePlayPause = {
                             if (isCurrentInFm) {
@@ -486,36 +459,50 @@ fun HomeScreen(
                                 }
                             }
                         },
+                        onSkipPrev = {
+                            viewModel.skipToPreviousPersonalFm { prevSong, list ->
+                                onSongClick(prevSong, list)
+                            }
+                        },
                         onSkipNext = {
                             viewModel.skipToNextPersonalFm { nextSong, list ->
                                 onSongClick(nextSong, list)
                             }
                         },
-                        onDislike = {
+                        onDislikeSong = {
                             if (activeFmSong != null) {
                                 val shouldSwitchPlayer = isCurrentInFm
-                                recentDislikedFmSong = activeFmSong
                                 recentDislikedWasPlayingFm = shouldSwitchPlayer
-                                viewModel.dislikeCurrentPersonalFmSong(
+                                recentDislikeUndoToken = viewModel.dislikeCurrentPersonalFmSong(
                                     song = activeFmSong,
                                     onNextPlay = { nextSong, list ->
                                         if (shouldSwitchPlayer) onSongClick(nextSong, list)
                                     },
-                                    onFeedbackMessage = { /* 由底部带撤销浮条承接反馈 */ },
-                                    onBlacklistUpdated = onBlacklistUpdated
+                                    onFeedbackMessage = { msg -> recentDislikeFeedbackMsg = msg }
                                 )
                             }
                         },
-                        onOpenPreference = onOpenPreferenceSheet,
-                        onCyclePool = {
-                            val nextPool = (fmSongPoolId + 1) % 3
-                            val poolName = when (nextPool) {
-                                1 -> "熟悉红心"
-                                2 -> "发现尝鲜"
-                                else -> "AI 默认"
+                        onDislikeArtist = {
+                            if (activeFmSong != null) {
+                                val shouldSwitchPlayer = isCurrentInFm
+                                recentDislikedWasPlayingFm = shouldSwitchPlayer
+                                recentDislikeUndoToken = viewModel.dislikeCurrentPersonalFmArtist(
+                                    song = activeFmSong,
+                                    onNextPlay = { nextSong, list ->
+                                        if (shouldSwitchPlayer) onSongClick(nextSong, list)
+                                    },
+                                    onFeedbackMessage = { msg -> recentDislikeFeedbackMsg = msg }
+                                )
                             }
-                            viewModel.switchPersonalFmPool(nextPool) { loaded ->
-                                Toast.makeText(context, "随心听已切换为「$poolName」模式", Toast.LENGTH_SHORT).show()
+                        },
+                        onSelectPool = { targetPool ->
+                            val poolName = when (targetPool) {
+                                1 -> "熟悉 · 相似风格未听新曲"
+                                2 -> "尝鲜 · 跨风味异质探索"
+                                else -> "平衡 · 智能口味漫游"
+                            }
+                            viewModel.switchPersonalFmPool(targetPool) { loaded ->
+                                Toast.makeText(context, "已切换至「$poolName」", Toast.LENGTH_SHORT).show()
                                 if (loaded.isNotEmpty() && isFmPlayingNow) {
                                     onSongClick(loaded.first(), loaded)
                                 }
@@ -525,7 +512,7 @@ fun HomeScreen(
                             viewModel.refreshPersonalFm { loaded ->
                                 if (loaded.isNotEmpty()) {
                                     onSongClick(loaded.first(), loaded)
-                                    Toast.makeText(context, "已根据你的听歌口味焕新 ${loaded.size} 首推荐", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "已按当前偏好焕新 ${loaded.size} 首推荐", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
@@ -797,9 +784,9 @@ fun HomeScreen(
             )
         }
 
-        // FM 负反馈防误触「撤销」轻提示浮条
-        val undoTarget = recentDislikedFmSong
-        if (undoTarget != null && !isOverlayOpen) {
+        // 猜你喜欢专属负反馈防误触「撤销」轻提示浮条
+        val undoToken = recentDislikeUndoToken
+        if (undoToken != null && !isOverlayOpen) {
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = if (isDark) Color(0xFF1D293D) else Color(0xFF1B2433),
@@ -818,7 +805,10 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "已减少推荐《${undoTarget.title}》",
+                        text = recentDislikeFeedbackMsg.ifBlank {
+                            if (undoToken.isArtistDislike) "已减少推荐歌手「${undoToken.targetArtistName}」"
+                            else "已减少推荐《${undoToken.dislikedSong.title}》"
+                        },
                         color = Color.White,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
@@ -828,14 +818,13 @@ fun HomeScreen(
                     )
                     TextButton(
                         onClick = {
-                            val toRestore = undoTarget
+                            val tokenToRestore = undoToken
                             val resumeFm = recentDislikedWasPlayingFm
-                            recentDislikedFmSong = null
-                            viewModel.undoDislikePersonalFmSong(toRestore) { restored, list ->
+                            recentDislikeUndoToken = null
+                            viewModel.undoPersonalFmDislike(tokenToRestore) { restored, list ->
                                 if (resumeFm) onSongClick(restored, list)
-                                onBlacklistUpdated?.invoke()
                             }
-                            Toast.makeText(context, "已撤销并恢复《${toRestore.title}》", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "已撤销偏好反馈并恢复推荐", Toast.LENGTH_SHORT).show()
                         }
                     ) {
                         Text("撤销", color = ConceptCyanAccent, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
@@ -844,23 +833,6 @@ fun HomeScreen(
             }
         }
         }
-    }
-
-    if (showContinuePlaySheet && !isOverlayOpen) {
-        CrossDeviceContinueSheet(
-            snapshot = continuePlaySnapshot,
-            loading = continuePlayLoading,
-            errorMessage = continuePlayError,
-            currentLocalSong = currentSong,
-            onRefresh = { viewModel.refreshContinuePlay(force = true) },
-            onPlaySong = { song, queue ->
-                onSongClick(song, queue)
-                viewModel.dismissContinuePlayBanner()
-            },
-            onSyncCurrentLocalSong = onSyncCurrentSongToCloud,
-            onDismissStart = { isHomeSubSheetDismissing = true },
-            onDismiss = { showContinuePlaySheet = false }
-        )
     }
 
     if (showRankGridSheet && !isOverlayOpen) {
@@ -880,13 +852,10 @@ fun HomeScreen(
     if (showPersonalFmSheet && !isOverlayOpen) {
         val pfmAdaptive = com.concept.music.ui.theme.LocalConceptAdaptiveInfo.current
         val useCenteredFmPanel = pfmAdaptive.isLargeScreenDevice && pfmAdaptive.isLandscapeWindow
-        val mintAccent = if (isDark) Color(0xFF26DEBF) else ConceptMintAccent
-        val sheetBgColor = if (isDark) Color(0xFF0E1D22) else Color(0xFFF2FCF9)
-        val headerBannerBrush = if (isDark) {
-            Brush.linearGradient(listOf(Color(0xFF123133), Color(0xFF112534), Color(0xFF0E1D22)))
-        } else {
-            Brush.linearGradient(listOf(Color(0xFFDDFBF3), Color(0xFFEAF6FF), Color(0xFFF2FCF9)))
-        }
+        val fmPalette = rememberPersonalFmModePalette(fmSongPoolId, isDark)
+        val mintAccent = fmPalette.accent
+        val sheetBgColor = fmPalette.sheetBg
+        val headerBannerBrush = Brush.linearGradient(listOf(fmPalette.gradStart, fmPalette.gradMid, fmPalette.sheetBg))
         var pfmSheetSpin by remember { mutableIntStateOf(0) }
         val pfmShape = if (useCenteredFmPanel) RoundedCornerShape(26.dp) else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
 
@@ -990,7 +959,7 @@ fun HomeScreen(
                                     maxLines = 1
                                 )
                                 Text(
-                                    text = " · 随心听",
+                                    text = " · ${fmPalette.modeLabel}模式",
                                     style = MaterialTheme.typography.labelMedium.copy(
                                         fontWeight = FontWeight.SemiBold,
                                         color = mintAccent,
@@ -1002,7 +971,7 @@ fun HomeScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "融合红心与日常听歌偏好",
+                                text = fmPalette.hintText,
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 11.5.sp
@@ -1378,10 +1347,7 @@ fun HomeScreen(
  */
 @Composable
 private fun DiscoverTopHeader(
-    onSearchClick: () -> Unit,
-    showContinueDeviceAction: Boolean = false,
-    hasContinueReady: Boolean = false,
-    onOpenContinuePlay: () -> Unit = {}
+    onSearchClick: () -> Unit
 ) {
     val timeGreeting = remember {
         val now = runCatching { LocalTime.now(DISCOVER_CHINA_ZONE) }.getOrElse { LocalTime.now() }
@@ -1437,73 +1403,108 @@ private fun DiscoverTopHeader(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Surface(
+            shape = CircleShape,
+            color = conceptFloatingCardColor(),
+            shadowElevation = 0.dp,
+            modifier = Modifier
+                .height(36.dp)
+                .softCardClickable(shape = CircleShape, onClick = onSearchClick)
         ) {
-            if (showContinueDeviceAction) {
-                Surface(
-                    shape = CircleShape,
-                    color = conceptFloatingCardColor(),
-                    shadowElevation = 0.dp,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .softCardClickable(shape = CircleShape, onClick = onOpenContinuePlay)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.Devices,
-                            contentDescription = "跨设备继续播放",
-                            tint = if (hasContinueReady) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(19.dp)
-                        )
-                        if (hasContinueReady) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 7.dp, end = 7.dp)
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(ConceptCyanAccent)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Surface(
-                shape = CircleShape,
-                color = conceptFloatingCardColor(),
-                shadowElevation = 0.dp,
-                modifier = Modifier
-                    .height(36.dp)
-                    .softCardClickable(shape = CircleShape, onClick = onSearchClick)
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = "搜索",
-                        tint = ConceptPrimary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = "搜索",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Search,
+                    contentDescription = "搜索",
+                    tint = ConceptPrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = "搜索",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }
 }
 
+private data class PersonalFmModePalette(
+    val modeLabel: String,
+    val hintText: String,
+    val accent: Color,
+    val onAccent: Color,
+    val gradStart: Color,
+    val gradMid: Color,
+    val gradEnd: Color,
+    val sheetBg: Color
+)
+
+@Composable
+private fun rememberPersonalFmModePalette(fmSongPoolId: Int, isDark: Boolean): PersonalFmModePalette {
+    val targetAccent = when (fmSongPoolId) {
+        1 -> if (isDark) Color(0xFFF5B041) else Color(0xFFC97A00) // 熟悉：暖琥珀流金
+        2 -> if (isDark) Color(0xFF9B7BFF) else Color(0xFF6848E8) // 尝鲜：极光鸢尾紫蓝
+        else -> if (isDark) Color(0xFF26DEBF) else ConceptMintAccent // 平衡：保持原始薄荷绿渐变不变
+    }
+    val targetGradStart = when (fmSongPoolId) {
+        1 -> if (isDark) Color(0xFF2B1F12) else Color(0xFFFFF2DE)
+        2 -> if (isDark) Color(0xFF1E1838) else Color(0xFFEFE9FF)
+        else -> if (isDark) Color(0xFF102A2C) else Color(0xFFE0FBF4)
+    }
+    val targetGradMid = when (fmSongPoolId) {
+        1 -> if (isDark) Color(0xFF211B24) else Color(0xFFFFF7EC)
+        2 -> if (isDark) Color(0xFF161E38) else Color(0xFFEAF2FF)
+        else -> if (isDark) Color(0xFF122234) else Color(0xFFECF6FF)
+    }
+    val targetGradEnd = when (fmSongPoolId) {
+        1 -> if (isDark) Color(0xFF141826) else Color(0xFFF7F2FF)
+        2 -> if (isDark) Color(0xFF141828) else Color(0xFFF4F8FF)
+        else -> if (isDark) Color(0xFF141B2B) else Color(0xFFF5F4FF)
+    }
+    val targetSheetBg = when (fmSongPoolId) {
+        1 -> if (isDark) Color(0xFF1B1612) else Color(0xFFFFFBF4)
+        2 -> if (isDark) Color(0xFF151326) else Color(0xFFF7F5FF)
+        else -> if (isDark) Color(0xFF0E1D22) else Color(0xFFF2FCF9)
+    }
+    val animSpec = tween<Color>(durationMillis = 320, easing = FastOutSlowInEasing)
+    val accent by animateColorAsState(targetAccent, animSpec, label = "fmAccent")
+    val gradStart by animateColorAsState(targetGradStart, animSpec, label = "fmGradStart")
+    val gradMid by animateColorAsState(targetGradMid, animSpec, label = "fmGradMid")
+    val gradEnd by animateColorAsState(targetGradEnd, animSpec, label = "fmGradEnd")
+    val sheetBg by animateColorAsState(targetSheetBg, animSpec, label = "fmSheetBg")
+
+    val onAccent = when {
+        !isDark -> Color.White
+        fmSongPoolId == 1 -> Color(0xFF261704)
+        fmSongPoolId == 2 -> Color(0xFF120A2A)
+        else -> Color(0xFF06201D)
+    }
+    val (label, hint) = when (fmSongPoolId) {
+        1 -> "熟悉" to "相似风味 · 回味红心与偏爱风格"
+        2 -> "尝鲜" to "跨界探索 · 邂逅全新流派惊喜"
+        else -> "平衡" to "智能平衡 · 融合红心与近期听感"
+    }
+    return PersonalFmModePalette(
+        modeLabel = label,
+        hintText = hint,
+        accent = accent,
+        onAccent = onAccent,
+        gradStart = gradStart,
+        gradMid = gradMid,
+        gradEnd = gradEnd,
+        sheetBg = sheetBg
+    )
+}
+
 /**
- * 私人随心听 FM（极简概念版设计 + 极光薄荷绿点缀，优化内部呼吸留白）
+ * 猜你喜欢 · 私人随心听画境卡片：
+ * - 点击卡片任意空白区即可呼出候选队列（已移除右下角多余队列按钮）；
+ * - 顶栏精简为单个循环模式按钮（平衡[原绿渐变] → 熟悉[暖琥珀] → 尝鲜[极光紫蓝]）+ 换一批刷新，舒展通透无紧凑感。
  */
 @Composable
 private fun PersonalFmPlayerCard(
@@ -1512,135 +1513,130 @@ private fun PersonalFmPlayerCard(
     isPlaying: Boolean,
     isRefreshing: Boolean,
     fmSongPoolId: Int = 0,
+    canSkipPrev: Boolean = false,
     onOpenList: () -> Unit,
     onTogglePlayPause: () -> Unit,
+    onSkipPrev: () -> Unit = {},
     onSkipNext: () -> Unit,
-    onDislike: () -> Unit = {},
-    onCyclePool: () -> Unit = {},
-    onOpenPreference: (() -> Unit)? = null,
+    onDislikeSong: () -> Unit = {},
+    onDislikeArtist: () -> Unit = {},
+    onSelectPool: (Int) -> Unit = {},
     onRefreshNewBatch: () -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
     var fmCardSpin by remember { mutableIntStateOf(0) }
+    var showInlineDislikeChoices by remember(activeSong?.id, activeSong?.hash) { mutableStateOf(false) }
 
-    val playerCardBrush = if (isDark) {
-        Brush.linearGradient(
-            listOf(Color(0xFF102A2C), Color(0xFF122234), Color(0xFF141B2B))
-        )
-    } else {
-        Brush.linearGradient(
-            listOf(Color(0xFFE0FBF4), Color(0xFFECF6FF), Color(0xFFF5F4FF))
-        )
+    val palette = rememberPersonalFmModePalette(fmSongPoolId, isDark)
+    val modeAccent = palette.accent
+    val playerCardBrush = Brush.linearGradient(listOf(palette.gradStart, palette.gradMid, palette.gradEnd))
+    val modeIcon = when (fmSongPoolId) {
+        1 -> Icons.Rounded.Favorite
+        2 -> Icons.Rounded.Explore
+        else -> Icons.Rounded.AutoAwesome
+    }
+    val primaryArtistName = remember(activeSong?.artist) {
+        activeSong?.artist?.split("、", "/", ",", "&")?.firstOrNull()?.trim().orEmpty()
     }
 
-    val mintAccent = if (isDark) Color(0xFF26DEBF) else ConceptMintAccent
-
     Surface(
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(28.dp),
         color = conceptFloatingCardColor(),
         shadowElevation = 0.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .softCardClickable(shape = RoundedCornerShape(26.dp), onClick = onOpenList)
+            .softCardClickable(shape = RoundedCornerShape(28.dp), onClick = onOpenList)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(playerCardBrush)
-                .padding(horizontal = 18.dp, vertical = 16.dp)
+                .padding(horizontal = 22.dp, vertical = 20.dp)
         ) {
-            // 上层：左上角「猜你喜欢·随心听」（随心听为精致小字）+ 右上角圆润双弧流光刷新图标
+            // 1. 顶栏：左侧舒展标题与说明 + 右侧单按钮循环模式切换与刷新
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = "猜你喜欢",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontSize = 16.5.sp,
-                            letterSpacing = 0.3.sp
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(
+                            text = "猜你喜欢",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 18.5.sp,
+                                letterSpacing = 0.3.sp
+                            )
                         )
-                    )
+                        Text(
+                            text = " · 私人电台",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = modeAccent,
+                                fontSize = 12.sp
+                            ),
+                            modifier = Modifier.padding(bottom = 1.5.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        text = "·随心听",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            color = mintAccent.copy(alpha = 0.92f),
-                            fontSize = 12.sp,
-                            letterSpacing = 0.2.sp
+                        text = palette.hintText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.84f),
+                            fontSize = 11.5.sp
                         ),
-                        modifier = Modifier.padding(start = 3.dp, bottom = 1.5.dp)
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
+                Spacer(modifier = Modifier.width(12.dp))
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val poolLabel = when (fmSongPoolId) {
-                        1 -> "熟悉"
-                        2 -> "尝鲜"
-                        else -> "AI 默认"
-                    }
+                    // 单按钮循环切换推荐模式：平衡(0) -> 熟悉(1) -> 尝鲜(2) -> 平衡(0)
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = mintAccent.copy(alpha = 0.14f),
-                        modifier = Modifier.softCardClickable(shape = RoundedCornerShape(12.dp), onClick = onCyclePool)
+                        shape = CircleShape,
+                        color = modeAccent.copy(alpha = if (isDark) 0.18f else 0.13f),
+                        modifier = Modifier.softClickable(
+                            pressScale = 0.93f,
+                            onClick = { onSelectPool((fmSongPoolId + 1) % 3) }
+                        )
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.SwapHoriz,
-                                contentDescription = "切换曲池",
-                                tint = mintAccent,
+                                imageVector = modeIcon,
+                                contentDescription = "切换推荐模式",
+                                tint = modeAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            AnimatedContent(
+                                targetState = palette.modeLabel,
+                                transitionSpec = {
+                                    fadeIn(tween(180)) togetherWith fadeOut(tween(120))
+                                },
+                                label = "fmModeBtnLabel"
+                            ) { labelText ->
+                                Text(
+                                    text = labelText,
+                                    color = modeAccent,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Rounded.Sync,
+                                contentDescription = null,
+                                tint = modeAccent.copy(alpha = 0.78f),
                                 modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = poolLabel,
-                                color = mintAccent,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    if (onOpenPreference != null) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .softClickable(pressScale = 0.88f, onClick = onOpenPreference)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Tune,
-                                contentDescription = "推荐偏好与屏蔽",
-                                tint = mintAccent,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-
-                    if (activeSong != null) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .softClickable(pressScale = 0.88f, onClick = onDislike)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ThumbDownOffAlt,
-                                contentDescription = "不喜欢并换一首",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
-                                modifier = Modifier.size(17.dp)
                             )
                         }
                     }
@@ -1648,8 +1644,9 @@ private fun PersonalFmPlayerCard(
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
+                            .background(modeAccent.copy(alpha = if (isDark) 0.14f else 0.11f))
                             .softClickable(
                                 enabled = !isRefreshing,
                                 pressScale = 0.88f,
@@ -1660,28 +1657,28 @@ private fun PersonalFmPlayerCard(
                             )
                     ) {
                         ConceptFluidRefreshIcon(
-                            tint = mintAccent,
+                            tint = modeAccent,
                             isRefreshing = isRefreshing,
                             spinTrigger = fmCardSpin,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // 下层：当前随心听曲目封面、歌手信息、下一首预告与播放控制
+            // 2. 中部主舞台：大尺寸唱片封面 + 舒展曲目主信息与下一首预告
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(60.dp)
-                        .shadow(4.dp, RoundedCornerShape(16.dp))
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Brush.linearGradient(listOf(ConceptMintAccent, ConceptPrimaryDark))),
+                        .size(92.dp)
+                        .shadow(10.dp, RoundedCornerShape(22.dp))
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Brush.linearGradient(listOf(modeAccent, ConceptPrimaryDark))),
                     contentAlignment = Alignment.Center
                 ) {
                     Crossfade(
@@ -1705,14 +1702,14 @@ private fun PersonalFmPlayerCard(
                                     imageVector = Icons.Rounded.Radio,
                                     contentDescription = null,
                                     tint = Color.White,
-                                    modifier = Modifier.size(26.dp)
+                                    modifier = Modifier.size(34.dp)
                                 )
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.width(13.dp))
+                Spacer(modifier = Modifier.width(18.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
                     AnimatedContent(
@@ -1725,89 +1722,262 @@ private fun PersonalFmPlayerCard(
                     ) { displayTitle ->
                         Text(
                             text = displayTitle,
-                            style = MaterialTheme.typography.titleMedium.copy(
+                            style = MaterialTheme.typography.titleLarge.copy(
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 15.5.sp
+                                fontSize = 18.sp
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(7.dp))
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (activeSong?.isHiRes == true) {
                             BadgeTag(text = "Hi-Res", color = VipGold)
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                         } else if (activeSong?.isLossless == true) {
                             BadgeTag(text = "SQ", color = ConceptPrimary)
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
                         if (activeSong?.isVip == true) {
                             BadgeTag(text = "VIP", color = VipGold)
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
                         Text(
-                            text = activeSong?.artist ?: "根据你的红心与听歌习惯实时推荐",
-                            style = MaterialTheme.typography.bodySmall.copy(
+                            text = activeSong?.let {
+                                val alb = it.album.takeIf { a -> a.isNotBlank() && a != "单曲" && a != "未知专辑" }
+                                if (alb != null) "${it.artist} · $alb" else it.artist
+                            } ?: "根据你的听歌口味实时调频",
+                            style = MaterialTheme.typography.bodyMedium.copy(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    if (nextSong != null) {
-                        Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = modeAccent.copy(alpha = if (isDark) 0.14f else 0.10f)
+                    ) {
                         Text(
-                            text = "下一首：${nextSong.title} - ${nextSong.artist}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
-                                fontSize = 11.sp
-                            ),
+                            text = if (nextSong != null) {
+                                "下一首 · ${nextSong.title}"
+                            } else {
+                                "轻触卡片查看候选队列"
+                            },
+                            color = modeAccent,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                         )
                     }
                 }
+            }
 
-                Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilledIconButton(
-                        onClick = onTogglePlayPause,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = mintAccent,
-                            contentColor = Color.White
-                        ),
-                        modifier = Modifier
-                            .size(42.dp)
-                            .shadow(5.dp, CircleShape)
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 3. 底部简洁播控区：左侧「不喜欢」反馈 + 右侧舒展「上一首 / 播放暂停 / 下一首」（无冗余队列按钮）
+            AnimatedContent(
+                targetState = showInlineDislikeChoices && activeSong != null,
+                transitionSpec = {
+                    fadeIn(tween(180)) togetherWith fadeOut(tween(140))
+                },
+                label = "fmDislikeBarSwitch"
+            ) { expandedDislike ->
+                if (expandedDislike && activeSong != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (isPlaying) "暂停随心听" else "播放随心听",
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = ConceptCoralAccent.copy(alpha = 0.14f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .softCardClickable(
+                                    shape = RoundedCornerShape(16.dp),
+                                    onClick = {
+                                        showInlineDislikeChoices = false
+                                        onDislikeSong()
+                                    }
+                                )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.HeartBroken,
+                                    contentDescription = null,
+                                    tint = ConceptCoralAccent,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "不听这首歌",
+                                    color = ConceptCoralAccent,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+
+                        if (primaryArtistName.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.12f else 0.07f),
+                                modifier = Modifier
+                                    .weight(1.15f)
+                                    .softCardClickable(
+                                        shape = RoundedCornerShape(16.dp),
+                                        onClick = {
+                                            showInlineDislikeChoices = false
+                                            onDislikeArtist()
+                                        }
+                                    )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PersonOff,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = "少推：$primaryArtistName",
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                                .softClickable { showInlineDislikeChoices = false }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "收起",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
-
-                    IconButton(
-                        onClick = onSkipNext,
-                        modifier = Modifier.size(40.dp)
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.SkipNext,
-                            contentDescription = "下一首",
-                            tint = mintAccent,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.10f else 0.06f),
+                            modifier = Modifier.softCardClickable(
+                                shape = CircleShape,
+                                enabled = activeSong != null,
+                                onClick = { showInlineDislikeChoices = true }
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.HeartBroken,
+                                    contentDescription = "不喜欢当前推荐",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "不喜欢",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // 右侧：上一首 / 主播放暂停圆钮 / 下一首（舒展排布，点击卡片即弹队列）
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            IconButton(
+                                onClick = onSkipPrev,
+                                enabled = canSkipPrev,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SkipPrevious,
+                                    contentDescription = "上一首",
+                                    tint = if (canSkipPrev) modeAccent else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            FilledIconButton(
+                                onClick = onTogglePlayPause,
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = modeAccent,
+                                    contentColor = palette.onAccent
+                                ),
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .shadow(8.dp, CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isPlaying) "暂停随心听" else "播放随心听",
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = onSkipNext,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SkipNext,
+                                    contentDescription = "下一首",
+                                    tint = modeAccent,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2572,7 +2742,7 @@ fun DailyRecommendScreen(
                             ) {
                                 Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(19.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("播放全部 (${dailySongs.size})", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                                Text("播放全部", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                             }
                         }
                     }
@@ -2713,6 +2883,7 @@ fun DailyRecommendScreen(
                             }
                         }
                     }
+
                     HorizontalDivider(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         thickness = 0.5.dp,

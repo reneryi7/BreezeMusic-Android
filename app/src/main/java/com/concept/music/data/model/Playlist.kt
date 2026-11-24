@@ -29,6 +29,24 @@ data class Playlist(
         get() = title.trim() == "默认收藏"
 
     /**
+     * 解析酷狗云端歌单的数字 listid（支持从 listId、listCreateListid 及 collection_3_{uid}_{listid}_0 中提取）
+     */
+    fun resolveEffectiveListId(): Long {
+        if (listId > 0L) return listId
+        listCreateListid.trim().toLongOrNull()?.takeIf { it > 0L }?.let { return it }
+        for (raw in listOf(globalCollectionId, listCreateGid, id, specialId)) {
+            val clean = raw.trim()
+            if (clean.startsWith("collection_", ignoreCase = true)) {
+                val parts = clean.split("_")
+                if (parts.size >= 4) {
+                    parts[3].trim().toLongOrNull()?.takeIf { it > 0L }?.let { return it }
+                }
+            }
+        }
+        return id.trim().toLongOrNull()?.takeIf { it > 0L } ?: 0L
+    }
+
+    /**
      * 提取歌单所有可能匹配的身份标识集合（兼容 specialId、global_collection_id、list_create_gid、list_create_listid 以及 GID 内嵌的原始 listId）
      */
     fun candidateIdentityKeys(): Set<String> {

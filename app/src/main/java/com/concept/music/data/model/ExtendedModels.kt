@@ -9,23 +9,8 @@ import androidx.compose.runtime.Immutable
 data class DailyHistoryEntry(
     val historyName: String,
     val dateLabel: String,
-    val displayTitle: String = dateLabel
-)
-
-/**
- * 已关注歌手的最新单曲/新专辑动态
- */
-@Immutable
-data class FollowedArtistNewRelease(
-    val id: String,
-    val title: String,
-    val artistName: String,
-    val artistId: String = "",
-    val coverUrl: String = "",
-    val publishDate: String = "",
-    val isAlbum: Boolean = false,
-    val albumId: String = "",
-    val song: Song? = null
+    val displayTitle: String = dateLabel,
+    val compactDate: String = dateLabel.replace("-", "")
 )
 
 /**
@@ -48,6 +33,7 @@ data class CloudSongItem(
     val title: String,
     val artist: String,
     val album: String = "",
+    val albumId: String = "",
     val fileSize: Long = 0L,
     val durationMs: Long = 0L,
     val bitrate: Int = 0,
@@ -55,27 +41,71 @@ data class CloudSongItem(
     val albumAudioId: Long = 0L,
     val audioId: Long = 0L,
     val coverUrl: String = "",
-    val addTime: String = ""
+    val addTime: String = "",
+    val addTimestampSec: Long = 0L,
+    val resolvedQuality: AudioQuality? = null
 ) {
+    val effectiveQuality: AudioQuality
+        get() = resolvedQuality ?: when {
+            (extName.equals("flac", ignoreCase = true) || bitrate >= 700) && bitrate >= 1450 -> AudioQuality.HI_RES
+            extName.equals("flac", ignoreCase = true) || extName.equals("ape", ignoreCase = true) ||
+                extName.equals("wav", ignoreCase = true) || bitrate >= 700 -> AudioQuality.LOSSLESS
+            bitrate >= 256 -> AudioQuality.HIGH
+            else -> AudioQuality.STANDARD
+        }
+
+    val qualityBadgeLabel: String
+        get() = when (effectiveQuality) {
+            AudioQuality.HI_RES -> "Hi-Res"
+            AudioQuality.LOSSLESS -> "SQ"
+            AudioQuality.HIGH -> "HQ"
+            AudioQuality.STANDARD -> "标准"
+        }
+
+    val formattedSize: String
+        get() {
+            if (fileSize <= 0L) return ""
+            val mb = fileSize.toDouble() / (1024.0 * 1024.0)
+            return if (mb >= 1.0) String.format(java.util.Locale.US, "%.1f MB", mb)
+            else String.format(java.util.Locale.US, "%.0f KB", fileSize.toDouble() / 1024.0)
+        }
+
+    /**
+     * 规范化的格式与码率展示文案（杜绝将酷狗内部品质枚举码 1..10 误展示为 4kbps / 3kbps）
+     */
+    val formattedCodecAndBitrate: String
+        get() {
+            val fmt = extName.trim().uppercase(java.util.Locale.ROOT)
+            val validKbps = bitrate.takeIf { it >= 32 } ?: 0
+            return when {
+                fmt.isNotBlank() && validKbps > 0 -> "$fmt ${validKbps}kbps"
+                fmt.isNotBlank() -> fmt
+                validKbps > 0 -> "${validKbps}kbps"
+                else -> ""
+            }
+        }
+
     fun toSong(): Song {
-        val isFlac = extName.equals("flac", ignoreCase = true) || bitrate >= 700
-        val isHiRes = isFlac && bitrate >= 1500
-        val qualityStr = when {
-            isHiRes -> "high"
-            isFlac -> "flac"
-            bitrate >= 256 -> "320"
-            else -> "128"
+        val eq = effectiveQuality
+        val isHiRes = eq == AudioQuality.HI_RES
+        val isFlac = isHiRes || eq == AudioQuality.LOSSLESS
+        val qualityStr = when (eq) {
+            AudioQuality.HI_RES -> "high"
+            AudioQuality.LOSSLESS -> "flac"
+            AudioQuality.HIGH -> "320"
+            AudioQuality.STANDARD -> "128"
         }
         return Song(
             id = "cloud_${kvId}_${hash.take(8).lowercase()}",
             hash = hash,
             hash128 = hash,
-            hash320 = if (bitrate >= 256) hash else "",
+            hash320 = if (eq.ordinal >= AudioQuality.HIGH.ordinal) hash else "",
             hashFlac = if (isFlac) hash else "",
             hashHiRes = if (isHiRes) hash else "",
             title = title.ifBlank { name },
             artist = artist.ifBlank { "云盘曲目" },
             album = album.ifBlank { "我的音乐云盘" },
+            albumId = albumId,
             coverUrl = coverUrl,
             durationMs = durationMs,
             isLossless = isFlac,
@@ -85,6 +115,8 @@ data class CloudSongItem(
             mixSongId = albumAudioId.takeIf { it > 0L }?.toString()
                 ?: audioId.takeIf { it > 0L }?.toString().orEmpty(),
             quality = qualityStr,
+            availableQualities = listOf(eq),
+            actualPlayQuality = eq,
             bitrateKbps = bitrate,
             fileSizeByte = fileSize,
             cloudKvId = kvId
@@ -105,13 +137,31 @@ data class CloudDiskSummary(
 )
 
 /**
- * 个人听歌排行条目（近一周 / 全部累计）
+ * 个人听歌排行条目（周榜 / 月榜 / 累计总榜）
  */
 @Immutable
 data class ListenRankItem(
     val rank: Int,
     val song: Song,
-    val playCount: Int = 0
+    val playCount: Int = 0,
+    val playedMs: Long = 0L,
+    val lastPlayedAtMs: Long = 0L
+)
+
+/**
+ * 最常听歌手排行条目（基于所选排行周期聚合歌手总播放次数与上榜曲数）
+ */
+@Immutable
+data class ArtistListenRankItem(
+    val rank: Int,
+    val artistName: String,
+    val artistId: String = "",
+    val avatarUrl: String = "",
+    val totalPlayCount: Int = 0,
+    val trackCount: Int = 0,
+    val topSongTitle: String = "",
+    val songs: List<Song> = emptyList(),
+    val totalPlayedMs: Long = 0L
 )
 
 /**
@@ -148,56 +198,6 @@ data class BlacklistEntry(
 )
 
 /**
- * 单个来源设备的最近播放分组
- */
-@Immutable
-data class CrossDeviceSession(
-    val sourceType: String,
-    val sourceLabel: String,
-    val songs: List<Song>,
-    val latestSong: Song,
-    val updatedAtMs: Long = 0L
-)
-
-/**
- * 跨设备「继续播放」接力快照
- */
-@Immutable
-data class ContinuePlaySnapshot(
-    val primarySong: Song? = null,
-    val primaryDeviceLabel: String = "",
-    val primarySourceType: String = "",
-    val queue: List<Song> = emptyList(),
-    val deviceGroups: List<CrossDeviceSession> = emptyList(),
-    val fetchedAtMs: Long = 0L
-) {
-    val hasPlayableContent: Boolean
-        get() = primarySong != null && queue.isNotEmpty()
-
-    /**
-     * 判断跨设备快照相对于当前设备正在播放的曲目是否值得在首页展示接力条：
-     * - 当前未播放任何歌曲时直接展示；
-     * - 若当前正在播放，仅当远端首曲与当前曲目不同（按 hash/id 判断）时展示接力建议。
-     */
-    fun shouldSuggestOverCurrentSong(currentSong: Song?, isCurrentlyPlaying: Boolean): Boolean {
-        val remote = primarySong ?: return false
-        if (currentSong == null) return true
-        val sameHash = remote.hash.isNotBlank() && currentSong.hash.isNotBlank() &&
-            remote.hash.equals(currentSong.hash, ignoreCase = true)
-        val sameId = remote.id.isNotBlank() && remote.id == currentSong.id
-        val sameTitleArtist = remote.title.equals(currentSong.title, ignoreCase = true) &&
-            remote.artist.equals(currentSong.artist, ignoreCase = true)
-        if (sameHash || sameId || sameTitleArtist) return false
-        return !isCurrentlyPlaying ||
-            primarySourceType == "pc" ||
-            primarySourceType == "car" ||
-            primarySourceType == "tv" ||
-            primarySourceType == "tablet" ||
-            deviceGroups.size > 1
-    }
-}
-
-/**
  * 账号已登录设备信息
  */
 @Immutable
@@ -205,9 +205,13 @@ data class LoginDeviceItem(
     val mid: String,
     val deviceName: String,
     val platform: String = "",
+    val deviceType: String = "mobile",
     val appId: String = "",
     val clientVer: String = "",
     val loginTime: String = "",
+    val loginTimestampSec: Long = 0L,
     val t: String = "",
-    val isCurrentDevice: Boolean = false
+    val isCurrentDevice: Boolean = false,
+    val canKickOut: Boolean = true,
+    val detectedViaStandardChannel: Boolean = false
 )

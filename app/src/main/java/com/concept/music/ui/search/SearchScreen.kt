@@ -2,9 +2,12 @@ package com.concept.music.ui.search
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -42,8 +45,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
+import com.concept.music.data.kugou.SearchSongVersionGroup
 import com.concept.music.data.model.*
 import androidx.compose.ui.graphics.FilterQuality
+import com.concept.music.ui.components.BadgeTag
 import com.concept.music.ui.components.FloatingScrollToTopButton
 import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
 import com.concept.music.ui.components.rememberProgressiveSongList
@@ -102,7 +107,9 @@ fun SearchScreen(
     val artistResults by viewModel.artistResults.collectAsState()
     val albumResults by viewModel.albumResults.collectAsState()
     val playlistResults by viewModel.playlistResults.collectAsState()
-    val lyricResults by viewModel.lyricResults.collectAsState()
+    val complexSongGroups by viewModel.complexSongGroups.collectAsState()
+    val songTabGroups by viewModel.songTabGroups.collectAsState()
+    val expandedVersionSongKeys by viewModel.expandedVersionSongKeys.collectAsState()
 
     val loading by viewModel.loading.collectAsState()
     val loadingMore by viewModel.loadingMore.collectAsState()
@@ -113,13 +120,11 @@ fun SearchScreen(
     val artistListState = rememberLazyListState()
     val albumListState = rememberLazyListState()
     val playlistListState = rememberLazyListState()
-    val lyricListState = rememberLazyListState()
     val activeListState = when (selectedTab) {
         SearchTab.SONG -> songListState
         SearchTab.ARTIST -> artistListState
         SearchTab.ALBUM -> albumListState
         SearchTab.PLAYLIST -> playlistListState
-        SearchTab.LYRIC -> lyricListState
         SearchTab.COMPLEX -> songListState
     }
     val currentOnBack by rememberUpdatedState(onBack)
@@ -249,10 +254,9 @@ fun SearchScreen(
                 )
             }
 
-            // 开放式极简分类导航栏（综合 / 单曲 / 歌手 / 专辑 / 歌单 / 歌词）
+            // 开放式极简分类导航栏（综合 / 单曲 / 歌手 / 专辑 / 歌单）
             if (hasSearched && query.isNotEmpty()) {
-                val cyanAccent = conceptCyanAccentColor()
-                val searchTabItems = remember(cyanAccent) {
+                val searchTabItems = remember {
                     SearchTab.entries.map { tab ->
                         val tabAccent = when (tab) {
                             SearchTab.COMPLEX -> ConceptPrimary
@@ -260,7 +264,6 @@ fun SearchScreen(
                             SearchTab.ARTIST -> ConceptPrimary
                             SearchTab.ALBUM -> ConceptAmberAccent
                             SearchTab.PLAYLIST -> ConceptVioletAccent
-                            SearchTab.LYRIC -> cyanAccent
                         }
                         ConceptCategoryTabItem(
                             key = tab.name,
@@ -385,6 +388,9 @@ fun SearchScreen(
                                     } else {
                                         ComplexSearchResultView(
                                             result = complexResult,
+                                            songGroups = complexSongGroups,
+                                            expandedVersionKeys = expandedVersionSongKeys,
+                                            onToggleVersionsExpand = viewModel::toggleSongVersionsExpanded,
                                             keyword = displayKw,
                                             currentSong = currentSong,
                                             onSongClick = onSongClick,
@@ -397,21 +403,15 @@ fun SearchScreen(
                                     }
                                 }
                                 SearchTab.SONG -> {
-                                    if (songResults.isEmpty()) {
+                                    val effectiveGroups = remember(songTabGroups, songResults) {
+                                        songTabGroups.ifEmpty { songResults.map { SearchSongVersionGroup(primary = it, versions = emptyList()) } }
+                                    }
+                                    if (effectiveGroups.isEmpty()) {
                                         EmptySearchState(message = "未找到“$displayKw”的相关单曲")
                                     } else {
                                         val searchScope = rememberCoroutineScope()
-                                        val displayedSearchSongs by rememberProgressiveSongList(
-                                            sourceSongs = songResults,
-                                            listState = songListState,
-                                            resetKey = displayKw,
-                                            initialBatchSize = 15,
-                                            microBatchSize = 10
-                                        )
                                         val latestSongResults by rememberUpdatedState(songResults)
-                                        val curSearchPlayingId = currentSong?.id
-                                        val curSearchPlayingHash = currentSong?.hash.orEmpty()
-                                        val showSongSearchScrollTop by remember(songResults.size) {
+                                        val showSongSearchScrollTop by remember(effectiveGroups.size) {
                                             derivedStateOf {
                                                 songListState.firstVisibleItemIndex > 2 ||
                                                     (songListState.firstVisibleItemIndex == 2 && songListState.firstVisibleItemScrollOffset > 100)
@@ -424,10 +424,10 @@ fun SearchScreen(
                                                 contentPadding = PaddingValues(bottom = 112.dp)
                                             ) {
                                                 if (adaptiveInfo.useTwoColumnSongOrCardGrid) {
-                                                    val songPairs = displayedSearchSongs.mapIndexed { idx, s -> idx to s }.chunked(2)
+                                                    val groupPairs = effectiveGroups.mapIndexed { idx, g -> idx to g }.chunked(2)
                                                     itemsIndexed(
-                                                        items = songPairs,
-                                                        key = { pIdx, pair -> "search_song_pair_${pair.first().second.id}_$pIdx" },
+                                                        items = groupPairs,
+                                                        key = { pIdx, pair -> "search_song_pair_${pair.first().second.primary.id}_$pIdx" },
                                                         contentType = { _, _ -> "song_pair_row" }
                                                     ) { _, pair ->
                                                         Row(
@@ -436,14 +436,19 @@ fun SearchScreen(
                                                                 .padding(horizontal = 12.dp),
                                                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                                                         ) {
-                                                            pair.forEach { (index, song) ->
+                                                            pair.forEach { (index, group) ->
+                                                                val gKey = viewModel.songGroupKey(group.primary)
                                                                 Box(modifier = Modifier.weight(1f)) {
-                                                                    SongItemRow(
-                                                                        song = song,
+                                                                    SearchExpandableSongGroupRow(
+                                                                        group = group,
                                                                         orderIndex = index + 1,
-                                                                        isPlaying = curSearchPlayingId != null && (curSearchPlayingId == song.id || (curSearchPlayingHash.isNotEmpty() && curSearchPlayingHash.equals(song.hash, ignoreCase = true))),
-                                                                        onClick = { onSongClick(song, latestSongResults) },
-                                                                        onMoreClick = { onSongMoreClick(song) }
+                                                                        isExpanded = gKey in expandedVersionSongKeys,
+                                                                        onToggleExpand = { viewModel.toggleSongVersionsExpanded(gKey) },
+                                                                        currentSong = currentSong,
+                                                                        allContextSongs = latestSongResults,
+                                                                        highlightKeyword = displayKw,
+                                                                        onSongClick = onSongClick,
+                                                                        onSongMoreClick = onSongMoreClick
                                                                     )
                                                                 }
                                                             }
@@ -452,16 +457,21 @@ fun SearchScreen(
                                                     }
                                                 } else {
                                                     itemsIndexed(
-                                                        items = displayedSearchSongs,
-                                                        key = { idx, s -> "search_song_${s.id}_$idx" },
-                                                        contentType = { _, _ -> "song_row" }
-                                                    ) { index, song ->
-                                                        SongItemRow(
-                                                            song = song,
+                                                        items = effectiveGroups,
+                                                        key = { idx, g -> "search_song_${g.primary.id}_${g.primary.hash}_$idx" },
+                                                        contentType = { _, _ -> "song_group_row" }
+                                                    ) { index, group ->
+                                                        val gKey = viewModel.songGroupKey(group.primary)
+                                                        SearchExpandableSongGroupRow(
+                                                            group = group,
                                                             orderIndex = index + 1,
-                                                            isPlaying = curSearchPlayingId != null && (curSearchPlayingId == song.id || (curSearchPlayingHash.isNotEmpty() && curSearchPlayingHash.equals(song.hash, ignoreCase = true))),
-                                                            onClick = { onSongClick(song, latestSongResults) },
-                                                            onMoreClick = { onSongMoreClick(song) }
+                                                            isExpanded = gKey in expandedVersionSongKeys,
+                                                            onToggleExpand = { viewModel.toggleSongVersionsExpanded(gKey) },
+                                                            currentSong = currentSong,
+                                                            allContextSongs = latestSongResults,
+                                                            highlightKeyword = displayKw,
+                                                            onSongClick = onSongClick,
+                                                            onSongMoreClick = onSongMoreClick
                                                         )
                                                     }
                                                 }
@@ -641,108 +651,6 @@ fun SearchScreen(
                                         }
                                     }
                                 }
-                                SearchTab.LYRIC -> {
-                                    if (lyricResults.isEmpty()) {
-                                        EmptySearchState(message = "未找到包含歌词“$displayKw”的歌曲")
-                                    } else {
-                                        val lyricScope = rememberCoroutineScope()
-                                        val latestLyricResults by rememberUpdatedState(lyricResults)
-                                        val curPlayingId = currentSong?.id
-                                        val curPlayingHash = currentSong?.hash.orEmpty()
-                                        val cyanAccent = conceptCyanAccentColor()
-                                        val showLyricScrollTop by remember(lyricResults.size) {
-                                            derivedStateOf {
-                                                lyricListState.firstVisibleItemIndex > 2 ||
-                                                    (lyricListState.firstVisibleItemIndex == 2 && lyricListState.firstVisibleItemScrollOffset > 100)
-                                            }
-                                        }
-                                        Box(modifier = Modifier.fillMaxSize()) {
-                                            LazyColumn(
-                                                state = lyricListState,
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentPadding = PaddingValues(bottom = 112.dp)
-                                            ) {
-                                                if (adaptiveInfo.useTwoColumnSongOrCardGrid) {
-                                                    val pairs = lyricResults.chunked(2)
-                                                    itemsIndexed(
-                                                        items = pairs,
-                                                        key = { idx, pair -> "search_lyric_pair_${pair.first().hash.ifBlank { pair.first().id }}_$idx" },
-                                                        contentType = { _, _ -> "lyric_song_pair" }
-                                                    ) { pairIdx, pair ->
-                                                        Row(
-                                                            modifier = Modifier
-                                                                .fillMaxWidth()
-                                                                .padding(horizontal = 8.dp),
-                                                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                                        ) {
-                                                            pair.forEachIndexed { colIdx, song ->
-                                                                val orderNo = pairIdx * 2 + colIdx + 1
-                                                                val isPlaying = curPlayingId != null && (
-                                                                    curPlayingId == song.id ||
-                                                                        (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))
-                                                                    )
-                                                                Box(modifier = Modifier.weight(1f)) {
-                                                                    LyricSearchResultItem(
-                                                                        song = song,
-                                                                        orderIndex = orderNo,
-                                                                        keyword = displayKw,
-                                                                        cyanAccent = cyanAccent,
-                                                                        isPlaying = isPlaying,
-                                                                        onClick = { onSongClick(song, latestLyricResults) },
-                                                                        onMoreClick = { onSongMoreClick(song) }
-                                                                    )
-                                                                }
-                                                            }
-                                                            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
-                                                        }
-                                                    }
-                                                } else {
-                                                    itemsIndexed(
-                                                        items = lyricResults,
-                                                        key = { idx, s -> "search_lyric_${s.hash.ifBlank { s.id }}_$idx" },
-                                                        contentType = { _, _ -> "lyric_song_row" }
-                                                    ) { index, song ->
-                                                        val isPlaying = curPlayingId != null && (
-                                                            curPlayingId == song.id ||
-                                                                (curPlayingHash.isNotEmpty() && curPlayingHash.equals(song.hash, ignoreCase = true))
-                                                            )
-                                                        LyricSearchResultItem(
-                                                            song = song,
-                                                            orderIndex = index + 1,
-                                                            keyword = displayKw,
-                                                            cyanAccent = cyanAccent,
-                                                            isPlaying = isPlaying,
-                                                            onClick = { onSongClick(song, latestLyricResults) },
-                                                            onMoreClick = { onSongMoreClick(song) }
-                                                        )
-                                                    }
-                                                }
-                                                if (loadingMore) {
-                                                    item {
-                                                        Box(
-                                                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                                            contentAlignment = Alignment.Center
-                                                        ) {
-                                                            CircularProgressIndicator(color = cyanAccent, modifier = Modifier.size(24.dp))
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            FloatingScrollToTopButton(
-                                                visible = showLyricScrollTop,
-                                                onClick = {
-                                                    lyricScope.launch {
-                                                        lyricListState.smoothFastScrollToItem(0)
-                                                    }
-                                                },
-                                                modifier = Modifier
-                                                    .align(Alignment.BottomEnd)
-                                                    .navigationBarsPadding()
-                                                    .padding(end = 18.dp, bottom = 104.dp)
-                                            )
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -901,6 +809,9 @@ fun SearchScreen(
 @Composable
 private fun ComplexSearchResultView(
     result: ComplexSearchResult,
+    songGroups: List<SearchSongVersionGroup>,
+    expandedVersionKeys: Set<String>,
+    onToggleVersionsExpand: (String) -> Unit,
     keyword: String,
     currentSong: Song?,
     onSongClick: (Song, List<Song>) -> Unit,
@@ -913,6 +824,9 @@ private fun ComplexSearchResultView(
     val isDark = LocalIsDarkTheme.current
     val adaptiveInfo = com.concept.music.ui.theme.LocalConceptAdaptiveInfo.current
     val elevatedColor = conceptElevatedSurfaceColor()
+    val effectiveComplexGroups = remember(songGroups, result.songs) {
+        songGroups.ifEmpty { result.songs.map { SearchSongVersionGroup(primary = it, versions = emptyList()) } }
+    }
 
     if (adaptiveInfo.useTwoPaneDetailLayout) {
         // 平板 / 宽屏「左右分栏分类展示」综合搜索结果看板：
@@ -942,14 +856,17 @@ private fun ComplexSearchResultView(
                         )
                     }
                 }
-                if (result.songs.isNotEmpty()) {
+                if (effectiveComplexGroups.isNotEmpty()) {
                     item(key = "wide_complex_songs") {
                         SongSectionBlock(
-                            title = "单曲与演绎版本",
+                            title = "单曲",
                             subtitle = null,
-                            songs = result.songs.take(10),
+                            groups = effectiveComplexGroups.take(10),
+                            expandedVersionKeys = expandedVersionKeys,
+                            onToggleVersionsExpand = onToggleVersionsExpand,
                             allSongs = result.songs,
                             currentSong = currentSong,
+                            highlightKeyword = keyword,
                             onSongClick = onSongClick,
                             onSongMoreClick = onSongMoreClick,
                             onViewAll = { onSelectTab(SearchTab.SONG) }
@@ -999,15 +916,18 @@ private fun ComplexSearchResultView(
     ) {
         when (result.intent) {
             SearchIntent.SONG -> {
-                // 1. 单曲意图：首屏置顶该歌曲的原版及翻唱/现场版本
-                if (result.songs.isNotEmpty()) {
+                // 1. 单曲意图：首屏置顶该歌曲的原版及同歌手多版本折叠行
+                if (effectiveComplexGroups.isNotEmpty()) {
                     item {
                         SongSectionBlock(
-                            title = "单曲与演绎版本",
+                            title = "单曲",
                             subtitle = null,
-                            songs = result.songs.take(10),
+                            groups = effectiveComplexGroups.take(10),
+                            expandedVersionKeys = expandedVersionKeys,
+                            onToggleVersionsExpand = onToggleVersionsExpand,
                             allSongs = result.songs,
                             currentSong = currentSong,
+                            highlightKeyword = keyword,
                             onSongClick = onSongClick,
                             onSongMoreClick = onSongMoreClick,
                             onViewAll = { onSelectTab(SearchTab.SONG) }
@@ -1094,12 +1014,14 @@ private fun ComplexSearchResultView(
                     }
                 }
                 // 3. 专辑关联单曲
-                if (result.songs.isNotEmpty()) {
+                if (effectiveComplexGroups.isNotEmpty()) {
                     item {
                         SongSectionBlock(
                             title = "专辑收录与相关单曲",
                             subtitle = null,
-                            songs = result.songs.take(8),
+                            groups = effectiveComplexGroups.take(8),
+                            expandedVersionKeys = expandedVersionKeys,
+                            onToggleVersionsExpand = onToggleVersionsExpand,
                             allSongs = result.songs,
                             currentSong = currentSong,
                             onSongClick = onSongClick,
@@ -1136,12 +1058,14 @@ private fun ComplexSearchResultView(
                     }
                 }
                 // 2. 主题相关单曲
-                if (result.songs.isNotEmpty()) {
+                if (effectiveComplexGroups.isNotEmpty()) {
                     item {
                         SongSectionBlock(
                             title = "相关精选单曲",
                             subtitle = null,
-                            songs = result.songs.take(8),
+                            groups = effectiveComplexGroups.take(8),
+                            expandedVersionKeys = expandedVersionKeys,
+                            onToggleVersionsExpand = onToggleVersionsExpand,
                             allSongs = result.songs,
                             currentSong = currentSong,
                             onSongClick = onSongClick,
@@ -1180,12 +1104,14 @@ private fun ComplexSearchResultView(
                 }
 
                 // 2. 歌手精选单曲
-                if (result.songs.isNotEmpty()) {
+                if (effectiveComplexGroups.isNotEmpty()) {
                     item {
                         SongSectionBlock(
                             title = "精选单曲",
                             subtitle = null,
-                            songs = result.songs.take(6),
+                            groups = effectiveComplexGroups.take(6),
+                            expandedVersionKeys = expandedVersionKeys,
+                            onToggleVersionsExpand = onToggleVersionsExpand,
                             allSongs = result.songs,
                             currentSong = currentSong,
                             onSongClick = onSongClick,
@@ -1431,9 +1357,12 @@ private fun ArtistSearchCard(artist: ArtistItem, onClick: () -> Unit = {}) {
 private fun SongSectionBlock(
     title: String,
     subtitle: String?,
-    songs: List<Song>,
+    groups: List<SearchSongVersionGroup>,
+    expandedVersionKeys: Set<String>,
+    onToggleVersionsExpand: (String) -> Unit,
     allSongs: List<Song>,
     currentSong: Song?,
+    highlightKeyword: String = "",
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
     onViewAll: () -> Unit
@@ -1488,14 +1417,229 @@ private fun SongSectionBlock(
 
         Spacer(modifier = Modifier.height(2.dp))
 
-        songs.forEachIndexed { index, song ->
-            SongItemRow(
-                song = song,
+        groups.forEachIndexed { index, group ->
+            val gKey = group.primary.hash.trim().ifBlank { group.primary.id.trim() }.lowercase()
+            SearchExpandableSongGroupRow(
+                group = group,
                 orderIndex = index + 1,
-                isPlaying = currentSong != null && (currentSong.id == song.id || (currentSong.hash.isNotBlank() && currentSong.hash.equals(song.hash, ignoreCase = true))),
-                onClick = { onSongClick(song, allSongs) },
-                onMoreClick = { onSongMoreClick(song) }
+                isExpanded = gKey in expandedVersionKeys,
+                onToggleExpand = { onToggleVersionsExpand(gKey) },
+                currentSong = currentSong,
+                allContextSongs = allSongs,
+                highlightKeyword = highlightKeyword,
+                onSongClick = onSongClick,
+                onSongMoreClick = onSongMoreClick
             )
+        }
+    }
+}
+
+private fun inferInlineVersionBadge(song: Song): String {
+    val raw = "${song.title} ${song.album}".lowercase()
+    return when {
+        raw.contains("伴奏") || raw.contains("inst") || raw.contains("karaoke") || raw.contains("消音") -> "伴奏"
+        raw.contains("纯音乐") || raw.contains("器乐") || raw.contains("钢琴") -> "纯享"
+        raw.contains("ost") || raw.contains("原声") || raw.contains("插曲") || raw.contains("片尾") || raw.contains("主题曲") -> "原声版"
+        raw.contains("remaster") || raw.contains("重制") || raw.contains("修复") || raw.contains("纪念") -> "重制版"
+        raw.contains("acoustic") || raw.contains("不插电") || raw.contains("木吉他") -> "不插电"
+        raw.contains("粤语") -> "粤语版"
+        raw.contains("国语") || raw.contains("普通话") -> "国语版"
+        else -> "其他版本"
+    }
+}
+
+private fun formatSearchVersionDuration(durationMs: Long): String {
+    if (durationMs <= 0L) return ""
+    val totalSec = (durationMs / 1000L).toInt()
+    return String.format("%02d:%02d", totalSec / 60, totalSec % 60)
+}
+
+/**
+ * 搜索结果专属行内可展开多版本组件：
+ * - 仅在搜索结果中展示（同原歌手、同一首歌、无 Live、无他人翻唱，保留伴奏与官方其他录音室版）
+ * - 点击按钮向下平滑展开子版本，再次点击平滑收起
+ */
+@Composable
+private fun SearchExpandableSongGroupRow(
+    group: SearchSongVersionGroup,
+    orderIndex: Int,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    currentSong: Song?,
+    allContextSongs: List<Song>,
+    highlightKeyword: String = "",
+    onSongClick: (Song, List<Song>) -> Unit,
+    onSongMoreClick: (Song) -> Unit
+) {
+    val primary = group.primary
+    val curId = currentSong?.id
+    val curHash = currentSong?.hash.orEmpty()
+    val isPrimaryPlaying = curId != null && (
+        curId == primary.id || (curHash.isNotEmpty() && curHash.equals(primary.hash, ignoreCase = true))
+        )
+    val cyanAccent = conceptCyanAccentColor()
+    val hasVersions = group.versions.isNotEmpty()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SongItemRow(
+            song = primary,
+            orderIndex = orderIndex,
+            isPlaying = isPrimaryPlaying,
+            onClick = { onSongClick(primary, allContextSongs.ifEmpty { listOf(primary) + group.versions }) },
+            trailingActionContent = if (hasVersions) {
+                {
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isExpanded) cyanAccent.copy(alpha = 0.20f) else ConceptPrimary.copy(alpha = 0.11f),
+                        modifier = Modifier.softCardClickable(
+                            shape = CircleShape,
+                            onClick = onToggleExpand
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = if (isExpanded) "收起" else "${group.versions.size}个版本",
+                                color = if (isExpanded) cyanAccent else ConceptPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = if (isExpanded) "收起更多版本" else "展开更多版本",
+                                tint = if (isExpanded) cyanAccent else ConceptPrimary,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                    }
+                }
+            } else null,
+            onMoreClick = { onSongMoreClick(primary) }
+        )
+
+        if (primary.matchedLyricSnippet.isNotBlank()) {
+            MatchedLyricQuoteStrip(
+                snippet = primary.matchedLyricSnippet,
+                keyword = highlightKeyword,
+                accentColor = cyanAccent,
+                onClick = { onSongClick(primary, allContextSongs.ifEmpty { listOf(primary) + group.versions }) }
+            )
+        }
+
+        if (hasVersions) {
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = expandVertically(animationSpec = tween(240)) + fadeIn(tween(200)),
+                exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(tween(150))
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = conceptFloatingCardColor(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 48.dp, end = 14.dp, top = 2.dp, bottom = 6.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        group.versions.forEachIndexed { vIdx, verSong ->
+                            val isVerPlaying = curId != null && (
+                                curId == verSong.id || (curHash.isNotEmpty() && curHash.equals(verSong.hash, ignoreCase = true))
+                                )
+                            val vBadge = remember(verSong.title, verSong.album) { inferInlineVersionBadge(verSong) }
+                            val qBadge = remember(verSong.isHiRes, verSong.isLossless, verSong.quality) {
+                                when {
+                                    verSong.isHiRes -> "Hi-Res"
+                                    verSong.isLossless -> "SQ"
+                                    verSong.quality == "320" -> "HQ"
+                                    else -> ""
+                                }
+                            }
+                            val durStr = remember(verSong.durationMs) { formatSearchVersionDuration(verSong.durationMs) }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .softClickable {
+                                        val versionPlayQueue = buildList {
+                                            add(verSong)
+                                            add(primary)
+                                            group.versions.forEach { if (it.id != verSong.id && it.hash != verSong.hash) add(it) }
+                                        }
+                                        onSongClick(verSong, versionPlayQueue)
+                                    }
+                                    .padding(start = 12.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .height(26.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isVerPlaying) cyanAccent else ConceptPrimary.copy(alpha = 0.28f))
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        BadgeTag(text = vBadge, color = cyanAccent)
+                                        if (qBadge.isNotEmpty()) {
+                                            BadgeTag(text = qBadge, color = ConceptPrimary)
+                                        }
+                                        Text(
+                                            text = verSong.title,
+                                            color = if (isVerPlaying) cyanAccent else MaterialTheme.colorScheme.onSurface,
+                                            fontSize = 13.5.sp,
+                                            fontWeight = if (isVerPlaying) FontWeight.Bold else FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                    }
+                                    val subLine = buildList {
+                                        add(verSong.artist)
+                                        if (verSong.album.isNotBlank() && verSong.album != "单曲") add("《${verSong.album}》")
+                                        if (durStr.isNotBlank()) add(durStr)
+                                    }.joinToString(" · ")
+                                    Text(
+                                        text = subLine,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onSongMoreClick(verSong) },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.MoreVert,
+                                        contentDescription = "更多",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                            }
+                            if (vIdx < group.versions.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 25.dp, end = 12.dp),
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1848,24 +1992,25 @@ private fun EmptySearchState(message: String) {
     }
 }
 
+/**
+ * 综合/单曲搜索内命中唱词正文时的紧凑高亮引用条（仅在歌词搜歌命中真实正文时渲染）
+ */
 @Composable
-private fun LyricSearchResultItem(
-    song: Song,
-    orderIndex: Int,
+private fun MatchedLyricQuoteStrip(
+    snippet: String,
     keyword: String,
-    cyanAccent: Color,
-    isPlaying: Boolean,
-    onClick: () -> Unit,
-    onMoreClick: () -> Unit
+    accentColor: Color,
+    onClick: () -> Unit
 ) {
-    val snippet = song.matchedLyricSnippet
-    val highlightedSnippet = remember(snippet, keyword, cyanAccent) {
+    if (snippet.isBlank()) return
+    val highlightedSnippet = remember(snippet, keyword, accentColor) {
         buildAnnotatedString {
             val kw = keyword.trim()
-            if (snippet.isBlank() || kw.isBlank()) {
+            if (kw.isBlank()) {
                 append(snippet)
             } else {
-                val tokens = kw.split(Regex("\\s+")).filter { it.isNotBlank() }.distinct()
+                val tokens = kw.split(Regex("[\\s，,。！？!?、]+")).filter { it.length >= 2 }.distinct()
+                    .ifEmpty { listOf(kw) }
                 val lower = snippet.lowercase()
                 val matchedMask = BooleanArray(snippet.length)
                 tokens.forEach { token ->
@@ -1889,7 +2034,7 @@ private fun LyricSearchResultItem(
                     }
                     val seg = snippet.substring(i, j)
                     if (isHit) {
-                        withStyle(SpanStyle(color = cyanAccent, fontWeight = FontWeight.ExtraBold)) {
+                        withStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.ExtraBold)) {
                             append(seg)
                         }
                     } else {
@@ -1901,44 +2046,36 @@ private fun LyricSearchResultItem(
         }
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        SongItemRow(
-            song = song,
-            orderIndex = orderIndex,
-            isPlaying = isPlaying,
-            onClick = onClick,
-            onMoreClick = onMoreClick
-        )
-        if (snippet.isNotBlank()) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = cyanAccent.copy(alpha = 0.09f),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
-                    .softCardClickable(shape = RoundedCornerShape(12.dp), onClick = onClick)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.FormatQuote,
-                        contentDescription = null,
-                        tint = cyanAccent,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = highlightedSnippet,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = accentColor.copy(alpha = 0.08f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 52.dp, end = 16.dp, bottom = 6.dp)
+            .softCardClickable(
+                shape = RoundedCornerShape(10.dp),
+                onClick = onClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.FormatQuote,
+                contentDescription = null,
+                tint = accentColor,
+                modifier = Modifier.size(14.dp)
+            )
+            Text(
+                text = highlightedSnippet,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

@@ -338,9 +338,6 @@ fun NowPlayingSheet(
     onDeleteRecentQueue: (String) -> Unit = {},
     onOpenArtist: (Song) -> Unit = {},
     onOpenAlbum: (Song) -> Unit = {},
-    onPlayVersionSong: (Song, List<Song>) -> Unit = { _, _ -> },
-    onAddVersionToNext: (Song) -> Unit = {},
-    onBlockSong: ((Song) -> Unit)? = null,
     onPlayQueueSong: (Song) -> Unit,
     onRemoveFromQueue: (Song) -> Unit,
     onClearQueue: () -> Unit,
@@ -377,7 +374,6 @@ fun NowPlayingSheet(
     var showShareSongSheet by remember { mutableStateOf(false) }
     var showDoubleTapHeart by remember { mutableStateOf(false) }
     var showMoreControlSheet by remember { mutableStateOf(false) }
-    var showSongVersionsSheet by remember { mutableStateOf(false) }
     var showDownloadDialog by remember { mutableStateOf(false) }
     var showCoverPreviewDialog by remember { mutableStateOf(false) }
     var showArtistPickerDialog by remember { mutableStateOf(false) }
@@ -426,7 +422,6 @@ fun NowPlayingSheet(
         !showLyricView &&
         !showQueueSheet &&
         !showMoreControlSheet &&
-        !showSongVersionsSheet &&
         !showLyricSettingsDialog &&
         !showLyricPosterDialog &&
         !showShareSongSheet &&
@@ -556,7 +551,6 @@ fun NowPlayingSheet(
         when {
             showArtistPickerDialog -> showArtistPickerDialog = false
             showCoverPreviewDialog -> showCoverPreviewDialog = false
-            showSongVersionsSheet -> showSongVersionsSheet = false
             showQueueSheet -> showQueueSheet = false
             showLyricSettingsDialog -> showLyricSettingsDialog = false
             effectiveLandscape -> exitLandscape()
@@ -1143,16 +1137,6 @@ fun NowPlayingSheet(
                 showMoreControlSheet = false
                 showDetailSheet = true
             },
-            onOpenMoreVersions = {
-                showMoreControlSheet = false
-                showSongVersionsSheet = true
-            },
-            onBlockSong = onBlockSong?.let { handler ->
-                {
-                    showMoreControlSheet = false
-                    handler(song)
-                }
-            },
             onOpenArtist = {
                 showMoreControlSheet = false
                 val artistNames = parseSongArtistNames(song.artist)
@@ -1171,21 +1155,6 @@ fun NowPlayingSheet(
                 showDownloadDialog = true
             },
             onDismiss = { showMoreControlSheet = false }
-        )
-    }
-
-    // 歌曲「更多版本」轻量切换抽屉
-    if (showSongVersionsSheet) {
-        SongVersionsBottomSheet(
-            song = song,
-            accentColor = activeAccentColor,
-            onPlayVersion = { targetSong, versionList ->
-                onPlayVersionSong(targetSong, versionList)
-            },
-            onAddToNext = { targetSong ->
-                onAddVersionToNext(targetSong)
-            },
-            onDismiss = { showSongVersionsSheet = false }
         )
     }
 

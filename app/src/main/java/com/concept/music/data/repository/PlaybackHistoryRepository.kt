@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.concept.music.data.kugou.KugouSigner
 import com.concept.music.data.model.AudioQuality
+import com.concept.music.data.model.CloudDiskSummary
 import com.concept.music.data.model.FmChannel
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.PurchasedAlbumItem
@@ -249,8 +250,11 @@ class DiscoverLocalCache(context: Context? = null) {
     private val memoryPlaylistList = ConcurrentHashMap<String, List<Playlist>>()
     private val memoryPurchasedAlbumList = ConcurrentHashMap<String, List<PurchasedAlbumItem>>()
     private val memoryPurchasedSongList = ConcurrentHashMap<String, List<PurchasedSongItem>>()
+    private val memoryCloudDiskSummary = ConcurrentHashMap<String, CloudDiskSummary>()
+    private val memoryDailyHistoryIndex = ConcurrentHashMap<String, List<String>>()
 
     private val songListType = object : TypeToken<List<Song>>() {}.type
+    private val stringListType = object : TypeToken<List<String>>() {}.type
     private val rankListType = object : TypeToken<List<RankItem>>() {}.type
     private val fmChannelListType = object : TypeToken<List<FmChannel>>() {}.type
     private val playlistListType = object : TypeToken<List<Playlist>>() {}.type
@@ -332,6 +336,90 @@ class DiscoverLocalCache(context: Context? = null) {
 
     fun saveDailyRecommend(userId: String?, songs: List<Song>) =
         saveSongList("daily_rec_${userId ?: "guest"}", songs)
+
+    /**
+     * 按账号 + 8位日期 (yyyyMMdd) 归档当日真实日推曲目快照（最多保留最近 7 天，用于历史回溯真实兜底）
+     */
+    fun saveDailyRecommendHistorySnapshot(userId: String?, compactDate: String, songs: List<Song>) {
+        val cleanDate = compactDate.filter { it.isDigit() }
+        if (cleanDate.length != 8 || songs.isEmpty()) return
+        val uid = userId?.takeIf { it.isNotBlank() } ?: "guest"
+        val snapKey = "daily_rec_hist_${uid}_$cleanDate"
+        saveSongList(snapKey, songs, allowEmpty = false, useDedicatedFile = true)
+
+        val idxKey = "daily_rec_hist_dates_$uid"
+        val existing = listDailyRecommendHistoryDates(userId).toMutableList()
+        existing.remove(cleanDate)
+        existing.add(0, cleanDate)
+        val sorted = existing.distinct().sortedDescending()
+        val kept = sorted.take(7)
+        val dropped = sorted.drop(7)
+        memoryDailyHistoryIndex[idxKey] = kept
+        cacheIoScope.launch {
+            runCatching {
+                prefs?.edit()?.putString(idxKey, KugouSigner.gson.toJson(kept))?.apply()
+                dropped.forEach { oldDate ->
+                    val oldKey = "daily_rec_hist_${uid}_$oldDate"
+                    memorySongListMap.remove(oldKey)
+                    playlistFileFor(oldKey)?.let { if (it.exists()) runCatching { it.delete() } }
+                }
+            }
+        }
+    }
+
+    fun getDailyRecommendHistorySnapshot(userId: String?, compactDate: String): List<Song> {
+        val cleanDate = compactDate.filter { it.isDigit() }
+        if (cleanDate.length != 8) return emptyList()
+        val uid = userId?.takeIf { it.isNotBlank() } ?: "guest"
+        return getSongList("daily_rec_hist_${uid}_$cleanDate", useDedicatedFile = true)
+    }
+
+    fun listDailyRecommendHistoryDates(userId: String?): List<String> {
+        val uid = userId?.takeIf { it.isNotBlank() } ?: "guest"
+        val idxKey = "daily_rec_hist_dates_$uid"
+        memoryDailyHistoryIndex[idxKey]?.let { return it }
+        return runCatching {
+            val raw = prefs?.getString(idxKey, null) ?: return emptyList()
+            val list: List<String> = KugouSigner.gson.fromJson(raw, stringListType) ?: emptyList()
+            val clean = list.map { it.filter(Char::isDigit) }.filter { it.length == 8 }.distinct().sortedDescending()
+            memoryDailyHistoryIndex[idxKey] = clean
+            clean
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 按账号独立文件缓存完整音乐云盘曲目与容量摘要，支持秒开
+     */
+    fun getCloudDiskSummary(userId: String?): CloudDiskSummary? {
+        val uid = userId?.takeIf { it.isNotBlank() } ?: "guest"
+        val key = "cloud_disk_summary_$uid"
+        memoryCloudDiskSummary[key]?.let { return it }
+        return runCatching {
+            val f = playlistFileFor(key)
+            val raw = if (f != null && f.exists()) f.readText(Charsets.UTF_8) else return null
+            val parsed = KugouSigner.gson.fromJson(raw, CloudDiskSummary::class.java) ?: return null
+            memoryCloudDiskSummary[key] = parsed
+            parsed
+        }.getOrNull()
+    }
+
+    fun saveCloudDiskSummary(userId: String?, summary: CloudDiskSummary) {
+        val uid = userId?.takeIf { it.isNotBlank() } ?: "guest"
+        val key = "cloud_disk_summary_$uid"
+        memoryCloudDiskSummary[key] = summary
+        cacheIoScope.launch {
+            runCatching {
+                val f = playlistFileFor(key) ?: return@launch
+                val tmp = File(f.parentFile, "${f.name}.tmp")
+                val json = KugouSigner.gson.toJson(summary)
+                tmp.writeText(json, Charsets.UTF_8)
+                if (!tmp.renameTo(f)) {
+                    f.writeText(json, Charsets.UTF_8)
+                    runCatching { tmp.delete() }
+                }
+            }
+        }
+    }
 
     fun getPersonalFm(userId: String?): List<Song> =
         getSongList("personal_fm_${userId ?: "guest"}")
@@ -491,6 +579,8 @@ class DiscoverLocalCache(context: Context? = null) {
         memoryPlaylistList.clear()
         memoryPurchasedAlbumList.clear()
         memoryPurchasedSongList.clear()
+        memoryCloudDiskSummary.clear()
+        memoryDailyHistoryIndex.clear()
         runCatching { prefs?.edit()?.clear()?.apply() }
         runCatching {
             playlistCacheDir?.listFiles()?.forEach { f ->

@@ -97,7 +97,7 @@ fun VipBannerCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    VipCrownBadge(size = 40.dp)
+                    RefinedVipCrownEmblem(size = 42.dp)
 
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(

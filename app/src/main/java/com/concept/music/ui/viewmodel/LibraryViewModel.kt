@@ -4,11 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.concept.music.data.kugou.*
 import com.concept.music.data.model.AlbumItem
+import com.concept.music.data.model.ArtistListenRankItem
 import com.concept.music.data.model.BlacklistEntry
 import com.concept.music.data.model.CloudDiskSummary
 import com.concept.music.data.model.CloudSongItem
 import com.concept.music.data.model.FollowedArtist
-import com.concept.music.data.model.FollowedArtistNewRelease
 import com.concept.music.data.model.ListenRankItem
 import com.concept.music.data.model.LoginDeviceItem
 import com.concept.music.data.model.Playlist
@@ -17,6 +17,7 @@ import com.concept.music.data.model.PurchasedSongItem
 import com.concept.music.data.model.Song
 import com.concept.music.data.model.UserGradeInfo
 import com.concept.music.data.model.UserListeningPreference
+import com.concept.music.data.repository.LocalListenStatsRepository
 import com.concept.music.data.repository.deduplicateAndMergeSongs
 import com.concept.music.data.repository.isSameMusicTrack
 import com.concept.music.data.vip.ListeningGradeManager
@@ -87,13 +88,7 @@ class LibraryViewModel(
     private val _followedArtists = MutableStateFlow<List<FollowedArtist>>(emptyList())
     val followedArtists = _followedArtists.asStateFlow()
 
-    private val _followedArtistNewReleases = MutableStateFlow<List<FollowedArtistNewRelease>>(emptyList())
-    val followedArtistNewReleases = _followedArtistNewReleases.asStateFlow()
-
-    private val _followedNewReleasesLoading = MutableStateFlow(false)
-    val followedNewReleasesLoading = _followedNewReleasesLoading.asStateFlow()
-
-    // 个人音乐云盘 (Tier 2 #7)
+    // 个人音乐云盘（本地秒开 + 无上限流式全量同步 + 后台静默补封面）
     private val _cloudDiskSummary = MutableStateFlow(CloudDiskSummary())
     val cloudDiskSummary = _cloudDiskSummary.asStateFlow()
 
@@ -103,25 +98,57 @@ class LibraryViewModel(
     private val _cloudDiskLoadingMore = MutableStateFlow(false)
     val cloudDiskLoadingMore = _cloudDiskLoadingMore.asStateFlow()
 
+    private val _cloudDiskDeleting = MutableStateFlow(false)
+    val cloudDiskDeleting = _cloudDiskDeleting.asStateFlow()
+
     private val _cloudDiskError = MutableStateFlow<String?>(null)
     val cloudDiskError = _cloudDiskError.asStateFlow()
-    private var cloudDiskPage: Int = 1
 
-    // 个人听歌排行 (Tier 2 #8)
+    // 微风本机听歌排行（近一周 0 / 近一月 2 / 总排行 1，纯微风使用记录 + 歌手榜与累计时长）
     private val _listenRankWeek = MutableStateFlow<List<ListenRankItem>>(emptyList())
     val listenRankWeek = _listenRankWeek.asStateFlow()
+
+    private val _listenRankMonth = MutableStateFlow<List<ListenRankItem>>(emptyList())
+    val listenRankMonth = _listenRankMonth.asStateFlow()
 
     private val _listenRankAll = MutableStateFlow<List<ListenRankItem>>(emptyList())
     val listenRankAll = _listenRankAll.asStateFlow()
 
+    private val _listenRankWeekArtists = MutableStateFlow<List<ArtistListenRankItem>>(emptyList())
+    val listenRankWeekArtists = _listenRankWeekArtists.asStateFlow()
+
+    private val _listenRankMonthArtists = MutableStateFlow<List<ArtistListenRankItem>>(emptyList())
+    val listenRankMonthArtists = _listenRankMonthArtists.asStateFlow()
+
+    private val _listenRankAllArtists = MutableStateFlow<List<ArtistListenRankItem>>(emptyList())
+    val listenRankAllArtists = _listenRankAllArtists.asStateFlow()
+
+    private val _listenRankWeekPlayedMs = MutableStateFlow(0L)
+    val listenRankWeekPlayedMs = _listenRankWeekPlayedMs.asStateFlow()
+
+    private val _listenRankMonthPlayedMs = MutableStateFlow(0L)
+    val listenRankMonthPlayedMs = _listenRankMonthPlayedMs.asStateFlow()
+
+    private val _listenRankAllPlayedMs = MutableStateFlow(0L)
+    val listenRankAllPlayedMs = _listenRankAllPlayedMs.asStateFlow()
+
     private val _listenRankWeekLoading = MutableStateFlow(false)
     val listenRankWeekLoading = _listenRankWeekLoading.asStateFlow()
+
+    private val _listenRankMonthLoading = MutableStateFlow(false)
+    val listenRankMonthLoading = _listenRankMonthLoading.asStateFlow()
 
     private val _listenRankAllLoading = MutableStateFlow(false)
     val listenRankAllLoading = _listenRankAllLoading.asStateFlow()
 
     private val _listenRankLoading = MutableStateFlow(false)
     val listenRankLoading = _listenRankLoading.asStateFlow()
+
+    private val _listenRankError = MutableStateFlow<String?>(null)
+    val listenRankError = _listenRankError.asStateFlow()
+
+    private val _rankArtistMetaCache = MutableStateFlow<Map<String, Pair<String, String>>>(emptyMap())
+    val rankArtistMetaCache = _rankArtistMetaCache.asStateFlow()
 
     // 听歌偏好与内容黑名单 (Tier 2 #9)
     private val _listeningPreference = MutableStateFlow<UserListeningPreference?>(null)
@@ -155,9 +182,10 @@ class LibraryViewModel(
     private var musicLibraryJob: Job? = null
     private var librarySilentPreloadJob: Job? = null
     private var purchasedAssetsJob: Job? = null
-    private var followedNewReleasesJob: Job? = null
     private var cloudDiskJob: Job? = null
+    private var cloudDiskCoverFillJob: Job? = null
     private var listenRankWeekJob: Job? = null
+    private var listenRankMonthJob: Job? = null
     private var listenRankAllJob: Job? = null
     private var preferenceJob: Job? = null
     private var loginDevicesJob: Job? = null
@@ -176,8 +204,14 @@ class LibraryViewModel(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
+            VipManager.listenStats.statsVersion.collect {
+                refreshLocalListenRanksInternal(accountState.value.currentId)
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             val initUid = accountState.value.currentId
             hydrateLibraryFromLocalCache(initUid)
+            refreshLocalListenRanksInternal(initUid)
             accountState.collect { state ->
                 if (state.auth != AuthState.RESTORING) {
                     if (state.currentId != loadedLibraryUserId || state.auth != loadedLibraryAuth) {
@@ -185,25 +219,33 @@ class LibraryViewModel(
                         loadedLibraryUserId = state.currentId
                         loadedLibraryAuth = state.auth
                         if (userChanged) {
-                            followedNewReleasesJob?.cancel()
                             cloudDiskJob?.cancel()
+                            cloudDiskCoverFillJob?.cancel()
                             listenRankWeekJob?.cancel()
+                            listenRankMonthJob?.cancel()
                             listenRankAllJob?.cancel()
                             preferenceJob?.cancel()
                             loginDevicesJob?.cancel()
                             LocalBlacklistFilter.clear()
-                            cloudDiskPage = 1
-                            _followedArtistNewReleases.value = emptyList()
-                            _followedNewReleasesLoading.value = false
                             _cloudDiskSummary.value = CloudDiskSummary()
                             _cloudDiskLoading.value = false
                             _cloudDiskLoadingMore.value = false
+                            _cloudDiskDeleting.value = false
                             _cloudDiskError.value = null
                             _listenRankWeek.value = emptyList()
+                            _listenRankMonth.value = emptyList()
                             _listenRankAll.value = emptyList()
+                            _listenRankWeekArtists.value = emptyList()
+                            _listenRankMonthArtists.value = emptyList()
+                            _listenRankAllArtists.value = emptyList()
+                            _listenRankWeekPlayedMs.value = 0L
+                            _listenRankMonthPlayedMs.value = 0L
+                            _listenRankAllPlayedMs.value = 0L
                             _listenRankWeekLoading.value = false
+                            _listenRankMonthLoading.value = false
                             _listenRankAllLoading.value = false
                             _listenRankLoading.value = false
+                            _listenRankError.value = null
                             _listeningPreference.value = null
                             _blacklistedSongs.value = emptyList()
                             _blacklistedSingers.value = emptyList()
@@ -214,12 +256,16 @@ class LibraryViewModel(
                             _loginDevicesError.value = null
                         }
                         hydrateLibraryFromLocalCache(state.currentId)
+                        refreshLocalListenRanksInternal(state.currentId)
                         val hasCached = _playlists.value.isNotEmpty() || _likedSongs.value.isNotEmpty()
                         if (hasCached) {
                             // 开屏页展示期间在 IO 线程静默同步歌单与喜欢曲库
                             delay(80L)
                         }
                         loadMusicLibrary()
+                        if (state.auth == AuthState.READY) {
+                            preloadCloudDiskSummarySilently()
+                        }
                         val curAcc = state.current
                         val bgGuardianAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.BACKGROUND_GUARDIAN)
                         if (foreground && state.auth == AuthState.READY && bgGuardianAllowed &&
@@ -256,6 +302,10 @@ class LibraryViewModel(
         val cachedPurchasedSongs = cache.getPurchasedSongs(userId)
         if (_purchasedSongs.value.isEmpty() && cachedPurchasedSongs.isNotEmpty()) {
             _purchasedSongs.value = cachedPurchasedSongs
+        }
+        val cachedCloud = cache.getCloudDiskSummary(userId)
+        if (_cloudDiskSummary.value.songs.isEmpty() && cachedCloud != null && cachedCloud.songs.isNotEmpty()) {
+            _cloudDiskSummary.value = cachedCloud
         }
     }
 
@@ -1316,6 +1366,47 @@ class LibraryViewModel(
             }
         }
     }
+
+    /**
+     * 批量从自建歌单移出多首歌曲（单次云端请求 + 本地缓存实时同步）
+     */
+    fun removeSongsFromPlaylistBatch(
+        playlistId: Long,
+        songs: List<Song>,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (songs.isEmpty()) {
+            onResult(false, "请先选择要移出的歌曲")
+            return
+        }
+        viewModelScope.launch {
+            val success = runCatching {
+                VipManager.music.removeSongsFromPlaylistBatch(playlistId, songs)
+            }.getOrDefault(false)
+            if (success) {
+                val targetPl = _playlists.value.firstOrNull { it.listId == playlistId }
+                val shouldRemove: (Song) -> Boolean = { candidate -> songs.any { isSameSong(it, candidate) } }
+                _librarySongs.value = _librarySongs.value.filterNot(shouldRemove)
+                if (targetPl?.isLiked == true) {
+                    _likedSongs.value = _likedSongs.value.filterNot(shouldRemove)
+                    VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, _likedSongs.value)
+                }
+                _playlists.value = _playlists.value.map {
+                    if (it.listId == playlistId) it.copy(trackCount = (it.trackCount - songs.size).coerceAtLeast(0)) else it
+                }
+                VipManager.discoverCache.saveUserPlaylists(accountState.value.currentId, _playlists.value)
+                if (targetPl != null) {
+                    val cached = VipManager.discoverCache.getPlaylistSongs(targetPl.id)
+                    if (cached.isNotEmpty()) {
+                        VipManager.discoverCache.savePlaylistSongs(targetPl.id, cached.filterNot(shouldRemove))
+                    }
+                }
+                onResult(true, "已从歌单移出 ${songs.size} 首歌曲")
+            } else {
+                onResult(false, "批量移出失败，请稍后重试")
+            }
+        }
+    }
     fun onForeground(active: Boolean) {
         foreground = active
         if (active && !loginVisible && accountJob?.isActive != true && claimJob?.isActive != true) refreshAccount()
@@ -1553,26 +1644,35 @@ class LibraryViewModel(
             }
             val ok = result.getOrDefault(false)
             if (ok && accountState.value.currentId == uid) {
+                // 从权威私有云接口回拉一次最新曲序与真实 fileId，确保后续再次排序或进入页面时与云端 100% 同步
+                val refreshedTracks = playlist.resolveEffectiveListId().takeIf { it > 0L }?.let { lid ->
+                    suspendRunCatching {
+                        VipManager.music.fetchCloudPlaylistTracksWithVer(
+                            listId = lid,
+                            type = if (playlist.isCreatedByMe) 0 else 1
+                        ).second
+                    }.getOrNull()?.takeIf { it.size == orderedSongs.size }
+                } ?: orderedSongs
+
                 val sec = _librarySection.value
                 val secId = sec.removePrefix("歌单:")
                 val matchesCurrentSection = (sec.startsWith("歌单:") && playlist.matchesIdentifier(secId)) ||
                     (playlist.isLiked && sec == "我喜欢")
                 if (matchesCurrentSection) {
-                    _librarySongs.value = orderedSongs
+                    _librarySongs.value = refreshedTracks
                 }
                 if (playlist.isLiked) {
-                    _likedSongs.value = orderedSongs
-                    VipManager.discoverCache.saveLikedSongs(uid, orderedSongs)
+                    _likedSongs.value = refreshedTracks
+                    VipManager.discoverCache.saveLikedSongs(uid, refreshedTracks)
                 } else {
-                    // 同时写入全部关联身份 Key，防止歌单通过 listId / globalCollectionId 打开时缓存不命中
                     playlist.candidateIdentityKeys().forEach { cacheKey ->
-                        VipManager.discoverCache.savePlaylistSongs(cacheKey, orderedSongs)
+                        VipManager.discoverCache.savePlaylistSongs(cacheKey, refreshedTracks)
                     }
                 }
             }
             val errMsg = result.exceptionOrNull()?.message
             withContext(Dispatchers.Main) {
-                onResult(ok, if (ok) "歌单歌曲顺序已同步云端" else (errMsg ?: "云端保存顺序失败，请稍后重试"))
+                onResult(ok, if (ok) "歌单默认排序已实时同步云端" else (errMsg ?: "云端保存顺序失败，请稍后重试"))
             }
         }
     }
@@ -1616,99 +1716,124 @@ class LibraryViewModel(
         }
     }
 
-    // ==================== Tier 1 #5: 已关注歌手新歌动态 ====================
+    // ==================== 个人音乐云盘（本地秒开 + 无上限全量流式加载 + 后台静默补封面 + 云端真删） ====================
 
-    fun loadFollowedArtistNewReleases(force: Boolean = false) {
-        if (accountState.value.auth != AuthState.READY) return
-        if (!force && _followedArtistNewReleases.value.isNotEmpty()) return
-        if (_followedNewReleasesLoading.value && !force) return
-        val uid = accountState.value.currentId
-        followedNewReleasesJob?.cancel()
-        followedNewReleasesJob = viewModelScope.launch(Dispatchers.IO) {
-            _followedNewReleasesLoading.value = true
-            try {
-                val result = suspendRunCatching {
-                    VipManager.music.fetchFollowedArtistNewSongs(pageSize = 40, sort = 1)
-                }
-                if (accountState.value.currentId == uid) {
-                    result.onSuccess { list ->
-                        if (list.isNotEmpty() || _followedArtistNewReleases.value.isEmpty()) {
-                            _followedArtistNewReleases.value = list
-                        }
+    private fun scheduleCloudDiskCoverEnrichment(uid: String?, items: List<CloudSongItem>) {
+        if (items.none { it.coverUrl.isBlank() }) return
+        cloudDiskCoverFillJob?.cancel()
+        cloudDiskCoverFillJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(280L)
+            if (accountState.value.currentId != uid) return@launch
+            suspendRunCatching {
+                VipManager.music.fillMissingCloudDiskCovers(items, maxBatchCount = 48) { patches ->
+                    if (accountState.value.currentId != uid || patches.isEmpty()) return@fillMissingCloudDiskCovers
+                    val cur = _cloudDiskSummary.value
+                    var changed = false
+                    val updatedSongs = cur.songs.map { item ->
+                        val key = if (item.kvId > 0L) "kv:${item.kvId}" else "h:${item.hash.lowercase()}"
+                        val patch = patches[key]
+                        if (patch != null && (item.coverUrl.isBlank() || item.album.isBlank())) {
+                            changed = true
+                            item.copy(
+                                coverUrl = item.coverUrl.ifBlank { patch.first },
+                                album = item.album.ifBlank { patch.second }
+                            )
+                        } else item
                     }
-                }
-            } finally {
-                if (accountState.value.currentId == uid) {
-                    _followedNewReleasesLoading.value = false
+                    if (changed) {
+                        val updatedSummary = cur.copy(songs = updatedSongs)
+                        _cloudDiskSummary.value = updatedSummary
+                        VipManager.discoverCache.saveCloudDiskSummary(uid, updatedSummary)
+                    }
                 }
             }
         }
     }
 
-    // ==================== Tier 2 #7: 个人音乐云盘（支持触底分页） ====================
+    fun preloadCloudDiskSummarySilently() {
+        if (accountState.value.auth != AuthState.READY) return
+        val uid = accountState.value.currentId
+        // 先尝试从磁盘缓存秒读全量云盘摘要，使「我的」页瞬间显示准确总数
+        if (_cloudDiskSummary.value.songs.isEmpty()) {
+            val cached = VipManager.discoverCache.getCloudDiskSummary(uid)
+            if (cached != null && cached.songs.isNotEmpty()) {
+                _cloudDiskSummary.value = cached
+            }
+        }
+        if (_cloudDiskLoading.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(360L)
+            if (accountState.value.currentId != uid || accountState.value.auth != AuthState.READY) return@launch
+            if (_cloudDiskLoading.value) return@launch
+            suspendRunCatching {
+                VipManager.music.fetchAllUserCloudDisk(pageSize = 100, enrichMetadata = true) { partial ->
+                    if (accountState.value.currentId == uid) {
+                        _cloudDiskSummary.value = partial
+                    }
+                }
+            }.onSuccess { full ->
+                if (accountState.value.currentId == uid) {
+                    _cloudDiskSummary.value = full
+                    VipManager.discoverCache.saveCloudDiskSummary(uid, full)
+                    scheduleCloudDiskCoverEnrichment(uid, full.songs)
+                }
+            }
+        }
+    }
 
     fun loadCloudDisk(force: Boolean = false) {
         if (accountState.value.auth != AuthState.READY) return
-        if (!force && _cloudDiskSummary.value.songs.isNotEmpty()) return
-        if (_cloudDiskLoading.value && !force) return
         val uid = accountState.value.currentId
+        if (_cloudDiskSummary.value.songs.isEmpty()) {
+            val cached = VipManager.discoverCache.getCloudDiskSummary(uid)
+            if (cached != null && cached.songs.isNotEmpty()) {
+                _cloudDiskSummary.value = cached
+            }
+        }
+        if (!force && _cloudDiskSummary.value.songs.isNotEmpty() && !_cloudDiskSummary.value.hasMore) return
+        if (_cloudDiskLoading.value && !force) return
         cloudDiskJob?.cancel()
+        cloudDiskCoverFillJob?.cancel()
         cloudDiskJob = viewModelScope.launch(Dispatchers.IO) {
-            _cloudDiskLoading.value = true
+            val hadCached = _cloudDiskSummary.value.songs.isNotEmpty()
+            _cloudDiskLoading.value = !hadCached || force
+            _cloudDiskLoadingMore.value = hadCached && !force
             _cloudDiskError.value = null
             try {
                 val result = suspendRunCatching {
-                    VipManager.music.fetchUserCloudDisk(page = 1, pageSize = 50)
+                    VipManager.music.fetchAllUserCloudDisk(pageSize = 100, enrichMetadata = true) { partial ->
+                        if (accountState.value.currentId == uid) {
+                            _cloudDiskSummary.value = partial
+                            _cloudDiskLoading.value = false
+                            _cloudDiskLoadingMore.value = partial.hasMore
+                        }
+                    }
                 }
                 if (accountState.value.currentId == uid) {
-                    result.onSuccess { summary ->
-                        cloudDiskPage = 1
-                        _cloudDiskSummary.value = summary
+                    result.onSuccess { full ->
+                        _cloudDiskSummary.value = full
                         _cloudDiskError.value = null
+                        VipManager.discoverCache.saveCloudDiskSummary(uid, full)
+                        scheduleCloudDiskCoverEnrichment(uid, full.songs)
                     }.onFailure { err ->
-                        _cloudDiskError.value = err.message ?: "加载音乐云盘失败，请检查网络后重试"
+                        if (_cloudDiskSummary.value.songs.isEmpty()) {
+                            _cloudDiskError.value = err.message ?: "加载音乐云盘失败，请检查网络后重试"
+                        }
                     }
                 }
             } finally {
                 if (accountState.value.currentId == uid) {
                     _cloudDiskLoading.value = false
+                    _cloudDiskLoadingMore.value = false
                 }
             }
         }
     }
 
     fun loadMoreCloudDisk() {
-        if (accountState.value.auth != AuthState.READY) return
-        val cur = _cloudDiskSummary.value
-        if (!cur.hasMore || _cloudDiskLoading.value || _cloudDiskLoadingMore.value) return
-        val uid = accountState.value.currentId
-        val nextPage = cloudDiskPage + 1
-        viewModelScope.launch(Dispatchers.IO) {
-            _cloudDiskLoadingMore.value = true
-            try {
-                val result = suspendRunCatching {
-                    VipManager.music.fetchUserCloudDisk(page = nextPage, pageSize = 50)
-                }
-                if (accountState.value.currentId == uid) {
-                    result.onSuccess { pageSummary ->
-                        val existingKeys = _cloudDiskSummary.value.songs.map { "${it.kvId}_${it.hash.lowercase()}" }.toHashSet()
-                        val appended = pageSummary.songs.filter { "${it.kvId}_${it.hash.lowercase()}" !in existingKeys }
-                        val mergedSongs = _cloudDiskSummary.value.songs + appended
-                        cloudDiskPage = nextPage
-                        _cloudDiskSummary.value = _cloudDiskSummary.value.copy(
-                            songs = mergedSongs,
-                            totalCount = maxOf(pageSummary.totalCount, mergedSongs.size),
-                            usedBytes = if (pageSummary.usedBytes > 0L) pageSummary.usedBytes else _cloudDiskSummary.value.usedBytes,
-                            maxBytes = if (pageSummary.maxBytes > 0L) pageSummary.maxBytes else _cloudDiskSummary.value.maxBytes,
-                            hasMore = pageSummary.hasMore && appended.isNotEmpty()
-                        )
-                    }
-                }
-            } finally {
-                if (accountState.value.currentId == uid) {
-                    _cloudDiskLoadingMore.value = false
-                }
-            }
+        // 已升级为自动无上限全量流式加载；若仍有残留未同步完状态则平滑续拉
+        if (_cloudDiskSummary.value.hasMore && !_cloudDiskLoading.value && !_cloudDiskLoadingMore.value) {
+            loadCloudDisk(force = true)
         }
     }
 
@@ -1716,62 +1841,144 @@ class LibraryViewModel(
         item: CloudSongItem,
         onResult: (Boolean, String) -> Unit = { _, _ -> }
     ) {
+        deleteCloudSongsBatch(listOf(item)) { ok, msg ->
+            onResult(ok, if (ok) "已从酷狗云盘永久删除《${item.title}》" else msg)
+        }
+    }
+
+    fun deleteCloudSongsBatch(
+        items: List<CloudSongItem>,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
         if (accountState.value.auth != AuthState.READY) {
             onResult(false, "请先登录酷狗账号")
             return
         }
+        val validItems = items.filter { it.kvId > 0L }
+        if (validItems.isEmpty()) {
+            onResult(false, "所选云盘曲目缺少有效云端文件 ID")
+            return
+        }
         val uid = accountState.value.currentId
         viewModelScope.launch(Dispatchers.IO) {
-            val result = suspendRunCatching { VipManager.music.deleteUserCloudSongs(listOf(item)) }
-            val ok = result.getOrDefault(false)
-            if (ok && accountState.value.currentId == uid) {
-                val cur = _cloudDiskSummary.value
-                val remaining = cur.songs.filterNot { it.kvId == item.kvId }
-                _cloudDiskSummary.value = cur.copy(
-                    songs = remaining,
-                    totalCount = (cur.totalCount - 1).coerceAtLeast(remaining.size),
-                    usedBytes = (cur.usedBytes - item.fileSize).coerceAtLeast(0L)
-                )
-            }
-            val errMsg = result.exceptionOrNull()?.message
-            withContext(Dispatchers.Main) {
-                onResult(ok, if (ok) "已从个人云盘删除《${item.title}》" else (errMsg ?: "删除云盘文件失败，请稍后重试"))
+            _cloudDiskDeleting.value = true
+            try {
+                val result = suspendRunCatching { VipManager.music.deleteUserCloudSongs(validItems) }
+                val ok = result.getOrDefault(false)
+                if (ok && accountState.value.currentId == uid) {
+                    val deletedKvIds = validItems.map { it.kvId }.toHashSet()
+                    val deletedBytes = validItems.sumOf { it.fileSize }
+                    val cur = _cloudDiskSummary.value
+                    val remaining = cur.songs.filterNot { it.kvId in deletedKvIds }
+                    val updatedSummary = cur.copy(
+                        songs = remaining,
+                        totalCount = remaining.size,
+                        usedBytes = (cur.usedBytes - deletedBytes).coerceAtLeast(0L)
+                    )
+                    _cloudDiskSummary.value = updatedSummary
+                    VipManager.discoverCache.saveCloudDiskSummary(uid, updatedSummary)
+                    // 后台静默向酷狗云端复核一次最新容量，确保容量读数准确
+                    launch {
+                        suspendRunCatching {
+                            VipManager.music.fetchUserCloudDisk(page = 1, pageSize = 20, enrichMetadata = false)
+                        }.onSuccess { verified ->
+                            if (accountState.value.currentId == uid) {
+                                val next = _cloudDiskSummary.value.copy(
+                                    usedBytes = if (verified.usedBytes > 0L) verified.usedBytes else _cloudDiskSummary.value.usedBytes,
+                                    maxBytes = if (verified.maxBytes > 0L) verified.maxBytes else _cloudDiskSummary.value.maxBytes
+                                )
+                                _cloudDiskSummary.value = next
+                                VipManager.discoverCache.saveCloudDiskSummary(uid, next)
+                            }
+                        }
+                    }
+                }
+                val errMsg = result.exceptionOrNull()?.message
+                withContext(Dispatchers.Main) {
+                    onResult(
+                        ok,
+                        if (ok) "已同步从酷狗云盘移除 ${validItems.size} 首歌曲"
+                        else (errMsg ?: "删除云盘文件失败，请检查网络后重试")
+                    )
+                }
+            } finally {
+                if (accountState.value.currentId == uid) {
+                    _cloudDiskDeleting.value = false
+                }
             }
         }
     }
 
-    // ==================== Tier 2 #8: 个人听歌排行（分 Tab 独立 Loading 防互相抢占） ====================
+    // ==================== 微风本机听歌排行（近一周 0 / 近一月 2 / 总排行 1 + 歌手榜与头像补全） ====================
+
+    private fun refreshLocalListenRanksInternal(uid: String?) {
+        val weekSnap = VipManager.listenStats.queryRank(uid, LocalListenStatsRepository.PERIOD_WEEK)
+        val monthSnap = VipManager.listenStats.queryRank(uid, LocalListenStatsRepository.PERIOD_MONTH)
+        val allSnap = VipManager.listenStats.queryRank(uid, LocalListenStatsRepository.PERIOD_ALL)
+        if (accountState.value.currentId != uid) return
+        _listenRankWeek.value = weekSnap.songs
+        _listenRankMonth.value = monthSnap.songs
+        _listenRankAll.value = allSnap.songs
+        _listenRankWeekArtists.value = weekSnap.artists
+        _listenRankMonthArtists.value = monthSnap.artists
+        _listenRankAllArtists.value = allSnap.artists
+        _listenRankWeekPlayedMs.value = weekSnap.totalPlayedMs
+        _listenRankMonthPlayedMs.value = monthSnap.totalPlayedMs
+        _listenRankAllPlayedMs.value = allSnap.totalPlayedMs
+        _listenRankError.value = null
+        if (allSnap.songs.isNotEmpty()) {
+            enrichRankArtistAvatarsAsync(allSnap.songs, uid)
+        }
+    }
 
     fun loadListenRank(type: Int = 0, force: Boolean = false) {
-        if (accountState.value.auth != AuthState.READY) return
-        val existing = if (type == 0) _listenRankWeek.value else _listenRankAll.value
-        if (!force && existing.isNotEmpty()) return
         val uid = accountState.value.currentId
-        val targetJob = viewModelScope.launch(Dispatchers.IO) {
-            if (type == 0) _listenRankWeekLoading.value = true else _listenRankAllLoading.value = true
-            _listenRankLoading.value = _listenRankWeekLoading.value || _listenRankAllLoading.value
-            try {
-                val result = suspendRunCatching { VipManager.music.fetchUserListenRank(type = type) }
-                if (accountState.value.currentId == uid) {
-                    result.onSuccess { list ->
-                        if (type == 0) {
-                            if (list.isNotEmpty() || _listenRankWeek.value.isEmpty()) _listenRankWeek.value = list
-                        } else {
-                            if (list.isNotEmpty() || _listenRankAll.value.isEmpty()) _listenRankAll.value = list
-                        }
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshLocalListenRanksInternal(uid)
+        }
+    }
+
+    fun clearLocalListenStats(onDone: () -> Unit = {}) {
+        val uid = accountState.value.currentId
+        viewModelScope.launch(Dispatchers.IO) {
+            VipManager.listenStats.clear(uid)
+            refreshLocalListenRanksInternal(uid)
+            withContext(Dispatchers.Main) { onDone() }
+        }
+    }
+
+    private fun enrichRankArtistAvatarsAsync(items: List<ListenRankItem>, expectedUid: String?) {
+        if (items.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentMap = _rankArtistMetaCache.value.toMutableMap()
+            _followedArtists.value.forEach { fa ->
+                val norm = fa.name.trim().lowercase().replace(Regex("[.\\s·]+"), "")
+                if (norm.isNotEmpty() && fa.avatarUrl.isNotBlank()) {
+                    currentMap.putIfAbsent(norm, fa.id to fa.avatarUrl)
+                }
+            }
+            if (currentMap.size != _rankArtistMetaCache.value.size && accountState.value.currentId == expectedUid) {
+                _rankArtistMetaCache.value = currentMap.toMap()
+            }
+            val topArtists = aggregateArtistListenRank(items, ascending = false).take(20)
+            for (artistItem in topArtists) {
+                if (accountState.value.currentId != expectedUid) break
+                val norm = artistItem.artistName.trim().lowercase().replace(Regex("[.\\s·]+"), "")
+                if (norm.isEmpty() || currentMap.containsKey(norm)) continue
+                val matched = suspendRunCatching {
+                    VipManager.music.searchArtists(artistItem.artistName, page = 1, pageSize = 3, allowSongFallback = false)
+                }.getOrDefault(emptyList()).firstOrNull {
+                    it.name.contains(artistItem.artistName, ignoreCase = true) ||
+                        artistItem.artistName.contains(it.name, ignoreCase = true)
+                }
+                if (matched != null && (matched.avatarUrl.isNotBlank() || matched.id.isNotBlank())) {
+                    currentMap[norm] = matched.id.ifBlank { artistItem.artistId } to matched.avatarUrl.ifBlank { artistItem.avatarUrl }
+                    if (accountState.value.currentId == expectedUid) {
+                        _rankArtistMetaCache.value = currentMap.toMap()
                     }
                 }
-            } finally {
-                if (type == 0) _listenRankWeekLoading.value = false else _listenRankAllLoading.value = false
-                _listenRankLoading.value = _listenRankWeekLoading.value || _listenRankAllLoading.value
+                delay(90L)
             }
-        }
-        if (type == 0) {
-            listenRankWeekJob?.cancel()
-            listenRankWeekJob = targetJob
-        } else {
-            listenRankAllJob?.cancel()
-            listenRankAllJob = targetJob
         }
     }
 
@@ -2027,6 +2234,12 @@ class LibraryViewModel(
             if (ok && accountState.value.currentId == uid) {
                 _loginDevices.value = _loginDevices.value.filterNot {
                     it.mid.isNotBlank() && it.mid == device.mid && it.t == device.t
+                }
+                launch {
+                    delay(550L)
+                    if (accountState.value.currentId == uid) {
+                        loadLoginDevices()
+                    }
                 }
             }
             val errMsg = result.exceptionOrNull()?.message

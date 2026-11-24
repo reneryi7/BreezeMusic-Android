@@ -3,6 +3,7 @@ package com.concept.music.data.vip
 import android.content.Context
 import com.concept.music.data.kugou.*
 import com.concept.music.data.repository.DiscoverLocalCache
+import com.concept.music.data.repository.LocalListenStatsRepository
 import com.concept.music.data.repository.PlaybackHistoryRepository
 import com.concept.music.data.repository.SearchHistoryRepository
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +22,7 @@ object VipManager {
     lateinit var music: MusicApiRepository; private set
     lateinit var lyric: LyricRepository; private set
     lateinit var history: PlaybackHistoryRepository; private set
+    var listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null); private set
     var searchHistoryRepo: SearchHistoryRepository = SearchHistoryRepository(null); private set
     var discoverCache: DiscoverLocalCache = DiscoverLocalCache(null); private set
     lateinit var device: () -> DeviceIdentity; private set
@@ -53,6 +55,7 @@ object VipManager {
         )
         lyric = LyricRepository(transport, store::device)
         history = PlaybackHistoryRepository(appCtx)
+        listenStats = LocalListenStatsRepository(appCtx)
         searchHistoryRepo = SearchHistoryRepository(appCtx)
         discoverCache = DiscoverLocalCache(appCtx)
         ListeningGradeManager.initialize(appCtx)
@@ -89,7 +92,8 @@ object VipManager {
         music: MusicApiRepository,
         lyric: LyricRepository,
         history: PlaybackHistoryRepository,
-        device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") }
+        device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") },
+        listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null)
     ) {
         this.accounts = accounts
         this.auth = auth
@@ -98,6 +102,7 @@ object VipManager {
         this.music = music
         this.lyric = lyric
         this.history = history
+        this.listenStats = listenStats
         this.device = device
     }
 }

@@ -1003,8 +1003,6 @@ internal fun PlayerMoreControlSheet(
     onOpenSleepTimer: () -> Unit,
     onOpenQualitySelect: () -> Unit,
     onOpenSongDetail: () -> Unit,
-    onOpenMoreVersions: (() -> Unit)? = null,
-    onBlockSong: (() -> Unit)? = null,
     onOpenArtist: () -> Unit = {},
     onOpenAlbum: () -> Unit = {},
     onDownloadSong: () -> Unit = {},
@@ -1386,52 +1384,17 @@ internal fun PlayerMoreControlSheet(
                             onClick = { dismissThen(onOpenSleepTimer) },
                             modifier = Modifier.weight(1f)
                         )
-                        if (onOpenMoreVersions != null && !song.isCloudSong) {
+                        val permState by com.concept.music.service.AppPermissionManager.state.collectAsState()
+                        if (permState.musicDownloadEnabled) {
                             BentoControlTile(
-                                icon = Icons.Rounded.LibraryMusic,
-                                title = "更多版本",
-                                subtitle = "Live / 翻唱",
+                                icon = Icons.Rounded.Download,
+                                title = "下载歌曲",
+                                subtitle = "保存至本地",
                                 active = false,
                                 activeColor = accentColor,
-                                onClick = { dismissThen(onOpenMoreVersions) },
+                                onClick = { dismissThen(onDownloadSong) },
                                 modifier = Modifier.weight(1f)
                             )
-                        }
-                    }
-
-                    val permState by com.concept.music.service.AppPermissionManager.state.collectAsState()
-                    val showDownloadTile = permState.musicDownloadEnabled
-                    val showBlockTile = onBlockSong != null && !song.isCloudSong
-                    if (showDownloadTile || showBlockTile) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (showDownloadTile) {
-                                BentoControlTile(
-                                    icon = Icons.Rounded.Download,
-                                    title = "下载歌曲",
-                                    subtitle = "保存至本地",
-                                    active = false,
-                                    activeColor = accentColor,
-                                    onClick = { dismissThen(onDownloadSong) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (showBlockTile && onBlockSong != null) {
-                                BentoControlTile(
-                                    icon = Icons.Rounded.NotInterested,
-                                    title = "屏蔽此曲",
-                                    subtitle = "减少相似推荐",
-                                    active = false,
-                                    activeColor = accentColor,
-                                    onClick = { dismissThen(onBlockSong) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (!showDownloadTile || !showBlockTile) {
-                                Spacer(modifier = Modifier.weight(1f))
-                            }
                         }
                     }
                 }

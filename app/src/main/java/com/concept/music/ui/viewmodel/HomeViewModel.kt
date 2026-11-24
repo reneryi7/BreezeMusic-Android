@@ -5,12 +5,14 @@ import androidx.lifecycle.viewModelScope
 import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.LocalBlacklistFilter
 import com.concept.music.data.kugou.editContentBlacklist
-import com.concept.music.data.kugou.fetchCrossDeviceContinuePlay
+import com.concept.music.data.kugou.fetchContentBlacklist
 import com.concept.music.data.kugou.fetchDailyRecommendHistoryList
 import com.concept.music.data.kugou.fetchDailyRecommendHistorySongs
+import com.concept.music.data.kugou.fetchUserListeningPreference
 import com.concept.music.data.kugou.sendPersonalFmFeedback
 import com.concept.music.data.kugou.suspendRunCatching
-import com.concept.music.data.model.ContinuePlaySnapshot
+import com.concept.music.data.kugou.updateUserListeningPreference
+import com.concept.music.data.model.BlacklistEntry
 import com.concept.music.data.model.DailyHistoryEntry
 import com.concept.music.data.model.FmChannel
 import com.concept.music.data.model.RankItem
@@ -24,18 +26,31 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * 猜你喜欢可撤销负反馈动作快照（支持单曲不感兴趣与少推该歌手两种粒度）
+ */
+data class PersonalFmDislikeUndoToken(
+    val dislikedSong: Song,
+    val isArtistDislike: Boolean,
+    val targetArtistName: String = "",
+    val targetArtistKey: String = "",
+    val previousQueue: List<Song>,
+    val previousIndex: Int
+)
+
 class HomeViewModel : ViewModel() {
-    // 每日推荐（独立刷新边界）
+    // 每日推荐（独立刷新边界，不受猜你喜欢屏蔽列表影响）
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val dailyRecommendSongs: StateFlow<List<Song>> = _songs.asStateFlow()
 
     private val _dailyRefreshing = MutableStateFlow(false)
     val dailyRefreshing: StateFlow<Boolean> = _dailyRefreshing.asStateFlow()
 
-    // 历史每日推荐回溯 (Tier 1 #4)
+    // 历史每日推荐回溯（过去 6 天 + 今日 = 最近完整 7 天一周）
     private val _dailyHistoryEntries = MutableStateFlow<List<DailyHistoryEntry>>(emptyList())
     val dailyHistoryEntries: StateFlow<List<DailyHistoryEntry>> = _dailyHistoryEntries.asStateFlow()
 
@@ -48,7 +63,7 @@ class HomeViewModel : ViewModel() {
     private val _dailyHistoryLoading = MutableStateFlow(false)
     val dailyHistoryLoading: StateFlow<Boolean> = _dailyHistoryLoading.asStateFlow()
 
-    // 官方私人随心听 FM（定位「猜你喜欢」，独立刷新边界，仅刷新随心听自身，绝不盗用日推封面）
+    // 猜你喜欢（官方私人 FM：独立刷新与专属偏好调校闭环）
     private val _personalFmSongs = MutableStateFlow<List<Song>>(emptyList())
     val personalFmSongs: StateFlow<List<Song>> = _personalFmSongs.asStateFlow()
 
@@ -58,29 +73,15 @@ class HomeViewModel : ViewModel() {
     private val _personalFmRefreshing = MutableStateFlow(false)
     val personalFmRefreshing: StateFlow<Boolean> = _personalFmRefreshing.asStateFlow()
 
-    // 私人 FM AI 曲池模式：0=默认AI, 1=熟悉/红心风, 2=发现新歌
+    // 推荐模式：0=默认平衡, 1=偏好熟悉（相似风格非重复新曲）, 2=更多尝鲜（跨风格陌生探索）
     private val _fmSongPoolId = MutableStateFlow(0)
     val fmSongPoolId: StateFlow<Int> = _fmSongPoolId.asStateFlow()
 
-    // 跨设备「继续播放」接力状态 (Tier 2 #11 重点)
-    private val _continuePlaySnapshot = MutableStateFlow(ContinuePlaySnapshot())
-    val continuePlaySnapshot: StateFlow<ContinuePlaySnapshot> = _continuePlaySnapshot.asStateFlow()
-
-    private val _continuePlayLoading = MutableStateFlow(false)
-    val continuePlayLoading: StateFlow<Boolean> = _continuePlayLoading.asStateFlow()
-
-    private val _continuePlayError = MutableStateFlow<String?>(null)
-    val continuePlayError: StateFlow<String?> = _continuePlayError.asStateFlow()
-
-    private val _continuePlayDismissedKey = MutableStateFlow("")
-    val continuePlayDismissedKey: StateFlow<String> = _continuePlayDismissedKey.asStateFlow()
-
-    private var lastContinuePlayFetchMs: Long = 0L
-    private var continuePlayJob: Job? = null
     private var dailyHistoryJob: Job? = null
     private var fmPoolJob: Job? = null
+    private var fmPreferenceSyncJob: Job? = null
 
-    // 新歌速递（独立刷新边界：仅刷新当前选中分类的新歌，不影响其他模块）
+    // 新歌速递（独立刷新边界）
     private val _selectedNewSongPeriod = MutableStateFlow("CHINESE")
     val selectedNewSongPeriod: StateFlow<String> = _selectedNewSongPeriod.asStateFlow()
 
@@ -104,7 +105,7 @@ class HomeViewModel : ViewModel() {
     private val _fmChannels = MutableStateFlow<List<FmChannel>>(emptyList())
     val fmChannels: StateFlow<List<FmChannel>> = _fmChannels.asStateFlow()
 
-    // 巅峰排行榜列表 (每日实时更新)
+    // 巅峰排行榜列表
     private val _ranks = MutableStateFlow<List<RankItem>>(emptyList())
     val ranks: StateFlow<List<RankItem>> = _ranks.asStateFlow()
 
@@ -123,7 +124,6 @@ class HomeViewModel : ViewModel() {
     private var hasInitialLoaded: Boolean = false
 
     init {
-        // 开屏期间在后台 IO 线程立即水合本地快照并同步启动静默网络预加载，使开屏结束进入首页时数据已就绪
         viewModelScope.launch(Dispatchers.IO) {
             val initialUserId = accountState.value.currentId
             hydrateFromLocalCache(initialUserId)
@@ -136,28 +136,55 @@ class HomeViewModel : ViewModel() {
                     if (state.currentId != loadedUser || !hasInitialLoaded) {
                         loadedUser = state.currentId
                         hasInitialLoaded = true
-                        continuePlayJob?.cancel()
                         dailyHistoryJob?.cancel()
                         fmPoolJob?.cancel()
+                        fmPreferenceSyncJob?.cancel()
                         LocalBlacklistFilter.clear()
                         _selectedDailyHistory.value = null
                         _dailyHistoryEntries.value = emptyList()
                         _dailyHistorySongs.value = emptyList()
                         _dailyHistoryLoading.value = false
-                        _continuePlaySnapshot.value = ContinuePlaySnapshot()
-                        _continuePlayLoading.value = false
-                        _continuePlayError.value = null
-                        _continuePlayDismissedKey.value = ""
-                        lastContinuePlayFetchMs = 0L
+                        _fmSongPoolId.value = 0
                         hydrateFromLocalCache(state.currentId)
-                        refresh(isBackgroundRevalidate = hasAnyContentLoaded(), allowWhileRestoring = false)
                         if (state.auth == AuthState.READY) {
-                            refreshContinuePlay(force = true)
+                            syncPersonalFmPreferenceAndBlacklistSilently(state.currentId)
+                            loadDailyHistoryList(force = true)
                         }
-                    } else if (state.auth == AuthState.READY && _continuePlaySnapshot.value.queue.isEmpty()) {
-                        refreshContinuePlay(force = false)
+                        refresh(isBackgroundRevalidate = hasAnyContentLoaded(), allowWhileRestoring = false)
+                    } else if (state.auth == AuthState.READY && _dailyHistoryEntries.value.isEmpty()) {
+                        syncPersonalFmPreferenceAndBlacklistSilently(state.currentId)
+                        loadDailyHistoryList(force = false)
                     }
                 }
+            }
+        }
+    }
+
+    private fun syncPersonalFmPreferenceAndBlacklistSilently(expectedUserId: String?) {
+        fmPreferenceSyncJob?.cancel()
+        fmPreferenceSyncJob = viewModelScope.launch(Dispatchers.IO) {
+            // 错峰让出首屏与核心登录态同步（profile / vip / userPlaylists），避免登录瞬间高并发请求拥堵
+            delay(650L)
+            if (accountState.value.currentId != expectedUserId || accountState.value.auth != AuthState.READY) {
+                return@launch
+            }
+            supervisorScope {
+                val prefJob = launch {
+                    val pref = suspendRunCatching { VipManager.music.fetchUserListeningPreference() }.getOrNull()
+                    if (pref != null && accountState.value.currentId == expectedUserId) {
+                        _fmSongPoolId.value = pref.mode.coerceIn(0, 2)
+                    }
+                }
+                val blackSongJob = launch {
+                    val bSongs = suspendRunCatching { VipManager.music.fetchContentBlacklist("song") }.getOrDefault(emptyList())
+                    val bSingers = suspendRunCatching { VipManager.music.fetchContentBlacklist("singer") }.getOrDefault(emptyList())
+                    if (accountState.value.currentId == expectedUserId && (bSongs.isNotEmpty() || bSingers.isNotEmpty())) {
+                        LocalBlacklistFilter.syncFromEntries(bSongs, bSingers)
+                        applyPersonalFmBlacklistFilterOnly()
+                    }
+                }
+                prefJob.join()
+                blackSongJob.join()
             }
         }
     }
@@ -179,6 +206,8 @@ class HomeViewModel : ViewModel() {
         val cachedFm = cache.getPersonalFm(userId).ifEmpty { cache.getPersonalFm(null) }
         if (cachedFm.isNotEmpty()) {
             _personalFmSongs.value = cachedFm
+            // 将本地缓存过的猜你喜欢曲目注入已推去重池，防止重启后在熟悉模式下重复推送刚推过的歌
+            VipManager.music.seedSeenPersonalFmHashes(cachedFm.mapNotNull { it.hash.takeIf { h -> h.isNotBlank() } })
         }
 
         for (periodKey in ALL_NEW_SONG_PERIOD_KEYS) {
@@ -215,11 +244,6 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    /**
-     * 发现页整页刷新：
-     * - 主动下拉刷新 (isBackgroundRevalidate = false)：始终置 _loading = true 并在完成后回调 onFinished
-     * - 静默后台更新 (isBackgroundRevalidate = true)：全程在 Dispatchers.IO 深度错峰执行，完全避开刚打开 App 前 1.2s 的动画与交互窗口
-     */
     fun refresh(
         isBackgroundRevalidate: Boolean = false,
         allowWhileRestoring: Boolean = false,
@@ -237,7 +261,6 @@ class HomeViewModel : ViewModel() {
             if (!isBackgroundRevalidate) {
                 _loading.value = true
             } else {
-                // 开屏展示期间（约 60ms 后）立即在 IO 线程池并发启动静默预加载，无需等待 1200ms
                 delay(60L)
             }
             _error.value = null
@@ -249,18 +272,26 @@ class HomeViewModel : ViewModel() {
                             _songs.value = daily
                         }
                         VipManager.discoverCache.saveDailyRecommend(currentUserId, daily)
+                        val todayCompact = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).let { d ->
+                            String.format(java.util.Locale.US, "%04d%02d%02d", d.year, d.monthValue, d.dayOfMonth)
+                        }
+                        VipManager.discoverCache.saveDailyRecommendHistorySnapshot(currentUserId, todayCompact, daily)
                     }
                 }
                 val fmJob = launch {
                     if (isBackgroundRevalidate) delay(30L)
-                    val fm = runCatching { VipManager.music.personalFm(size = 20) }.getOrDefault(emptyList())
+                    val activePool = _fmSongPoolId.value
+                    val fm = runCatching {
+                        VipManager.music.personalFm(size = 20, poolId = activePool)
+                    }.getOrDefault(emptyList())
                     if (accountState.value.currentId == currentUserId && fm.isNotEmpty()) {
+                        val filtered = LocalBlacklistFilter.filterSongs(fm).ifEmpty { fm }
                         val wasEmpty = _personalFmSongs.value.isEmpty()
                         if (wasEmpty || !isBackgroundRevalidate) {
-                            _personalFmSongs.value = fm
+                            _personalFmSongs.value = filtered
                             _personalFmIndex.value = 0
                         }
-                        VipManager.discoverCache.savePersonalFm(currentUserId, fm)
+                        VipManager.discoverCache.savePersonalFm(currentUserId, filtered)
                     }
                 }
                 val newSongJob = launch {
@@ -299,6 +330,9 @@ class HomeViewModel : ViewModel() {
                         VipManager.discoverCache.saveRanks(rankList)
                     }
                 }
+                if (accountState.value.auth == AuthState.READY && _dailyHistoryEntries.value.isEmpty()) {
+                    loadDailyHistoryList(force = false)
+                }
                 dailyJob.join()
                 fmJob.join()
                 newSongJob.join()
@@ -320,9 +354,6 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    /**
-     * 严格边界：仅刷新「每日推荐」模块，绝不触发随心听、新歌速递、排行榜或电台重拉
-     */
     fun refreshDailyRecommend(onLoaded: (List<Song>) -> Unit = {}) {
         if (_dailyRefreshing.value) return
         val currentUserId = accountState.value.currentId
@@ -332,6 +363,10 @@ class HomeViewModel : ViewModel() {
             if (daily.isNotEmpty()) {
                 _songs.value = daily
                 VipManager.discoverCache.saveDailyRecommend(currentUserId, daily)
+                val todayCompact = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).let { d ->
+                    String.format(java.util.Locale.US, "%04d%02d%02d", d.year, d.monthValue, d.dayOfMonth)
+                }
+                VipManager.discoverCache.saveDailyRecommendHistorySnapshot(currentUserId, todayCompact, daily)
             }
             _dailyRefreshing.value = false
             withContext(Dispatchers.Main) {
@@ -341,7 +376,7 @@ class HomeViewModel : ViewModel() {
     }
 
     /**
-     * 严格边界：仅刷新「私人随心听」模块，保留当前 AI 曲池模式并过滤已屏蔽歌曲/歌手
+     * 刷新「猜你喜欢」曲池：严格按当前选定的模式（平衡 / 熟悉 / 尝鲜）召回新曲并应用专属黑名单过滤
      */
     fun refreshPersonalFm(onLoaded: (List<Song>) -> Unit = {}) {
         if (_personalFmRefreshing.value) return
@@ -351,18 +386,16 @@ class HomeViewModel : ViewModel() {
         fmPoolJob = viewModelScope.launch(Dispatchers.IO) {
             _personalFmRefreshing.value = true
             try {
-                val rawList = if (activePool != 0) {
+                val rawList = suspendRunCatching {
+                    VipManager.music.personalFm(size = 20, poolId = activePool)
+                }.getOrDefault(emptyList()).ifEmpty {
                     suspendRunCatching {
                         VipManager.music.sendPersonalFmFeedback(
                             action = "change_song_pool",
                             song = null,
                             songPoolId = activePool
                         )
-                    }.getOrDefault(emptyList()).ifEmpty {
-                        suspendRunCatching { VipManager.music.personalFm(size = 20) }.getOrDefault(emptyList())
-                    }
-                } else {
-                    suspendRunCatching { VipManager.music.personalFm(size = 20) }.getOrDefault(emptyList())
+                    }.getOrDefault(emptyList())
                 }
                 val filtered = LocalBlacklistFilter.filterSongs(rawList).ifEmpty { rawList }
                 if (accountState.value.currentId == currentUserId && filtered.isNotEmpty()) {
@@ -384,6 +417,14 @@ class HomeViewModel : ViewModel() {
         if (list.isNotEmpty()) {
             _personalFmIndex.value = index.coerceIn(0, list.lastIndex)
         }
+    }
+
+    fun skipToPreviousPersonalFm(onPlay: (Song, List<Song>) -> Unit) {
+        val list = _personalFmSongs.value
+        if (list.isEmpty()) return
+        val prevIdx = (_personalFmIndex.value - 1).coerceAtLeast(0)
+        _personalFmIndex.value = prevIdx
+        onPlay(list[prevIdx], list)
     }
 
     fun skipToNextPersonalFm(onPlay: (Song, List<Song>) -> Unit) {
@@ -411,9 +452,6 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    /**
-     * 严格边界：仅切换或刷新「新歌速递」当前选中分类（优先 0ms 展示内存或持久化缓存，后台静默更新）
-     */
     fun selectNewSongPeriod(periodKey: String, forceRefresh: Boolean = false) {
         _selectedNewSongPeriod.value = periodKey
         val cached = newSongCache[periodKey] ?: VipManager.discoverCache.getNewSongs(periodKey).also {
@@ -439,20 +477,12 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    /**
-     * 启动进入首页后错峰逐项静默预加载全量板块（单并发队列 + 帧间间隔延迟）：
-     * 1. 依次静默刷新新歌速递其余语种 Tag（欧美、日韩、粤语等）
-     * 2. 依次静默刷新所有巅峰排行榜的实时曲目与卡片前三名预览，不再仅刷新前两个榜单
-     * 3. 依次静默刷新所有精选场景电台的实时曲目流与真实封面，不再仅刷新前两个电台
-     * 全程在 Dispatchers.IO 单纤程串行加 180ms 呼吸间隔执行，不抢占首屏带宽与主线程渲染帧率。
-     */
     private fun scheduleStaggeredSilentPreload(expectedUserId: String?) {
         silentPreloadJob?.cancel()
         silentPreloadJob = viewModelScope.launch(Dispatchers.IO) {
             delay(480L)
             if (accountState.value.currentId != expectedUserId) return@launch
 
-            // 1. 逐项静默刷新「新歌速递」其余语种分类
             val initialPeriod = _selectedNewSongPeriod.value
             for (periodKey in ALL_NEW_SONG_PERIOD_KEYS) {
                 if (accountState.value.currentId != expectedUserId) return@launch
@@ -468,7 +498,6 @@ class HomeViewModel : ViewModel() {
                 delay(180L)
             }
 
-            // 2. 逐项静默刷新全部「巅峰排行榜」曲目与卡片预览
             val currentRanks = _ranks.value
             for (rank in currentRanks) {
                 if (accountState.value.currentId != expectedUserId) return@launch
@@ -497,7 +526,6 @@ class HomeViewModel : ViewModel() {
                 delay(180L)
             }
 
-            // 3. 逐项静默刷新全部「精选场景电台」曲目与封面
             val currentChannels = _fmChannels.value
             for (channel in currentChannels) {
                 if (accountState.value.currentId != expectedUserId) return@launch
@@ -582,9 +610,9 @@ class HomeViewModel : ViewModel() {
     }
 
     /**
-     * 响应黑名单变更：立即从内存中的私人 FM 与每日推荐列表中剔除被屏蔽歌曲或歌手并更新本地缓存
+     * 严格边界：黑名单过滤器仅作用于「猜你喜欢」列表，绝不修改每日推荐或历史日推
      */
-    fun applyLocalBlacklistFilter() {
+    fun applyPersonalFmBlacklistFilterOnly() {
         val uid = accountState.value.currentId
         val curFm = _personalFmSongs.value
         val nextFm = LocalBlacklistFilter.filterSongs(curFm)
@@ -593,16 +621,10 @@ class HomeViewModel : ViewModel() {
             _personalFmIndex.value = _personalFmIndex.value.coerceIn(0, (nextFm.size - 1).coerceAtLeast(0))
             VipManager.discoverCache.savePersonalFm(uid, nextFm)
         }
-        val curDaily = _songs.value
-        val nextDaily = LocalBlacklistFilter.filterSongs(curDaily)
-        if (nextDaily.size != curDaily.size) {
-            _songs.value = nextDaily
-            VipManager.discoverCache.saveDailyRecommend(uid, nextDaily)
-        }
     }
 
     /**
-     * 加载历史每日推荐日期列表（仅登录态有效）
+     * 加载真实历史每日推荐日期列表（仅返回服务端真实批次与本机已存档的过去日推，绝不伪造无数据日期）
      */
     fun loadDailyHistoryList(force: Boolean = false) {
         if (!force && _dailyHistoryEntries.value.isNotEmpty()) return
@@ -610,15 +632,12 @@ class HomeViewModel : ViewModel() {
         val uid = accountState.value.currentId
         viewModelScope.launch(Dispatchers.IO) {
             val entries = suspendRunCatching { VipManager.music.fetchDailyRecommendHistoryList() }.getOrDefault(emptyList())
-            if (accountState.value.currentId == uid && entries.isNotEmpty()) {
-                _dailyHistoryEntries.value = entries
+            if (accountState.value.currentId == uid) {
+                _dailyHistoryEntries.value = entries.take(7)
             }
         }
     }
 
-    /**
-     * 切换每日推荐展示日期：entry == null 切回今日推荐，否则加载指定历史日期曲单
-     */
     fun selectDailyHistory(entry: DailyHistoryEntry?) {
         dailyHistoryJob?.cancel()
         _selectedDailyHistory.value = entry
@@ -633,161 +652,296 @@ class HomeViewModel : ViewModel() {
             val list = suspendRunCatching {
                 VipManager.music.fetchDailyRecommendHistorySongs(
                     historyName = entry.historyName,
-                    date = entry.dateLabel
+                    date = entry.compactDate.ifBlank { entry.dateLabel }
                 )
             }.getOrDefault(emptyList())
             if (accountState.value.currentId == uid && _selectedDailyHistory.value?.historyName == entry.historyName) {
-                _dailyHistorySongs.value = LocalBlacklistFilter.filterSongs(list).ifEmpty { list }
+                _dailyHistorySongs.value = list
                 _dailyHistoryLoading.value = false
             }
         }
     }
 
     /**
-     * 私人 FM 负反馈（「不喜欢/减少推荐」）：
-     * 1. 立即同步剔除本地队列并触发毫秒级切歌，不阻塞于网络请求；
-     * 2. 返回撤销回调所需的快照（原列表与索引），供 UI 展示带「撤销」的反馈提示；
-     * 3. 后台异步向 FM 推荐引擎与内容黑名单（使用小写 hash 作为 song_k）上报，并持久化更新本地 FM 缓存。
+     * 猜你喜欢负反馈 — 「不听这首歌」：
+     * 1. 立即同步剔除本地队列并毫秒级切歌；
+     * 2. 异步向酷狗私人 FM 引擎上报 action="garbage" 并写入猜你喜欢专属云端黑名单（KG-TID=474）；
+     * 3. 若剩余待播曲目不足 4 首，后台自动按当前模式静默续池。
      */
     fun dislikeCurrentPersonalFmSong(
         song: Song,
         onNextPlay: (Song, List<Song>) -> Unit = { _, _ -> },
-        onFeedbackMessage: (String) -> Unit = {},
-        onBlacklistUpdated: (() -> Unit)? = null
-    ) {
+        onFeedbackMessage: (String) -> Unit = {}
+    ): PersonalFmDislikeUndoToken {
         val uid = accountState.value.currentId
         val isLoggedIn = accountState.value.auth == AuthState.READY
-        val currentList = _personalFmSongs.value
-        val remaining = currentList.filterNot {
+        val prevList = _personalFmSongs.value
+        val prevIndex = _personalFmIndex.value
+        val remaining = prevList.filterNot {
             it.id == song.id || (song.hash.isNotBlank() && it.hash.equals(song.hash, ignoreCase = true))
         }
         LocalBlacklistFilter.addSong(song)
         _personalFmSongs.value = remaining
-        val nextIdx = _personalFmIndex.value.coerceIn(0, (remaining.size - 1).coerceAtLeast(0))
+        val nextIdx = prevIndex.coerceIn(0, (remaining.size - 1).coerceAtLeast(0))
         _personalFmIndex.value = nextIdx
         VipManager.discoverCache.savePersonalFm(uid, remaining)
 
-        // 若本地还有剩余曲目，立即切换播放不等待网络
         val immediateNext = remaining.getOrNull(nextIdx) ?: remaining.firstOrNull()
         if (immediateNext != null) {
             onNextPlay(immediateNext, remaining)
         }
         onFeedbackMessage(
-            if (isLoggedIn) "已减少此类推荐，为您切换下一首" else "已跳过该歌曲，登录后可云端减少此类推荐"
+            if (isLoggedIn) "已减少《${song.title}》及同类推荐" else "已跳过《${song.title}》并减少本机推送"
         )
 
         viewModelScope.launch(Dispatchers.IO) {
             val poolId = _fmSongPoolId.value
-            val refreshed = suspendRunCatching {
+            val feedbackSongs = suspendRunCatching {
                 VipManager.music.sendPersonalFmFeedback(
                     action = "garbage",
                     song = song,
                     songPoolId = poolId
                 )
-            }.getOrDefault(emptyList()).let { raw ->
-                if (raw.isNotEmpty()) raw
-                else if (remaining.isEmpty()) suspendRunCatching { VipManager.music.personalFm(size = 20) }.getOrDefault(emptyList())
-                else emptyList()
-            }
+            }.getOrDefault(emptyList())
+
             if (isLoggedIn) {
                 val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
                 if (songKey.isNotBlank()) {
-                    val ok = suspendRunCatching {
+                    suspendRunCatching {
                         VipManager.music.editContentBlacklist(
                             label = "song",
                             key = songKey,
                             name = "${song.artist} - ${song.title}",
                             mixSongId = song.mixSongId,
-                            isDelete = false
+                            isDelete = false,
+                            moduleId = 474
                         )
-                    }.getOrDefault(false)
-                    if (ok && onBlacklistUpdated != null) {
-                        withContext(Dispatchers.Main) { onBlacklistUpdated() }
                     }
                 }
             }
-            if (accountState.value.currentId == uid && remaining.isEmpty() && refreshed.isNotEmpty()) {
-                val filteredRefreshed = LocalBlacklistFilter.filterSongs(refreshed).ifEmpty { refreshed }
-                _personalFmSongs.value = filteredRefreshed
-                _personalFmIndex.value = 0
-                VipManager.discoverCache.savePersonalFm(uid, filteredRefreshed)
-                val nextSong = filteredRefreshed.firstOrNull()
-                if (nextSong != null) {
-                    withContext(Dispatchers.Main) {
-                        onNextPlay(nextSong, filteredRefreshed)
+
+            if (accountState.value.currentId == uid && _personalFmSongs.value.size < 4) {
+                val replenished = LocalBlacklistFilter.filterSongs(
+                    feedbackSongs.ifEmpty {
+                        suspendRunCatching { VipManager.music.personalFm(size = 20, poolId = poolId) }.getOrDefault(emptyList())
+                    }
+                )
+                if (replenished.isNotEmpty() && accountState.value.currentId == uid) {
+                    val cur = _personalFmSongs.value
+                    val curHashes = cur.map { (it.hash.ifBlank { it.id }).lowercase() }.toHashSet()
+                    val merged = cur + replenished.filter { (it.hash.ifBlank { it.id }).lowercase() !in curHashes }
+                    _personalFmSongs.value = merged
+                    VipManager.discoverCache.savePersonalFm(uid, merged)
+                    if (cur.isEmpty()) {
+                        val first = merged.first()
+                        _personalFmIndex.value = 0
+                        withContext(Dispatchers.Main) {
+                            onNextPlay(first, merged)
+                        }
                     }
                 }
             }
         }
+        return PersonalFmDislikeUndoToken(
+            dislikedSong = song,
+            isArtistDislike = false,
+            previousQueue = prevList,
+            previousIndex = prevIndex
+        )
     }
 
     /**
-     * 撤销刚才的私人 FM 负反馈操作：恢复歌曲至 FM 队列并异步移出云端黑名单
+     * 猜你喜欢负反馈 — 「少推该歌手」：
+     * 1. 立即清空当前猜你喜欢队列中该歌手的所有曲目并切歌；
+     * 2. 上报私人 FM garbage 负反馈 + 云端黑名单 singer (KG-TID=474) + 用户偏好 inactive_singerlist；
+     * 3. 后台立即补拉不含该歌手的新推荐池。
      */
-    fun undoDislikePersonalFmSong(
+    fun dislikeCurrentPersonalFmArtist(
         song: Song,
+        onNextPlay: (Song, List<Song>) -> Unit = { _, _ -> },
+        onFeedbackMessage: (String) -> Unit = {}
+    ): PersonalFmDislikeUndoToken {
+        val uid = accountState.value.currentId
+        val isLoggedIn = accountState.value.auth == AuthState.READY
+        val primaryArtist = song.artist.split("、", "/", ",", "&").firstOrNull()?.trim().orEmpty().ifBlank { song.artist.trim() }
+        val artistKey = song.artistId.trim().takeIf { it.isNotBlank() && it != "0" } ?: primaryArtist
+        val prevList = _personalFmSongs.value
+        val prevIndex = _personalFmIndex.value
+
+        LocalBlacklistFilter.addArtist(artistId = artistKey, artistName = primaryArtist)
+        val remaining = LocalBlacklistFilter.filterSongs(prevList)
+        _personalFmSongs.value = remaining
+        val nextIdx = prevIndex.coerceIn(0, (remaining.size - 1).coerceAtLeast(0))
+        _personalFmIndex.value = nextIdx
+        VipManager.discoverCache.savePersonalFm(uid, remaining)
+
+        val immediateNext = remaining.getOrNull(nextIdx) ?: remaining.firstOrNull()
+        if (immediateNext != null) {
+            onNextPlay(immediateNext, remaining)
+        }
+        onFeedbackMessage(
+            if (primaryArtist.isNotBlank()) "已减少推荐歌手「$primaryArtist」的作品" else "已减少该歌手推荐"
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val poolId = _fmSongPoolId.value
+            val feedbackSongs = suspendRunCatching {
+                VipManager.music.sendPersonalFmFeedback(
+                    action = "garbage",
+                    song = song,
+                    songPoolId = poolId
+                )
+            }.getOrDefault(emptyList())
+
+            if (isLoggedIn && artistKey.isNotBlank()) {
+                suspendRunCatching {
+                    VipManager.music.editContentBlacklist(
+                        label = "singer",
+                        key = artistKey,
+                        name = primaryArtist.ifBlank { artistKey },
+                        isDelete = false,
+                        moduleId = 474
+                    )
+                }
+                suspendRunCatching {
+                    VipManager.music.updateUserListeningPreference(inactiveSingerList = primaryArtist.ifBlank { artistKey })
+                }
+            }
+
+            if (accountState.value.currentId == uid && _personalFmSongs.value.size < 5) {
+                val freshBatch = LocalBlacklistFilter.filterSongs(
+                    suspendRunCatching { VipManager.music.personalFm(size = 20, poolId = poolId) }
+                        .getOrDefault(feedbackSongs)
+                )
+                if (freshBatch.isNotEmpty() && accountState.value.currentId == uid) {
+                    val cur = _personalFmSongs.value
+                    val curHashes = cur.map { (it.hash.ifBlank { it.id }).lowercase() }.toHashSet()
+                    val merged = cur + freshBatch.filter { (it.hash.ifBlank { it.id }).lowercase() !in curHashes }
+                    _personalFmSongs.value = merged
+                    VipManager.discoverCache.savePersonalFm(uid, merged)
+                    if (cur.isEmpty()) {
+                        val first = merged.first()
+                        _personalFmIndex.value = 0
+                        withContext(Dispatchers.Main) {
+                            onNextPlay(first, merged)
+                        }
+                    }
+                }
+            }
+        }
+        return PersonalFmDislikeUndoToken(
+            dislikedSong = song,
+            isArtistDislike = true,
+            targetArtistName = primaryArtist,
+            targetArtistKey = artistKey,
+            previousQueue = prevList,
+            previousIndex = prevIndex
+        )
+    }
+
+    /**
+     * 撤销刚才在猜你喜欢中触发的「不听这首 / 少推该歌手」操作
+     */
+    fun undoPersonalFmDislike(
+        token: PersonalFmDislikeUndoToken,
         onRestored: (Song, List<Song>) -> Unit = { _, _ -> }
     ) {
         val uid = accountState.value.currentId
-        val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
-        LocalBlacklistFilter.removeSongEntry(
-            com.concept.music.data.model.BlacklistEntry(
-                key = songKey,
-                name = "${song.artist} - ${song.title}",
-                label = "song",
-                mixSongId = song.mixSongId
+        val song = token.dislikedSong
+        if (token.isArtistDislike) {
+            LocalBlacklistFilter.removeArtistEntry(
+                BlacklistEntry(
+                    key = token.targetArtistKey,
+                    name = token.targetArtistName,
+                    label = "singer"
+                )
             )
-        )
-        val restoredList = (listOf(song) + _personalFmSongs.value).distinctBy {
-            (it.hash.ifBlank { it.id }).lowercase()
+        } else {
+            val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
+            LocalBlacklistFilter.removeSongEntry(
+                BlacklistEntry(
+                    key = songKey,
+                    name = "${song.artist} - ${song.title}",
+                    label = "song",
+                    mixSongId = song.mixSongId
+                )
+            )
         }
+        val restoredList = token.previousQueue.ifEmpty {
+            (listOf(song) + _personalFmSongs.value).distinctBy { (it.hash.ifBlank { it.id }).lowercase() }
+        }
+        val restoredIndex = token.previousIndex.coerceIn(0, (restoredList.size - 1).coerceAtLeast(0))
         _personalFmSongs.value = restoredList
-        _personalFmIndex.value = 0
+        _personalFmIndex.value = restoredIndex
         VipManager.discoverCache.savePersonalFm(uid, restoredList)
         onRestored(song, restoredList)
 
-        if (accountState.value.auth == AuthState.READY && songKey.isNotBlank()) {
+        if (accountState.value.auth == AuthState.READY) {
             viewModelScope.launch(Dispatchers.IO) {
-                suspendRunCatching {
-                    VipManager.music.editContentBlacklist(
-                        label = "song",
-                        key = songKey,
-                        name = "${song.artist} - ${song.title}",
-                        mixSongId = song.mixSongId,
-                        isDelete = true
-                    )
+                if (token.isArtistDislike && token.targetArtistKey.isNotBlank()) {
+                    suspendRunCatching {
+                        VipManager.music.editContentBlacklist(
+                            label = "singer",
+                            key = token.targetArtistKey,
+                            name = token.targetArtistName.ifBlank { token.targetArtistKey },
+                            isDelete = true,
+                            moduleId = 474
+                        )
+                    }
+                } else {
+                    val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
+                    if (songKey.isNotBlank()) {
+                        suspendRunCatching {
+                            VipManager.music.editContentBlacklist(
+                                label = "song",
+                                key = songKey,
+                                name = "${song.artist} - ${song.title}",
+                                mixSongId = song.mixSongId,
+                                isDelete = true,
+                                moduleId = 474
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 
     /**
-     * 切换私人 FM AI 曲池模式（0=默认AI / 1=熟悉风格 / 2=探索尝鲜）
+     * 切换猜你喜欢推荐模式（0=默认平衡 / 1=偏好熟悉 / 2=更多尝鲜）：
+     * 同步更新酷狗云端用户偏好与私人 FM 曲池，并立即按新算法拉取整批新推荐歌曲。
      */
     fun switchPersonalFmPool(
         poolId: Int,
         onLoaded: (List<Song>) -> Unit = {}
     ) {
         val coerced = poolId.coerceIn(0, 2)
-        if (_fmSongPoolId.value == coerced && _personalFmSongs.value.isNotEmpty()) {
+        if (_fmSongPoolId.value == coerced && _personalFmSongs.value.isNotEmpty() && !_personalFmRefreshing.value) {
             onLoaded(_personalFmSongs.value)
             return
         }
         val uid = accountState.value.currentId
+        val isLoggedIn = accountState.value.auth == AuthState.READY
         _fmSongPoolId.value = coerced
         fmPoolJob?.cancel()
         fmPoolJob = viewModelScope.launch(Dispatchers.IO) {
             _personalFmRefreshing.value = true
             try {
-                val raw = suspendRunCatching {
-                    VipManager.music.sendPersonalFmFeedback(
-                        action = "change_song_pool",
-                        song = null,
-                        songPoolId = coerced
-                    )
-                }.getOrDefault(emptyList()).ifEmpty {
-                    suspendRunCatching { VipManager.music.personalFm(size = 20) }.getOrDefault(emptyList())
+                if (isLoggedIn) {
+                    launch {
+                        suspendRunCatching { VipManager.music.updateUserListeningPreference(mode = coerced) }
+                        suspendRunCatching {
+                            VipManager.music.sendPersonalFmFeedback(
+                                action = "change_song_pool",
+                                song = null,
+                                songPoolId = coerced
+                            )
+                        }
+                    }
                 }
+                val raw = suspendRunCatching {
+                    VipManager.music.personalFm(size = 20, poolId = coerced)
+                }.getOrDefault(emptyList())
                 val filtered = LocalBlacklistFilter.filterSongs(raw).ifEmpty { raw }
                 if (accountState.value.currentId == uid && filtered.isNotEmpty()) {
                     _personalFmSongs.value = filtered
@@ -803,56 +957,5 @@ class HomeViewModel : ViewModel() {
                 onLoaded(_personalFmSongs.value)
             }
         }
-    }
-
-    /**
-     * 拉取跨设备「继续播放」实时快照（支持前后台恢复自动刷新与手动下拉刷新）：
-     * - 使用 suspendRunCatching 透传 CancellationException，避免被取消的旧任务污染快照或关掉新任务 Loading；
-     * - 无论有值/空态均遵守 25s 冷却，杜绝 ON_RESUME 反复请求风暴；
-     * - 网络失败时保留现有有效快照并透出错误信息供抽屉展示重试按钮。
-     */
-    fun refreshContinuePlay(force: Boolean = false) {
-        if (accountState.value.auth != AuthState.READY) {
-            continuePlayJob?.cancel()
-            _continuePlaySnapshot.value = ContinuePlaySnapshot()
-            _continuePlayLoading.value = false
-            _continuePlayError.value = null
-            return
-        }
-        val now = System.currentTimeMillis()
-        if (!force && lastContinuePlayFetchMs > 0L && now - lastContinuePlayFetchMs < 25_000L) {
-            return
-        }
-        continuePlayJob?.cancel()
-        val uid = accountState.value.currentId
-        continuePlayJob = viewModelScope.launch(Dispatchers.IO) {
-            _continuePlayLoading.value = true
-            _continuePlayError.value = null
-            val result = suspendRunCatching {
-                VipManager.music.fetchCrossDeviceContinuePlay(pageSize = 30)
-            }
-            if (accountState.value.currentId != uid) return@launch
-            result.onSuccess { snapshot ->
-                val prevKey = _continuePlaySnapshot.value.primarySong?.let { it.hash.ifBlank { it.id } }.orEmpty()
-                val nextKey = snapshot.primarySong?.let { it.hash.ifBlank { it.id } }.orEmpty()
-                _continuePlaySnapshot.value = snapshot
-                _continuePlayError.value = null
-                lastContinuePlayFetchMs = System.currentTimeMillis()
-                // 若远端设备切换了新歌，自动解除之前针对旧歌的临时关闭状态
-                if (nextKey.isNotBlank() && nextKey != prevKey && _continuePlayDismissedKey.value != nextKey) {
-                    _continuePlayDismissedKey.value = ""
-                }
-            }.onFailure { err ->
-                // 网络失败时保留先前已有快照，避免弱网瞬断清空首页卡片，同时向抽屉提供错误重试态
-                _continuePlayError.value = err.message ?: "同步跨设备队列失败，请检查网络后重试"
-                lastContinuePlayFetchMs = System.currentTimeMillis() - 15_000L
-            }
-            _continuePlayLoading.value = false
-        }
-    }
-
-    fun dismissContinuePlayBanner() {
-        val key = _continuePlaySnapshot.value.primarySong?.let { it.hash.ifBlank { it.id } }.orEmpty()
-        _continuePlayDismissedKey.value = key.ifBlank { "__dismissed__" }
     }
 }

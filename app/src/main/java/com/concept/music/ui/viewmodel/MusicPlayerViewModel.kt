@@ -282,6 +282,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private var songPlaybackStartTimestamp: Long = 0L
     private var accumulatedPlayedMs: Long = 0L
     private var currentSegmentRecordedGradeSec: Long = 0L
+    private var currentSegmentListenStatRecorded: Boolean = false
     private var lastAccumulateTickMs: Long = 0L
     private var csccSegmentOpen: Boolean = false
     private var isPausingWithFade: Boolean = false
@@ -389,6 +390,10 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private fun flushGradePlaybackSeconds(nowElapsed: Long = safeElapsedRealtime(), songOverride: Song? = null) {
         val targetSong = songOverride ?: activePlayingSong ?: mutableState.value.currentSong ?: return
         val effectiveMs = currentEffectivePlayedMs(nowElapsed)
+        if (!currentSegmentListenStatRecorded && effectiveMs >= 15_000L) {
+            currentSegmentListenStatRecorded = true
+            VipManager.listenStats.recordPlay(currentUser, targetSong, effectiveMs)
+        }
         if (effectiveMs < 10_000L) return
         val totalEligibleSec = effectiveMs / 1000L
         val deltaSec = totalEligibleSec - currentSegmentRecordedGradeSec
@@ -413,6 +418,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         songPlaybackStartTimestamp = nowElapsed
         accumulatedPlayedMs = 0L
         currentSegmentRecordedGradeSec = 0L
+        currentSegmentListenStatRecorded = false
         lastAccumulateTickMs = nowElapsed
         lastRecordTimestamp = nowElapsed
         csccSegmentOpen = true
@@ -449,6 +455,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             flushGradePlaybackSeconds(nowElapsed, targetSong)
         }
         val playedMs = accumulatedPlayedMs.coerceAtLeast(0L)
+        if (targetSong != null && !currentSegmentListenStatRecorded) {
+            val isShortTrackCompleted = notifySongCompleted &&
+                ((targetSong.durationMs in 1L..15_000L && playedMs >= 2_000L) || playedMs >= 5_000L)
+            if (playedMs >= 15_000L || isShortTrackCompleted) {
+                currentSegmentListenStatRecorded = true
+                VipManager.listenStats.recordPlay(currentUser, targetSong, playedMs)
+            }
+        }
         if (targetSong != null && csccSegmentOpen && playedMs >= 10_000L) {
             KugouCsccReporter.onSongEnd(targetSong, playedMs, state = state)
             accumulatedPlayedMs = 0L
@@ -1611,34 +1625,6 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val player = activePlayer ?: return
         if ((!player.isPlaying && !player.playWhenReady) || isPausingWithFade) return
         togglePlayPause()
-    }
-
-    /**
-     * 主动将本机当前播放曲目立即同步至酷狗云端队列，便于其他设备（如桌面端/平板）秒级接力继续播放
-     */
-    fun syncCurrentSongToCloudForHandoff(onResult: (Boolean, String) -> Unit = { _, _ -> }) {
-        val song = mutableState.value.currentSong ?: run {
-            onResult(false, "当前未播放歌曲，无法同步")
-            return
-        }
-        if (song.isCloudSong) {
-            onResult(false, "云盘本地文件暂不支持跨设备云端接力")
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            val ok = runCatching { VipManager.music.uploadPlayHistory(song) }.getOrDefault(false)
-            if (ok) {
-                lastCloudHandoffSongId = song.id
-                lastCloudHandoffAtMs = System.currentTimeMillis()
-            }
-            withContext(Dispatchers.Main) {
-                if (ok) {
-                    onResult(true, "已将《${song.title}》同步至跨设备继续播放列表")
-                } else {
-                    onResult(false, "同步失败，请确认账号已登录且网络畅通")
-                }
-            }
-        }
     }
 
     fun seekTo(positionMs: Long) {

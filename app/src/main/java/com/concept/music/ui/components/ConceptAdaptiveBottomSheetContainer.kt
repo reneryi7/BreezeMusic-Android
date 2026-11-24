@@ -27,6 +27,9 @@ import com.concept.music.ui.theme.ConceptOverlaySheetScope
 import com.concept.music.ui.theme.LocalConceptAdaptiveInfo
 import com.concept.music.ui.theme.conceptSheetContainerColor
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 @Stable
@@ -46,10 +49,8 @@ class ConceptAdaptiveSheetScope(
 
 /**
  * 全应用统一的手机/平板自适应浮层抽屉容器：
- * - 自动感知 `LocalConceptAdaptiveInfo.isLargeScreenDevice` 与横屏状态：
- *   - 平板横竖屏或手机横屏：居中悬浮大圆角卡片（宽度上限 <= 560dp，符合 Material 3 大屏浮层规范），带安全区留白；
- *   - 手机竖屏：底部 28dp 顶圆角抽屉，内置顶部下拉关闭拖拽条与 `navigationBarsPadding()`；
- * - 统一暴露 `onDismissStart`，确保抽屉收起动画第 0ms 即与底部导航栏 / MiniPlayerBar 同步联动。
+ * - 自动感知 `LocalConceptAdaptiveInfo.isLargeScreenDevice` 与横屏状态；
+ * - 新增 `wrapContentHeight` 支持：短菜单类抽屉（如「歌单管理」）按内容真实高度紧贴渲染，杜绝底部大片留白。
  */
 @Composable
 fun ConceptAdaptiveBottomSheetContainer(
@@ -59,6 +60,7 @@ fun ConceptAdaptiveBottomSheetContainer(
     maxCardWidth: Dp = 560.dp,
     portraitMinHeight: Dp = 320.dp,
     portraitMaxHeight: Dp = 620.dp,
+    wrapContentHeight: Boolean = false,
     containerColor: Color = conceptSheetContainerColor(),
     showDragHandle: Boolean = true,
     content: @Composable ConceptAdaptiveSheetScope.(isCardMode: Boolean) -> Unit
@@ -97,13 +99,26 @@ fun ConceptAdaptiveBottomSheetContainer(
                             .padding(horizontal = 20.dp, vertical = 16.dp)
                             .widthIn(max = maxCardWidth)
                             .fillMaxWidth()
-                            .heightIn(min = portraitMinHeight, max = 660.dp)
-                            .fillMaxHeight(if (isLandscape) 0.88f else 0.78f)
+                            .then(
+                                if (wrapContentHeight) {
+                                    Modifier.heightIn(max = 660.dp).wrapContentHeight()
+                                } else {
+                                    Modifier
+                                        .heightIn(min = portraitMinHeight, max = 660.dp)
+                                        .fillMaxHeight(if (isLandscape) 0.88f else 0.78f)
+                                }
+                            )
                     } else {
                         Modifier
                             .widthIn(max = maxCardWidth)
                             .fillMaxWidth()
-                            .heightIn(min = portraitMinHeight, max = portraitMaxHeight)
+                            .then(
+                                if (wrapContentHeight) {
+                                    Modifier.heightIn(max = portraitMaxHeight).wrapContentHeight()
+                                } else {
+                                    Modifier.heightIn(min = portraitMinHeight, max = portraitMaxHeight)
+                                }
+                            )
                     }
                 )
                 .clickable(
@@ -115,7 +130,7 @@ fun ConceptAdaptiveBottomSheetContainer(
             CompositionLocalProvider(LocalContentColor provides textPrimary) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .then(if (wrapContentHeight) Modifier.fillMaxWidth().wrapContentHeight() else Modifier.fillMaxSize())
                         .padding(horizontal = 18.dp, vertical = 8.dp)
                         .then(if (!isCardMode) Modifier.navigationBarsPadding() else Modifier)
                 ) {
@@ -150,8 +165,11 @@ fun ConceptAdaptiveBottomSheetContainer(
 }
 
 /**
- * 复用 `PlayQueueBottomSheet` 同源物理手感的轻量 LazyColumn 长按拖拽重排状态控制器：
- * 支持边缘自动滚屏、邻项平滑让位偏移以及释放弹簧落位动画。
+ * 严格对标 `PlayQueueBottomSheet` 物理手感的 LazyColumn 平滑弹簧拖拽重排控制器：
+ * - 拖拽项支持跟手位移 + `animateFloatAsState(1.028f)` 浮起 + 松手无过冲弹簧落位；
+ * - 邻项通过 `targetNeighborShiftPxForIndex(idx)` 驱动各自独立 `Animatable(0f)` 弹簧平滑让位，零阶跃生硬感；
+ * - 独立边缘自动滚屏协程在手指贴近顶/底边时按帧持续丝滑滚屏并同步追踪目标槽位；
+ * - 跨行换位时触发轻量 `onTargetIndexChanged` 触觉反馈回调。
  */
 @Stable
 class ConceptListDragReorderState(
@@ -159,7 +177,9 @@ class ConceptListDragReorderState(
     private val scope: CoroutineScope,
     private val defaultRowHeightPx: Float,
     private val itemCountProvider: () -> Int,
-    private val onCommitMove: (fromIndex: Int, toIndex: Int) -> Unit
+    private val onCommitMove: (fromIndex: Int, toIndex: Int) -> Unit,
+    private val headerItemCountProvider: () -> Int = { 0 },
+    private val onTargetIndexChanged: (() -> Unit)? = null
 ) {
     var dragStartIndex by mutableStateOf<Int?>(null)
         private set
@@ -171,11 +191,15 @@ class ConceptListDragReorderState(
         private set
     val settleDropAnim = Animatable(0f)
 
+    private var edgeAutoScrollJob: Job? = null
+    private var activeEdgeVelocityPx: Float = 0f
+
     val isDragging: Boolean
         get() = dragStartIndex != null
 
     fun resolveRowStridePx(): Float {
-        val visible = listState.layoutInfo.visibleItemsInfo
+        val headerCount = headerItemCountProvider().coerceAtLeast(0)
+        val visible = listState.layoutInfo.visibleItemsInfo.filter { it.index >= headerCount }
         if (visible.size >= 2) {
             val diff = (visible[1].offset - visible[0].offset).toFloat()
             if (diff > 24f) return diff
@@ -189,18 +213,81 @@ class ConceptListDragReorderState(
         val stride = resolveRowStridePx()
         var currentShift = (dragTargetIndex ?: startIdx) - startIdx
         val rawShift = dragOffsetY / stride
-        while (rawShift - currentShift >= 0.50f && startIdx + currentShift < lastIdx) {
+        while (rawShift - currentShift >= 0.48f && startIdx + currentShift < lastIdx) {
             currentShift += 1
         }
-        while (rawShift - currentShift <= -0.50f && startIdx + currentShift > 0) {
+        while (rawShift - currentShift <= -0.48f && startIdx + currentShift > 0) {
             currentShift -= 1
         }
-        dragTargetIndex = (startIdx + currentShift).coerceIn(0, lastIdx)
+        val nextTarget = (startIdx + currentShift).coerceIn(0, lastIdx)
+        if (nextTarget != dragTargetIndex) {
+            dragTargetIndex = nextTarget
+            onTargetIndexChanged?.invoke()
+        }
+    }
+
+    private fun updateEdgeAutoScrollVelocity() {
+        val startIdx = dragStartIndex ?: run {
+            stopEdgeAutoScroll()
+            return
+        }
+        val headerCount = headerItemCountProvider().coerceAtLeast(0)
+        val layoutInfo = listState.layoutInfo
+        val startInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == startIdx + headerCount }
+        val stride = resolveRowStridePx()
+        if (startInfo == null) {
+            activeEdgeVelocityPx = 0f
+            return
+        }
+        val vpStart = layoutInfo.viewportStartOffset.toFloat()
+        val vpEnd = layoutInfo.viewportEndOffset.toFloat()
+        val centerY = startInfo.offset + dragOffsetY + startInfo.size / 2f
+        val edgeZone = (stride * 1.45f).coerceAtLeast(88f)
+        activeEdgeVelocityPx = when {
+            centerY < vpStart + edgeZone && listState.canScrollBackward -> {
+                val ratio = ((vpStart + edgeZone - centerY) / edgeZone).coerceIn(0.15f, 1f)
+                -(10f + 16f * ratio)
+            }
+            centerY > vpEnd - edgeZone && listState.canScrollForward -> {
+                val ratio = ((centerY - (vpEnd - edgeZone)) / edgeZone).coerceIn(0.15f, 1f)
+                (10f + 16f * ratio)
+            }
+            else -> 0f
+        }
+        if (activeEdgeVelocityPx != 0f && edgeAutoScrollJob?.isActive != true) {
+            edgeAutoScrollJob = scope.launch {
+                while (isActive && dragStartIndex != null && !isSettlingDrop && activeEdgeVelocityPx != 0f) {
+                    val step = activeEdgeVelocityPx
+                    val consumed = listState.scrollBy(step)
+                    if (consumed != 0f && dragStartIndex != null && !isSettlingDrop) {
+                        val sIdx = dragStartIndex ?: break
+                        val lastIdx = (itemCountProvider() - 1).coerceAtLeast(0)
+                        val rowStride = resolveRowStridePx()
+                        dragOffsetY = (dragOffsetY + consumed).coerceIn(
+                            -sIdx * rowStride - rowStride * 0.25f,
+                            (lastIdx - sIdx) * rowStride + rowStride * 0.25f
+                        )
+                        updateTargetFromOffset()
+                        updateEdgeAutoScrollVelocity()
+                    } else {
+                        break
+                    }
+                    delay(16L)
+                }
+            }
+        }
+    }
+
+    private fun stopEdgeAutoScroll() {
+        activeEdgeVelocityPx = 0f
+        edgeAutoScrollJob?.cancel()
+        edgeAutoScrollJob = null
     }
 
     fun startDrag(index: Int) {
         val count = itemCountProvider()
         if (isSettlingDrop || index !in 0 until count) return
+        stopEdgeAutoScroll()
         dragStartIndex = index
         dragTargetIndex = index
         dragOffsetY = 0f
@@ -216,32 +303,7 @@ class ConceptListDragReorderState(
         val maxOff = (lastIdx - startIdx) * stride
         dragOffsetY = dragOffsetY.coerceIn(minOff - stride * 0.25f, maxOff + stride * 0.25f)
         updateTargetFromOffset()
-
-        val visibleItems = listState.layoutInfo.visibleItemsInfo
-        val startInfo = visibleItems.firstOrNull { it.index == startIdx }
-        if (startInfo != null) {
-            val vpStart = listState.layoutInfo.viewportStartOffset
-            val vpEnd = listState.layoutInfo.viewportEndOffset
-            val centerY = startInfo.offset + dragOffsetY + startInfo.size / 2f
-            val edgeZone = stride * 1.15f
-            if (centerY < vpStart + edgeZone && listState.canScrollBackward) {
-                scope.launch {
-                    val consumed = listState.scrollBy(-16f)
-                    if (consumed != 0f && dragStartIndex != null && !isSettlingDrop) {
-                        dragOffsetY += consumed
-                        updateTargetFromOffset()
-                    }
-                }
-            } else if (centerY > vpEnd - edgeZone && listState.canScrollForward) {
-                scope.launch {
-                    val consumed = listState.scrollBy(16f)
-                    if (consumed != 0f && dragStartIndex != null && !isSettlingDrop) {
-                        dragOffsetY += consumed
-                        updateTargetFromOffset()
-                    }
-                }
-            }
-        }
+        updateEdgeAutoScrollVelocity()
     }
 
     fun finishDrag() {
@@ -249,6 +311,7 @@ class ConceptListDragReorderState(
         val lastIdx = (itemCountProvider() - 1).coerceAtLeast(0)
         val targetIdx = (dragTargetIndex ?: startIdx).coerceIn(0, lastIdx)
         if (isSettlingDrop) return
+        stopEdgeAutoScroll()
         val stride = resolveRowStridePx()
         val targetSettle = (targetIdx - startIdx) * stride
         isSettlingDrop = true
@@ -271,15 +334,43 @@ class ConceptListDragReorderState(
         }
     }
 
-    fun translationYForIndex(index: Int): Float {
+    /**
+     * 供每一行计算邻项平滑让位的目标 Y 偏移（配合每行独立 `Animatable(0f)` 弹簧过渡，彻底消除阶跃卡顿）
+     */
+    fun targetNeighborShiftPxForIndex(index: Int): Float {
         val startIdx = dragStartIndex ?: return 0f
         val targetIdx = dragTargetIndex ?: startIdx
+        if (index == startIdx) return 0f
         val stride = resolveRowStridePx()
         return when {
-            index == startIdx -> if (isSettlingDrop) settleDropAnim.value else dragOffsetY
             startIdx < targetIdx && index in (startIdx + 1)..targetIdx -> -stride
             targetIdx < startIdx && index in targetIdx until startIdx -> stride
             else -> 0f
         }
+    }
+
+    /**
+     * 拖拽过程中实时预览每一行当前对应的目标序号（0-based）
+     */
+    fun displayOrderIndexFor(index: Int): Int {
+        val startIdx = dragStartIndex ?: return index
+        val targetIdx = dragTargetIndex ?: startIdx
+        return when {
+            index == startIdx -> targetIdx
+            startIdx < targetIdx && index in (startIdx + 1)..targetIdx -> index - 1
+            targetIdx < startIdx && index in targetIdx until startIdx -> index + 1
+            else -> index
+        }
+    }
+
+    /**
+     * 拖拽项自身的实时 Y 位移（拖拽中跟随手指，释放时跟随 `settleDropAnim` 弹簧落位）
+     */
+    fun activeDragTranslationY(): Float =
+        if (isSettlingDrop) settleDropAnim.value else dragOffsetY
+
+    fun translationYForIndex(index: Int): Float {
+        val startIdx = dragStartIndex ?: return 0f
+        return if (index == startIdx) activeDragTranslationY() else targetNeighborShiftPxForIndex(index)
     }
 }

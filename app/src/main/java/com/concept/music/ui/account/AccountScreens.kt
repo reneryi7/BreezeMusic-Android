@@ -24,7 +24,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DesktopWindows
+import androidx.compose.material.icons.rounded.DirectionsCar
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.LaptopMac
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.PhoneIphone
+import androidx.compose.material.icons.rounded.TabletMac
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -47,7 +56,6 @@ import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.SavedAccount
 import com.concept.music.data.model.LoginDeviceItem
 import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
-import com.concept.music.ui.components.resolveDeviceIcon
 import com.concept.music.ui.theme.ConceptFluidRefreshIcon
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptStageBackground
@@ -419,7 +427,7 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
                                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
                                     )
                                     Text(
-                                        text = "查看同账号活跃设备与跨设备续播来源，可安全移除非常用设备",
+                                        text = "实时检测 Windows 桌面端、移动端等全平台在线设备，可远程安全下线",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -550,7 +558,7 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Icon(
-                                                imageVector = resolveDeviceIcon("${device.deviceName} ${device.platform}"),
+                                                imageVector = resolveLoginDeviceIcon(device),
                                                 contentDescription = null,
                                                 tint = if (device.isCurrentDevice) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 modifier = Modifier.size(22.dp)
@@ -595,7 +603,7 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        if (!device.isCurrentDevice) {
+                                        if (!device.isCurrentDevice && device.canKickOut) {
                                             TextButton(
                                                 onClick = { kickingDevice = device },
                                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
@@ -638,5 +646,19 @@ fun AccountsScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onLogin: () 
             },
             dismissButton = { TextButton(onClick = { kickingDevice = null }) { Text("取消") } }
         )
+    }
+}
+
+private fun resolveLoginDeviceIcon(device: LoginDeviceItem): ImageVector {
+    val raw = "${device.deviceType} ${device.deviceName} ${device.platform}".lowercase()
+    return when {
+        device.deviceType == "windows" || raw.contains("win") || raw.contains("pc") || raw.contains("desktop") -> Icons.Rounded.DesktopWindows
+        device.deviceType == "mac" || raw.contains("mac") -> Icons.Rounded.LaptopMac
+        device.deviceType == "tablet" || raw.contains("pad") || raw.contains("平板") -> Icons.Rounded.TabletMac
+        device.deviceType == "ios" || raw.contains("iphone") || raw.contains("ios") -> Icons.Rounded.PhoneIphone
+        device.deviceType == "car" || raw.contains("car") || raw.contains("车") -> Icons.Rounded.DirectionsCar
+        device.deviceType == "tv" || raw.contains("tv") || raw.contains("电视") -> Icons.Rounded.Tv
+        device.deviceType == "web" || raw.contains("web") || raw.contains("网页") -> Icons.Rounded.Language
+        else -> Icons.Rounded.PhoneAndroid
     }
 }

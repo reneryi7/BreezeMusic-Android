@@ -339,6 +339,22 @@ class DirectKugouTransport(
                         add("http://tracker.kugou.com" to baseHeaders)
                     }
                 }
+                "mcloudservice.kugou.com",
+                "userinfoservice.kugou.com",
+                "listenservice.kugou.com" -> {
+                    val httpsPrimary = if (rawHost.startsWith("http://", ignoreCase = true)) {
+                        "https://" + rawHost.substring(7)
+                    } else rawHost
+                    val gatewayRouterHeaders = LinkedHashMap(baseHeaders).apply {
+                        if (keys.none { it.equals("x-router", ignoreCase = true) }) {
+                            put("x-router", hostName)
+                        }
+                    }
+                    listOf(
+                        httpsPrimary to baseHeaders,
+                        "https://gateway.kugou.com" to gatewayRouterHeaders
+                    )
+                }
                 else -> listOf(rawHost to baseHeaders)
             }
         }

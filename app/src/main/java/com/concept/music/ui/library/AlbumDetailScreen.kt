@@ -354,7 +354,7 @@ fun AlbumDetailScreen(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "播放全部 (${filteredSongs.size})",
+                                            text = "播放全部",
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 14.5.sp,
                                             color = Color.White

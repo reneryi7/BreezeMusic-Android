@@ -3486,9 +3486,21 @@ fun ResourceCommentsScreen(
                         replyToCommentId = replyToId,
                         replyToUserName = replyToUser
                     )
-                    comments = listOf(created) + comments
+                    val updatedList = if (replyToId != null && comments.any { it.id == replyToId }) {
+                        comments.map { item ->
+                            if (item.id == replyToId) {
+                                item.copy(
+                                    replyCount = item.replyCount + 1,
+                                    replies = listOf(created) + item.replies
+                                )
+                            } else item
+                        }
+                    } else {
+                        listOf(created) + comments
+                    }
+                    comments = updatedList
                     totalCount = maxOf(totalCount + 1, comments.size)
-                    onResult(true, if (replyToId != null) "回复已发布" else "评论已发布")
+                    onResult(true, if (replyToId != null) "回复已实时同步至云端" else "评论已发布并同步至云端")
                 }.onFailure { err ->
                     onResult(false, err.message ?: "发布失败，请稍后重试")
                 }
@@ -3506,9 +3518,19 @@ fun ResourceCommentsScreen(
                     )
                 }.getOrDefault(false)
                 if (ok) {
-                    comments = comments.filterNot { it.id == cid }
+                    comments = comments
+                        .filterNot { it.id == cid }
+                        .map { item ->
+                            if (item.replies.any { r -> r.id == cid }) {
+                                val nextReplies = item.replies.filterNot { r -> r.id == cid }
+                                item.copy(
+                                    replies = nextReplies,
+                                    replyCount = (item.replyCount - 1).coerceAtLeast(nextReplies.size)
+                                )
+                            } else item
+                        }
                     totalCount = (totalCount - 1).coerceAtLeast(comments.size)
-                    onResult(true, "评论已删除")
+                    onResult(true, "评论已从云端删除")
                 } else {
                     onResult(false, "删除失败，请稍后重试")
                 }

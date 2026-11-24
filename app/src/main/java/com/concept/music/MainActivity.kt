@@ -62,14 +62,12 @@ import com.concept.music.ui.comment.CommentsScreen
 import com.concept.music.ui.comment.ResourceCommentsScreen
 import com.concept.music.ui.components.AddToPlaylistDialog
 import com.concept.music.ui.components.CreatePlaylistDialog
-import com.concept.music.ui.components.CrossDeviceContinueSheet
 import com.concept.music.ui.components.FloatingLyricOverlay
 import com.concept.music.ui.components.MiniPlayerBar
 import com.concept.music.ui.components.NowPlayingSheet
 import com.concept.music.ui.components.QueueBottomSheet
 import com.concept.music.ui.components.SongActionBottomSheet
 import com.concept.music.ui.components.SongDetailSheet
-import com.concept.music.ui.components.SongVersionsBottomSheet
 import com.concept.music.ui.components.VipCenterScreen
 import com.concept.music.ui.components.ViperSoundEffectScreen
 import com.concept.music.ui.components.parseSongArtistNames
@@ -80,9 +78,9 @@ import com.concept.music.ui.home.RadioScreen
 import com.concept.music.ui.home.RankDetailScreen
 import com.concept.music.ui.library.AlbumDetailScreen
 import com.concept.music.ui.library.ArtistDetailScreen
-import com.concept.music.ui.library.CloudDiskBottomSheet
+import com.concept.music.ui.library.CloudDiskScreen
 import com.concept.music.ui.library.LibraryScreen
-import com.concept.music.ui.library.ListeningPreferenceAndBlacklistSheet
+import com.concept.music.ui.library.ListenRankScreen
 import com.concept.music.ui.library.PlaylistDetailScreen
 import com.concept.music.ui.library.PlaylistOrderSortSheet
 import com.concept.music.ui.navigation.BottomNavBar
@@ -291,7 +289,6 @@ fun MainContent(
 
     var actionSheetSong by remember { mutableStateOf<Song?>(null) }
     var actionSheetRemoveCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var songForVersionsSheet by remember { mutableStateOf<Song?>(null) }
     var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
     var showCreatePlaylistFromGlobal by remember { mutableStateOf(false) }
     var detailSheetSong by remember { mutableStateOf<Song?>(null) }
@@ -302,50 +299,19 @@ fun MainContent(
     var multiArtistPickerSong by remember { mutableStateOf<Song?>(null) }
     var isHomeSubSheetOpen by remember { mutableStateOf(false) }
     var isLibrarySubSheetOpen by remember { mutableStateOf(false) }
-    var showGlobalContinuePlaySheet by remember { mutableStateOf(false) }
-    var showGlobalCloudDiskSheet by remember { mutableStateOf(false) }
-    var showGlobalPreferenceSheet by remember { mutableStateOf(false) }
     var globalPlaylistSortIsCreatedByMe by remember { mutableStateOf<Boolean?>(null) }
     var isGlobalSheetDismissing by remember { mutableStateOf(false) }
-    val hasGlobalExtendedSheet = showGlobalContinuePlaySheet ||
-        showGlobalCloudDiskSheet ||
-        showGlobalPreferenceSheet ||
-        globalPlaylistSortIsCreatedByMe != null
+    val hasGlobalExtendedSheet = globalPlaylistSortIsCreatedByMe != null
     LaunchedEffect(hasGlobalExtendedSheet) {
         if (!hasGlobalExtendedSheet) isGlobalSheetDismissing = false
     }
     val isMainSubSheetOpen = isHomeSubSheetOpen || isLibrarySubSheetOpen ||
         (hasGlobalExtendedSheet && !isGlobalSheetDismissing) ||
         actionSheetSong != null ||
-        songForVersionsSheet != null ||
         songToShare != null ||
         playlistToShare != null ||
         activeResourceCommentTarget != null
 
-    val blockSongWithSync: (Song) -> Unit = { targetSong ->
-        libraryViewModel.blockSongInRecommendations(targetSong) { ok, msg ->
-            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-            if (ok) {
-                homeViewModel.applyLocalBlacklistFilter()
-                val playing = musicPlayerViewModel.uiState.value.currentSong
-                if (playing != null && libraryViewModel.isSameSong(playing, targetSong)) {
-                    musicPlayerViewModel.skipToNext()
-                }
-            }
-        }
-    }
-    val blockArtistWithSync: (Song) -> Unit = { targetSong ->
-        val primaryName = parseSongArtistNames(targetSong.artist).firstOrNull().orEmpty().ifBlank { targetSong.artist }
-        libraryViewModel.blockArtistInRecommendations(
-            artistId = targetSong.artistId,
-            artistName = primaryName
-        ) { ok, msg ->
-            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-            if (ok) {
-                homeViewModel.applyLocalBlacklistFilter()
-            }
-        }
-    }
     val mainScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val incomingIntentShareText by MainActivity.incomingSharedTextFlow.collectAsState()
@@ -544,7 +510,6 @@ fun MainContent(
                 Lifecycle.Event.ON_RESUME -> {
                     musicPlayerViewModel.onAppForegroundChanged(true)
                     libraryViewModel.onForeground(true)
-                    homeViewModel.refreshContinuePlay(force = false)
                 }
                 Lifecycle.Event.ON_PAUSE -> libraryViewModel.onForeground(false)
                 Lifecycle.Event.ON_STOP -> musicPlayerViewModel.onAppForegroundChanged(false)
@@ -585,6 +550,8 @@ fun MainContent(
     val isSubDetail = currentRoute.startsWith("playlist_detail") ||
         currentRoute.startsWith("album_detail") ||
         currentRoute.startsWith("artist_detail") ||
+        currentRoute == "cloud_disk" ||
+        currentRoute == "listen_rank" ||
         currentRoute == "daily_recommend" ||
         currentRoute == "new_song_express" ||
         currentRoute.startsWith("rank_detail") ||
@@ -799,24 +766,6 @@ fun MainContent(
                                     actionSheetSong = song
                                     actionSheetRemoveCallback = null
                                 },
-                                onSyncCurrentSongToCloud = {
-                                    musicPlayerViewModel.syncCurrentSongToCloudForHandoff { _, msg ->
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onOpenContinuePlaySheet = {
-                                    isGlobalSheetDismissing = false
-                                    showGlobalContinuePlaySheet = true
-                                    homeViewModel.refreshContinuePlay(force = false)
-                                },
-                                onOpenPreferenceSheet = {
-                                    isGlobalSheetDismissing = false
-                                    showGlobalPreferenceSheet = true
-                                    libraryViewModel.loadListeningPreferenceAndBlacklist()
-                                },
-                                onBlacklistUpdated = {
-                                    libraryViewModel.loadListeningPreferenceAndBlacklist()
-                                },
                                 isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail || activeResourceCommentTarget != null,
                                 onSubSheetOpenChanged = { isHomeSubSheetOpen = it },
                                 modifier = Modifier
@@ -858,10 +807,11 @@ fun MainContent(
                                 onPlaySong = { song, list ->
                                     musicPlayerViewModel.playSong(song, list)
                                 },
-                                onOpenCloudDiskSheet = {
-                                    isGlobalSheetDismissing = false
-                                    showGlobalCloudDiskSheet = true
-                                    libraryViewModel.loadCloudDisk(force = false)
+                                onOpenCloudDisk = {
+                                    navController.navigate("cloud_disk") { launchSingleTop = true }
+                                },
+                                onOpenListenRank = {
+                                    navController.navigate("listen_rank") { launchSingleTop = true }
                                 },
                                 onOpenPlaylistSortSheet = { isCreated ->
                                     isGlobalSheetDismissing = false
@@ -903,24 +853,6 @@ fun MainContent(
                             onSongMoreClick = { song ->
                                 actionSheetSong = song
                                 actionSheetRemoveCallback = null
-                            },
-                            onSyncCurrentSongToCloud = {
-                                musicPlayerViewModel.syncCurrentSongToCloudForHandoff { _, msg ->
-                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            onOpenContinuePlaySheet = {
-                                isGlobalSheetDismissing = false
-                                showGlobalContinuePlaySheet = true
-                                homeViewModel.refreshContinuePlay(force = false)
-                            },
-                            onOpenPreferenceSheet = {
-                                isGlobalSheetDismissing = false
-                                showGlobalPreferenceSheet = true
-                                libraryViewModel.loadListeningPreferenceAndBlacklist()
-                            },
-                            onBlacklistUpdated = {
-                                libraryViewModel.loadListeningPreferenceAndBlacklist()
                             },
                             isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail || activeResourceCommentTarget != null,
                             onSubSheetOpenChanged = { isHomeSubSheetOpen = it }
@@ -1026,10 +958,11 @@ fun MainContent(
                         onPlaySong = { song, list ->
                             musicPlayerViewModel.playSong(song, list)
                         },
-                        onOpenCloudDiskSheet = {
-                            isGlobalSheetDismissing = false
-                            showGlobalCloudDiskSheet = true
-                            libraryViewModel.loadCloudDisk(force = false)
+                        onOpenCloudDisk = {
+                            navController.navigate("cloud_disk") { launchSingleTop = true }
+                        },
+                        onOpenListenRank = {
+                            navController.navigate("listen_rank") { launchSingleTop = true }
                         },
                         onOpenPlaylistSortSheet = { isCreated ->
                             isGlobalSheetDismissing = false
@@ -1037,6 +970,51 @@ fun MainContent(
                         },
                         isOverlayOpen = showCommentsScreen || showNowPlaying || showViperEffectOverlay || isSubDetail || activeResourceCommentTarget != null,
                         onSubSheetOpenChanged = { isLibrarySubSheetOpen = it }
+                    )
+                }
+
+                // 音乐云盘独立页面
+                composable("cloud_disk") {
+                    CloudDiskScreen(
+                        viewModel = libraryViewModel,
+                        currentPlayingSongId = currentSong?.id,
+                        isPlaying = isPlaying,
+                        onBack = { navController.popBackStack() },
+                        onPlaySong = { song, list ->
+                            musicPlayerViewModel.playSong(song, list)
+                        },
+                        onAddNextPlay = { song ->
+                            musicPlayerViewModel.playNext(song)
+                            Toast.makeText(context, "已加入下一首播放：${song.title}", Toast.LENGTH_SHORT).show()
+                        },
+                        onOpenSongActions = { song ->
+                            actionSheetSong = song
+                            actionSheetRemoveCallback = null
+                        }
+                    )
+                }
+
+                // 云端听歌排行独立页面
+                composable("listen_rank") {
+                    ListenRankScreen(
+                        viewModel = libraryViewModel,
+                        currentPlayingSongId = currentSong?.id,
+                        isPlaying = isPlaying,
+                        onBack = { navController.popBackStack() },
+                        onPlaySong = { song, list ->
+                            musicPlayerViewModel.playSong(song, list)
+                        },
+                        onOpenArtist = { artistId, artistName, fallbackSongs ->
+                            val probeSong = fallbackSongs.firstOrNull()?.copy(
+                                artist = artistName.ifBlank { fallbackSongs.first().artist },
+                                artistId = artistId.ifBlank { fallbackSongs.first().artistId }
+                            ) ?: Song(id = "rank_artist", title = "", artist = artistName, artistId = artistId)
+                            navigateToSongArtist(probeSong)
+                        },
+                        onOpenSongMore = { song ->
+                            actionSheetSong = song
+                            actionSheetRemoveCallback = null
+                        }
                     )
                 }
 
@@ -1064,11 +1042,6 @@ fun MainContent(
                         onBackClick = { navController.popBackStack() },
                         onOpenViperEffect = {
                             navController.navigate("viper_effect") { launchSingleTop = true }
-                        },
-                        onOpenPreferenceSheet = {
-                            isGlobalSheetDismissing = false
-                            showGlobalPreferenceSheet = true
-                            libraryViewModel.loadListeningPreferenceAndBlacklist()
                         }
                     )
                 }
@@ -1089,6 +1062,9 @@ fun MainContent(
                         onBack = { navController.popBackStack() },
                         onSongClick = { song, list ->
                             musicPlayerViewModel.playSong(song, list)
+                        },
+                        onAddNextPlay = { song ->
+                            musicPlayerViewModel.playNext(song)
                         },
                         currentSong = currentSong,
                         onSongMoreClick = { song, removeCallback ->
@@ -1364,8 +1340,7 @@ fun MainContent(
                     showViperEffectOverlay = true
                 },
                 onOpenArtist = navigateToSongArtist,
-                onOpenAlbum = navigateToSongAlbum,
-                onBlockSong = blockSongWithSync
+                onOpenAlbum = navigateToSongAlbum
             )
         }
 
@@ -1492,15 +1467,6 @@ fun MainContent(
                     musicPlayerViewModel.openCommentsForSong(targetSong)
                     showCommentsScreen = true
                 },
-                onOpenMoreVersions = {
-                    songForVersionsSheet = targetSong
-                },
-                onBlockSong = {
-                    blockSongWithSync(targetSong)
-                },
-                onBlockArtist = if (targetSong.artist.isNotBlank()) {
-                    { blockArtistWithSync(targetSong) }
-                } else null,
                 onOpenArtist = if (targetSong.artist.isNotBlank()) {
                     { navigateToSongArtist(targetSong) }
                 } else null,
@@ -1509,115 +1475,6 @@ fun MainContent(
                     detailSheetSong = targetSong
                 },
                 onRemoveFromCurrentPlaylist = actionSheetRemoveCallback
-            )
-        }
-
-        if (songForVersionsSheet != null) {
-            val baseSong = songForVersionsSheet!!
-            SongVersionsBottomSheet(
-                song = baseSong,
-                onPlayVersion = { versionSong, _ ->
-                    musicPlayerViewModel.playVersionInCurrentQueue(versionSong, baseSong)
-                },
-                onAddToNext = { versionSong ->
-                    musicPlayerViewModel.playNext(versionSong)
-                    Toast.makeText(context, "已加入下一首播放：${versionSong.title}", Toast.LENGTH_SHORT).show()
-                },
-                onDismiss = { songForVersionsSheet = null }
-            )
-        }
-
-        if (showGlobalContinuePlaySheet) {
-            val continuePlaySnapshot by homeViewModel.continuePlaySnapshot.collectAsState()
-            val continuePlayLoading by homeViewModel.continuePlayLoading.collectAsState()
-            val continuePlayError by homeViewModel.continuePlayError.collectAsState()
-            CrossDeviceContinueSheet(
-                snapshot = continuePlaySnapshot,
-                loading = continuePlayLoading,
-                errorMessage = continuePlayError,
-                currentLocalSong = currentSong,
-                onRefresh = { homeViewModel.refreshContinuePlay(force = true) },
-                onPlaySong = { targetSong, queueSongs ->
-                    musicPlayerViewModel.playSong(targetSong, queueSongs)
-                },
-                onAddToNext = { targetSong ->
-                    musicPlayerViewModel.playNext(targetSong)
-                    Toast.makeText(context, "已加入下一首播放：${targetSong.title}", Toast.LENGTH_SHORT).show()
-                },
-                onSyncCurrentLocalSong = {
-                    musicPlayerViewModel.syncCurrentSongToCloudForHandoff { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onDismissStart = { isGlobalSheetDismissing = true },
-                onDismiss = {
-                    showGlobalContinuePlaySheet = false
-                    isGlobalSheetDismissing = false
-                }
-            )
-        }
-
-        if (showGlobalCloudDiskSheet) {
-            val cloudDiskSummary by libraryViewModel.cloudDiskSummary.collectAsState()
-            val cloudDiskLoading by libraryViewModel.cloudDiskLoading.collectAsState()
-            val cloudDiskLoadingMore by libraryViewModel.cloudDiskLoadingMore.collectAsState()
-            val cloudDiskError by libraryViewModel.cloudDiskError.collectAsState()
-            CloudDiskBottomSheet(
-                summary = cloudDiskSummary,
-                loading = cloudDiskLoading,
-                loadingMore = cloudDiskLoadingMore,
-                errorMessage = cloudDiskError,
-                onRefresh = { libraryViewModel.loadCloudDisk(force = true) },
-                onLoadMore = { libraryViewModel.loadMoreCloudDisk() },
-                onPlaySong = { item, allItems ->
-                    val songs = allItems.map { it.toSong() }
-                    val target = songs.firstOrNull { it.cloudKvId == item.kvId } ?: item.toSong()
-                    musicPlayerViewModel.playSong(target, songs)
-                },
-                onDeleteSong = { item ->
-                    libraryViewModel.deleteCloudSong(item) { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onDismissStart = { isGlobalSheetDismissing = true },
-                onDismiss = {
-                    showGlobalCloudDiskSheet = false
-                    isGlobalSheetDismissing = false
-                }
-            )
-        }
-
-        if (showGlobalPreferenceSheet) {
-            val listeningPreference by libraryViewModel.listeningPreference.collectAsState()
-            val blacklistedSongs by libraryViewModel.blacklistedSongs.collectAsState()
-            val blacklistedSingers by libraryViewModel.blacklistedSingers.collectAsState()
-            val preferenceLoading by libraryViewModel.preferenceLoading.collectAsState()
-            val preferenceError by libraryViewModel.preferenceError.collectAsState()
-            ListeningPreferenceAndBlacklistSheet(
-                preference = listeningPreference,
-                blacklistedSongs = blacklistedSongs,
-                blacklistedSingers = blacklistedSingers,
-                loading = preferenceLoading,
-                errorMessage = preferenceError,
-                onRefresh = { libraryViewModel.loadListeningPreferenceAndBlacklist() },
-                onSelectMode = { mode ->
-                    libraryViewModel.updateListeningMode(mode) { _, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onRemoveBlacklist = { entry ->
-                    libraryViewModel.removeFromBlacklist(entry) { ok, msg ->
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        if (ok) {
-                            homeViewModel.applyLocalBlacklistFilter()
-                        }
-                    }
-                },
-                onDismissStart = { isGlobalSheetDismissing = true },
-                onDismiss = {
-                    showGlobalPreferenceSheet = false
-                    isGlobalSheetDismissing = false
-                }
             )
         }
 
@@ -1854,8 +1711,7 @@ private fun IsolatedNowPlayingHost(
     onOpenComments: () -> Unit,
     onOpenViperEffectPage: () -> Unit,
     onOpenArtist: (Song) -> Unit = {},
-    onOpenAlbum: (Song) -> Unit = {},
-    onBlockSong: (Song) -> Unit = {}
+    onOpenAlbum: (Song) -> Unit = {}
 ) {
     val context = LocalContext.current
     val playerUiState by musicPlayerViewModel.uiState.collectAsState()
@@ -1961,14 +1817,6 @@ private fun IsolatedNowPlayingHost(
         onClearQueue = { musicPlayerViewModel.clearQueue() },
         onOpenArtist = { onOpenArtist(currentSong) },
         onOpenAlbum = { onOpenAlbum(currentSong) },
-        onPlayVersionSong = { versionSong, _ ->
-            musicPlayerViewModel.playVersionInCurrentQueue(versionSong, currentSong)
-        },
-        onAddVersionToNext = { versionSong ->
-            musicPlayerViewModel.playNext(versionSong)
-            Toast.makeText(context, "已加入下一首播放：${versionSong.title}", Toast.LENGTH_SHORT).show()
-        },
-        onBlockSong = onBlockSong,
         motionOrientationPermissionEnabled = playerUiState.motionOrientationPermissionEnabled
     )
 }

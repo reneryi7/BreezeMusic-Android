@@ -25,7 +25,9 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -557,20 +559,33 @@ private class SoftBouncePressNode(
 /**
  * 柔和唯美无框点击反馈修饰符（零 `Modifier.composed` 开销 + 惰性按压激活 + 100% Draw 阶段渲染）
  */
+@OptIn(ExperimentalFoundationApi::class)
 fun Modifier.softClickable(
     enabled: Boolean = true,
     pressScale: Float = 0.93f,
     pressAlpha: Float = 0.76f,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ): Modifier {
-    return this
-        .then(SoftBouncePressElement(enabled = enabled, pressScale = pressScale, pressAlpha = pressAlpha))
-        .clickable(
+    val clickModifier = if (onLongClick != null) {
+        Modifier.combinedClickable(
+            interactionSource = NoOpInteractionSource,
+            indication = null,
+            enabled = enabled,
+            onLongClick = onLongClick,
+            onClick = onClick
+        )
+    } else {
+        Modifier.clickable(
             interactionSource = NoOpInteractionSource,
             indication = null,
             enabled = enabled,
             onClick = onClick
         )
+    }
+    return this
+        .then(SoftBouncePressElement(enabled = enabled, pressScale = pressScale, pressAlpha = pressAlpha))
+        .then(clickModifier)
 }
 
 /**
@@ -598,33 +613,20 @@ fun Modifier.softCardClickable(
 }
 
 /**
- * 同平面灵动分类内容切换过渡动画（入场与退场统一采用欠阻尼弹性物理弹簧 `categoryContentSpring` + 同平面左右滑入滑出）：
- * 两个分类内容处于同一水平面，根据切换到左侧或右侧标题产生顺向弹性滑移与景深微缩放；
+ * 全站统一纯水平分类内容切换过渡动画（严格沿水平轴平移 + 轻盈淡入淡出，彻底去除偏心斜角缩放）：
  * 通过 `SizeTransform(clip = false, sizeAnimationSpec = { _, _ -> snap() })` 避免在 `LazyColumn` 内引发高度弹簧震荡。
  */
 fun conceptCategoryContentTransition(direction: Int): ContentTransform {
     val dir = if (direction >= 0) 1 else -1
-    val enterOrigin = TransformOrigin(if (dir >= 0) 0.72f else 0.28f, 0.50f)
-    val exitOrigin = TransformOrigin(if (dir >= 0) 0.28f else 0.72f, 0.50f)
     return ContentTransform(
         targetContentEnter = slideInHorizontally(
             animationSpec = ConceptMotion.categoryContentSpring()
-        ) { fullWidth -> dir * (fullWidth / 4) } +
-            scaleIn(
-                initialScale = 0.94f,
-                transformOrigin = enterOrigin,
-                animationSpec = ConceptMotion.categoryContentSpring()
-            ) +
-            fadeIn(animationSpec = tween(durationMillis = 220, easing = ConceptMotion.EmphasizedDecelerate)),
+        ) { fullWidth -> dir * (fullWidth / 5) } +
+            fadeIn(animationSpec = tween(durationMillis = 200, easing = ConceptMotion.EmphasizedDecelerate)),
         initialContentExit = slideOutHorizontally(
             animationSpec = ConceptMotion.categoryContentSpring()
-        ) { fullWidth -> -dir * (fullWidth / 5) } +
-            scaleOut(
-                targetScale = 0.94f,
-                transformOrigin = exitOrigin,
-                animationSpec = ConceptMotion.categoryContentSpring()
-            ) +
-            fadeOut(animationSpec = tween(durationMillis = 190, easing = ConceptMotion.EmphasizedAccelerate)),
+        ) { fullWidth -> -dir * (fullWidth / 6) } +
+            fadeOut(animationSpec = tween(durationMillis = 160, easing = ConceptMotion.EmphasizedAccelerate)),
         sizeTransform = SizeTransform(
             clip = false,
             sizeAnimationSpec = { _, _ -> snap() }
@@ -675,16 +677,15 @@ fun rememberCategorySwitchGraphicModifier(
         val inv = 1f - rawP
         if (abs(inv) > 0.002f) {
             val fullW = size.width.takeIf { it > 0f } ?: (360f * density)
-            translationX = dir * inv * (fullW * 0.25f)
+            translationX = dir * inv * (fullW * 0.20f)
             translationY = 0f
-            val s = (0.94f + 0.06f * rawP).coerceIn(0.88f, 1.035f)
-            scaleX = s
+            scaleX = 1f
             scaleY = 1f
-            alpha = (0.18f + 0.82f * clampedP).coerceIn(0f, 1f)
-            transformOrigin = TransformOrigin(if (dir >= 0) 0.72f else 0.28f, 0.50f)
+            alpha = (0.24f + 0.76f * clampedP).coerceIn(0f, 1f)
+            transformOrigin = TransformOrigin.Center
             if (applyMotionBlur) {
-                val motionBlurX = (abs(inv) * 14f * density).coerceIn(0f, 22f)
-                applyDirectionalMotionBlur(blurX = motionBlurX, blurY = motionBlurX * 0.08f)
+                val motionBlurX = (abs(inv) * 12f * density).coerceIn(0f, 18f)
+                applyDirectionalMotionBlur(blurX = motionBlurX, blurY = 0f)
             } else {
                 applyDirectionalMotionBlur(blurX = 0f, blurY = 0f)
             }

@@ -781,7 +781,7 @@ fun RankDetailScreen(
                             ) {
                                 Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("播放全部 (${filteredSongs.size})", fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp)
+                                Text("播放全部", fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp)
                             }
                             if (quickSwitchRanks.size > 1) {
                                 Spacer(modifier = Modifier.height(16.dp))

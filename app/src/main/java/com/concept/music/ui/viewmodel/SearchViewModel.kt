@@ -2,7 +2,10 @@ package com.concept.music.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.concept.music.data.kugou.searchByLyric
+import com.concept.music.data.kugou.SearchSongVersionGroup
+import com.concept.music.data.kugou.fetchSameSingerSongVersionsForSearch
+import com.concept.music.data.kugou.groupSearchSongsWithInlineVersions
+import com.concept.music.data.kugou.suspendRunCatching
 import com.concept.music.data.model.AlbumItem
 import com.concept.music.data.model.ArtistItem
 import com.concept.music.data.model.ComplexSearchResult
@@ -13,10 +16,15 @@ import com.concept.music.data.repository.SearchHistoryRepository
 import com.concept.music.data.vip.VipManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class SearchViewModel(
     private val historyRepo: SearchHistoryRepository = VipManager.searchHistoryRepo
@@ -36,7 +44,6 @@ class SearchViewModel(
     private val _suggestions = MutableStateFlow<List<String>>(emptyList())
     val suggestions = _suggestions.asStateFlow()
 
-    // 搜索执行状态追踪（用于区分未搜索状态与0条匹配的空结果状态）
     private val _hasSearched = MutableStateFlow(false)
     val hasSearched = _hasSearched.asStateFlow()
 
@@ -59,8 +66,15 @@ class SearchViewModel(
     private val _artistResults = MutableStateFlow<List<ArtistItem>>(emptyList())
     val artistResults = _artistResults.asStateFlow()
 
-    private val _lyricResults = MutableStateFlow<List<Song>>(emptyList())
-    val lyricResults = _lyricResults.asStateFlow()
+    // 搜索页专属：同歌手、同歌曲、非 Live、无翻唱（可含伴奏）的行内可展开多版本映射
+    private val _complexSongGroups = MutableStateFlow<List<SearchSongVersionGroup>>(emptyList())
+    val complexSongGroups = _complexSongGroups.asStateFlow()
+
+    private val _songTabGroups = MutableStateFlow<List<SearchSongVersionGroup>>(emptyList())
+    val songTabGroups = _songTabGroups.asStateFlow()
+
+    private val _expandedVersionSongKeys = MutableStateFlow<Set<String>>(emptySet())
+    val expandedVersionSongKeys = _expandedVersionSongKeys.asStateFlow()
 
     private val _loading = MutableStateFlow(false)
     val loading = _loading.asStateFlow()
@@ -72,20 +86,84 @@ class SearchViewModel(
     val hasMore = _hasMore.asStateFlow()
 
     private var currentPage = 1
-    private val pageSize = 30
+    private val pageSize = 40
     private var lastComplexKeyword = ""
     private var suggestJob: Job? = null
     private var searchJob: Job? = null
     private var loadMoreJob: Job? = null
+    private var versionEnrichJob: Job? = null
 
     init {
-        // 延后在后台 IO 线程加载热搜词，避免冷启动首屏阶段与主页抢占网络与主线程资源
         viewModelScope.launch(Dispatchers.IO) {
             delay(400L)
             if (_hotKeywords.value.isEmpty()) {
                 runCatching { VipManager.music.searchHot() }.getOrNull()?.let {
                     if (it.isNotEmpty()) _hotKeywords.value = it
                 }
+            }
+        }
+    }
+
+    fun songGroupKey(song: Song): String =
+        song.hash.trim().ifBlank { song.id.trim() }.lowercase()
+
+    fun toggleSongVersionsExpanded(songKey: String) {
+        if (songKey.isBlank()) return
+        val cur = _expandedVersionSongKeys.value
+        _expandedVersionSongKeys.value = if (songKey in cur) cur - songKey else cur + songKey
+    }
+
+    private fun updateGroupedSongsAndEnrichVersions(
+        rawSongs: List<Song>,
+        targetTab: SearchTab,
+        expectedKeyword: String
+    ) {
+        val grouped = VipManager.music.groupSearchSongsWithInlineVersions(rawSongs).map { it.toGroup() }
+        when (targetTab) {
+            SearchTab.COMPLEX -> _complexSongGroups.value = grouped
+            else -> _songTabGroups.value = grouped
+        }
+
+        // 后台轻量探测前 6 首命中曲目的同歌手其他录音室版本/官方伴奏版（严格排除 Live 与他人翻唱）
+        versionEnrichJob?.cancel()
+        if (grouped.isEmpty()) return
+        versionEnrichJob = viewModelScope.launch(Dispatchers.IO) {
+            val candidates = grouped.take(6)
+            val gate = Semaphore(3)
+            val enrichedPairs = coroutineScope {
+                candidates.map { grp ->
+                    async {
+                        gate.withPermit {
+                            val key = songGroupKey(grp.primary)
+                            val versions = suspendRunCatching {
+                                VipManager.music.fetchSameSingerSongVersionsForSearch(
+                                    song = grp.primary,
+                                    existingVersions = grp.versions,
+                                    pageSize = 20
+                                )
+                            }.getOrDefault(grp.versions)
+                            key to versions
+                        }
+                    }
+                }.awaitAll()
+            }.toMap()
+
+            if (_query.value.trim() != expectedKeyword) return@launch
+            fun mergeInto(list: List<SearchSongVersionGroup>): List<SearchSongVersionGroup> =
+                list.map { g ->
+                    val k = songGroupKey(g.primary)
+                    val extra = enrichedPairs[k]
+                    if (extra != null && extra.size > g.versions.size) g.copy(versions = extra) else g
+                }
+
+            when (targetTab) {
+                SearchTab.COMPLEX -> {
+                    _complexSongGroups.value = mergeInto(_complexSongGroups.value)
+                    if (_songTabGroups.value.isNotEmpty()) {
+                        _songTabGroups.value = mergeInto(_songTabGroups.value)
+                    }
+                }
+                else -> _songTabGroups.value = mergeInto(_songTabGroups.value)
             }
         }
     }
@@ -139,7 +217,6 @@ class SearchViewModel(
                 SearchTab.ARTIST -> _artistResults.value.isNotEmpty()
                 SearchTab.ALBUM -> _albumResults.value.isNotEmpty()
                 SearchTab.PLAYLIST -> _playlistResults.value.isNotEmpty()
-                SearchTab.LYRIC -> _lyricResults.value.isNotEmpty()
             }
             if (hasWarmCache) {
                 currentPage = tabCurrentPages[tab] ?: 1
@@ -149,7 +226,6 @@ class SearchViewModel(
                     SearchTab.ARTIST -> if (_artistResults.value.size < 10 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.ALBUM -> if (_albumResults.value.size < 12 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.PLAYLIST -> if (_playlistResults.value.size < 12 && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
-                    SearchTab.LYRIC -> if (_lyricResults.value.size < pageSize && currentPage == 1) performSearchForCurrentTab(currentKw, silent = true)
                     SearchTab.COMPLEX -> {}
                 }
             } else {
@@ -169,17 +245,16 @@ class SearchViewModel(
         val trimmed = targetQuery.trim()
         if (trimmed.isBlank()) return
         suggestJob?.cancel()
+        versionEnrichJob?.cancel()
         _suggestions.value = emptyList()
         _query.value = trimmed
         _lastSearchedKeyword.value = trimmed
-        // 每次发起新搜索时始终默认回归「综合」结果页，避免残留上一次的分类记忆
         _selectedTab.value = SearchTab.COMPLEX
         tabCurrentPages.clear()
         tabHasMore.clear()
-        _lyricResults.value = emptyList()
+        _expandedVersionSongKeys.value = emptySet()
         _hasSearched.value = true
 
-        // 加入历史记录并持久化（移除 15 条数量上限）
         val currentHistory = _searchHistory.value.toMutableList()
         currentHistory.remove(trimmed)
         currentHistory.add(0, trimmed)
@@ -231,6 +306,8 @@ class SearchViewModel(
                                 lastComplexKeyword = keyword
                                 _complexResult.value = ComplexSearchResult(songs = songs)
                                 _songResults.value = songs
+                                _complexSongGroups.value = songs.map { SearchSongVersionGroup(it) }
+                                _songTabGroups.value = songs.map { SearchSongVersionGroup(it) }
                                 _albumResults.value = emptyList()
                                 _playlistResults.value = emptyList()
                                 _artistResults.value = emptyList()
@@ -255,6 +332,8 @@ class SearchViewModel(
                                     playlists = plList
                                 )
                                 _songResults.value = sharedTarget.fallbackSongs
+                                _complexSongGroups.value = sharedTarget.fallbackSongs.map { SearchSongVersionGroup(it) }
+                                _songTabGroups.value = sharedTarget.fallbackSongs.map { SearchSongVersionGroup(it) }
                                 _playlistResults.value = plList
                                 _albumResults.value = emptyList()
                                 _artistResults.value = emptyList()
@@ -270,6 +349,8 @@ class SearchViewModel(
                         lastComplexKeyword = keyword
                         _complexResult.value = res
                         _songResults.value = res.songs
+                        _songTabGroups.value = VipManager.music.groupSearchSongsWithInlineVersions(res.songs).map { it.toGroup() }
+                        updateGroupedSongsAndEnrichVersions(res.songs, SearchTab.COMPLEX, keyword)
                         _albumResults.value = res.albums
                         _playlistResults.value = res.playlists
                         _artistResults.value = res.artists
@@ -278,6 +359,7 @@ class SearchViewModel(
                     SearchTab.SONG -> {
                         val res = VipManager.music.searchSongs(keyword, page = 1, pageSize = pageSize)
                         _songResults.value = res.songs
+                        updateGroupedSongsAndEnrichVersions(res.songs, SearchTab.SONG, keyword)
                         _hasMore.value = res.hasMore || res.songs.size >= pageSize
                     }
                     SearchTab.ARTIST -> {
@@ -299,14 +381,6 @@ class SearchViewModel(
                         val res = VipManager.music.searchPlaylists(keyword, page = 1, pageSize = pageSize)
                         _playlistResults.value = res
                         _hasMore.value = res.size >= pageSize
-                    }
-                    SearchTab.LYRIC -> {
-                        val res = VipManager.music.searchByLyric(keyword, page = 1, pageSize = pageSize)
-                        _lyricResults.value = res.songs
-                        val more = res.hasMore || res.songs.size >= pageSize
-                        tabCurrentPages[SearchTab.LYRIC] = 1
-                        tabHasMore[SearchTab.LYRIC] = more
-                        _hasMore.value = more
                     }
                 }
             } catch (_: Exception) {
@@ -334,7 +408,14 @@ class SearchViewModel(
                             val newItems = res.songs.filter { songDedupKey(it) !in existingKeys }
                             currentPage = nextPage
                             tabCurrentPages[SearchTab.SONG] = nextPage
-                            _songResults.value = _songResults.value + newItems
+                            val merged = _songResults.value + newItems
+                            _songResults.value = merged
+                            val prevVersionsByKey = _songTabGroups.value.associate { songGroupKey(it.primary) to it.versions }
+                            _songTabGroups.value = VipManager.music.groupSearchSongsWithInlineVersions(merged).map { bucket ->
+                                val g = bucket.toGroup()
+                                val prevV = prevVersionsByKey[songGroupKey(g.primary)].orEmpty()
+                                if (prevV.size > g.versions.size) g.copy(versions = prevV) else g
+                            }
                             val more = newItems.isNotEmpty() && (res.hasMore || res.songs.size >= pageSize)
                             tabHasMore[SearchTab.SONG] = more
                             _hasMore.value = more
@@ -391,22 +472,6 @@ class SearchViewModel(
                             _hasMore.value = false
                         }
                     }
-                    SearchTab.LYRIC -> {
-                        val res = VipManager.music.searchByLyric(currentQuery, page = nextPage, pageSize = pageSize)
-                        if (res.songs.isNotEmpty()) {
-                            val existingKeys = _lyricResults.value.map(::songDedupKey).toSet()
-                            val newItems = res.songs.filter { songDedupKey(it) !in existingKeys }
-                            currentPage = nextPage
-                            tabCurrentPages[SearchTab.LYRIC] = nextPage
-                            _lyricResults.value = _lyricResults.value + newItems
-                            val more = newItems.isNotEmpty() && (res.hasMore || res.songs.size >= pageSize)
-                            tabHasMore[SearchTab.LYRIC] = more
-                            _hasMore.value = more
-                        } else {
-                            tabHasMore[SearchTab.LYRIC] = false
-                            _hasMore.value = false
-                        }
-                    }
                     SearchTab.COMPLEX -> {
                         _hasMore.value = false
                     }
@@ -427,6 +492,7 @@ class SearchViewModel(
         suggestJob?.cancel()
         searchJob?.cancel()
         loadMoreJob?.cancel()
+        versionEnrichJob?.cancel()
         _query.value = ""
         _lastSearchedKeyword.value = ""
         lastComplexKeyword = ""
@@ -437,10 +503,12 @@ class SearchViewModel(
         _selectedTab.value = SearchTab.COMPLEX
         _complexResult.value = ComplexSearchResult()
         _songResults.value = emptyList()
+        _complexSongGroups.value = emptyList()
+        _songTabGroups.value = emptyList()
+        _expandedVersionSongKeys.value = emptySet()
         _albumResults.value = emptyList()
         _playlistResults.value = emptyList()
         _artistResults.value = emptyList()
-        _lyricResults.value = emptyList()
     }
 
     fun removeHistoryItem(keyword: String) {
