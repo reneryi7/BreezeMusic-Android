@@ -25,6 +25,7 @@ import com.concept.music.data.vip.VipManager
 import com.concept.music.service.AmbientSoundManager
 import com.concept.music.service.AudioCacheManager
 import com.concept.music.service.ConceptMusicWidgetUpdater
+import com.concept.music.service.ListenStatsCoordinator
 import com.concept.music.service.PlaybackCoordinator
 import com.concept.music.service.AudioFocusMode
 import com.concept.music.service.HeadsetClickSensitivity
@@ -282,7 +283,6 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private var songPlaybackStartTimestamp: Long = 0L
     private var accumulatedPlayedMs: Long = 0L
     private var currentSegmentRecordedGradeSec: Long = 0L
-    private var currentSegmentListenStatRecorded: Boolean = false
     private var lastAccumulateTickMs: Long = 0L
     private var csccSegmentOpen: Boolean = false
     private var isPausingWithFade: Boolean = false
@@ -364,7 +364,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 playSong(
                     song = failedSong.copy(playUrl = ""),
                     queue = mutableState.value.playlistQueue,
-                    seekToPositionMs = retryPos
+                    seekToPositionMs = retryPos,
+                    preserveListenSession = true
                 )
                 return
             }
@@ -390,10 +391,6 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private fun flushGradePlaybackSeconds(nowElapsed: Long = safeElapsedRealtime(), songOverride: Song? = null) {
         val targetSong = songOverride ?: activePlayingSong ?: mutableState.value.currentSong ?: return
         val effectiveMs = currentEffectivePlayedMs(nowElapsed)
-        if (!currentSegmentListenStatRecorded && effectiveMs >= 15_000L) {
-            currentSegmentListenStatRecorded = true
-            VipManager.listenStats.recordPlay(currentUser, targetSong, effectiveMs)
-        }
         if (effectiveMs < 10_000L) return
         val totalEligibleSec = effectiveMs / 1000L
         val deltaSec = totalEligibleSec - currentSegmentRecordedGradeSec
@@ -418,7 +415,6 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         songPlaybackStartTimestamp = nowElapsed
         accumulatedPlayedMs = 0L
         currentSegmentRecordedGradeSec = 0L
-        currentSegmentListenStatRecorded = false
         lastAccumulateTickMs = nowElapsed
         lastRecordTimestamp = nowElapsed
         csccSegmentOpen = true
@@ -455,14 +451,6 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             flushGradePlaybackSeconds(nowElapsed, targetSong)
         }
         val playedMs = accumulatedPlayedMs.coerceAtLeast(0L)
-        if (targetSong != null && !currentSegmentListenStatRecorded) {
-            val isShortTrackCompleted = notifySongCompleted &&
-                ((targetSong.durationMs in 1L..15_000L && playedMs >= 2_000L) || playedMs >= 5_000L)
-            if (playedMs >= 15_000L || isShortTrackCompleted) {
-                currentSegmentListenStatRecorded = true
-                VipManager.listenStats.recordPlay(currentUser, targetSong, playedMs)
-            }
-        }
         if (targetSong != null && csccSegmentOpen && playedMs >= 10_000L) {
             KugouCsccReporter.onSongEnd(targetSong, playedMs, state = state)
             accumulatedPlayedMs = 0L
@@ -773,6 +761,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     val hadPreviousUser = previousUser != null
                     currentUser = state.currentId
                     if (hadPreviousUser) {
+                        ListenStatsCoordinator.onAccountChanged(previousUser, state.currentId)
                         settleCurrentPlaybackSegment(
                             state = "手动停止",
                             clearActiveSong = true,
@@ -1258,7 +1247,12 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             .apply()
     }
 
-    fun playSong(song: Song, queue: List<Song> = emptyList(), seekToPositionMs: Long = 0L) {
+    fun playSong(
+        song: Song,
+        queue: List<Song> = emptyList(),
+        seekToPositionMs: Long = 0L,
+        preserveListenSession: Boolean = false
+    ) {
         val player = activePlayer ?: run {
             mutableState.value = mutableState.value.copy(error = "播放器正在连接，请稍后重试")
             return
@@ -1414,6 +1408,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     resolvedSong.effectiveClimaxStartMs
                 } else 0L
 
+                ListenStatsCoordinator.registerSongs(list)
+                ListenStatsCoordinator.prepareMediaItemLoad(resolvedSong, preserveSession = preserveListenSession)
                 if (targetSeekMs > 0L) {
                     player.setMediaItem(item, targetSeekMs)
                 } else {
@@ -1917,7 +1913,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val currentPosition = currentSmoothPositionMs().takeIf { it > 0L } ?: mutableState.value.currentPositionMs
         VipManager.music.clearSongPlaybackCache(currentSong)
         val updatedSong = currentSong.copy(playUrl = "")
-        playSong(updatedSong, mutableState.value.playlistQueue, seekToPositionMs = currentPosition)
+        playSong(updatedSong, mutableState.value.playlistQueue, seekToPositionMs = currentPosition, preserveListenSession = true)
     }
 
     fun toggleTranslation() {
@@ -2520,7 +2516,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val currentSong = mutableState.value.currentSong ?: return
         val currentPosition = currentSmoothPositionMs().takeIf { it > 0L } ?: mutableState.value.currentPositionMs
         val updatedSong = currentSong.copy(playUrl = "")
-        playSong(updatedSong, mutableState.value.playlistQueue, seekToPositionMs = currentPosition)
+        playSong(updatedSong, mutableState.value.playlistQueue, seekToPositionMs = currentPosition, preserveListenSession = true)
     }
 
     private fun triggerClimaxSmoothFadeIn() {
@@ -2902,6 +2898,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                             }
                             prefetchedNextQueueIndex = nextIndex
                             prefetchedNextSongKey = "${nextSong.id}_${nextSong.hash}"
+                            ListenStatsCoordinator.registerSong(resolvedNextSong)
                             player.addMediaItem(nextItem)
                             if (playerOverride == null && !useAccompany) {
                                 viewModelScope.launch(Dispatchers.IO) {

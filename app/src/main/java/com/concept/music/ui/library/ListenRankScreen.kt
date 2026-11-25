@@ -85,7 +85,7 @@ private fun formatListenDurationLabel(totalMs: Long): String {
 
 /**
  * 微风本机「听歌排行」全新无边框音乐数据画报页：
- * - 数据完全源于微风本机真实播放记录（有效播放满 15s 自动记次），未登录亦可直接浏览；
+ * - 数据完全源于微风本机真实播放记录（单曲有效收听满 50% 或 4 分钟自动记次，短曲播满 80% 或完播记次），未登录亦可直接浏览；
  * - 顶部沉浸式成就画报头 + 精致 Top 3 错落领奖台 + No.4 及以后通透开放式排行列表，深浅双主题与手机/平板全面适配。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -505,7 +505,7 @@ private fun ListenRankHeroCard(
                         text = if (trackCount > 0) {
                             "上榜 $trackCount 首歌 · $artistCount 位歌手 · 累计 ${formatListenDurationLabel(totalPlayedMs)}"
                         } else {
-                            "在微风中听满 15 秒将自动累计本机排行"
+                            "单曲有效听满 50% 或 4 分钟将自动累计本机排行"
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 11.5.sp,
@@ -1351,7 +1351,7 @@ private fun ListenRankEmptyPlaceholder(
                 fontWeight = FontWeight.ExtraBold
             )
             Text(
-                text = "在微风音乐播放任意歌曲满 15 秒，即可自动统计到本机周榜、月榜与总排行",
+                text = "在微风音乐有效收听单曲满 50% 或 4 分钟（短曲播完），即可自动统计到本机周榜、月榜与总排行",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.5.sp,
                 textAlign = TextAlign.Center,

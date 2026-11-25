@@ -898,6 +898,7 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         activeServiceInstance = this
         fallbackAppContext = applicationContext
+        com.concept.music.data.vip.VipManager.initialize(applicationContext)
 
         val prefs = applicationContext.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
         val pauseOnHeadsetDisconnect = prefs.getBoolean("pause_on_headset_disconnect", true)
@@ -984,6 +985,15 @@ class PlaybackService : MediaSessionService() {
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 isAppPlaybackActive = isPlaying
+                val currentItem = exoPlayer.currentMediaItem
+                val playerDur = exoPlayer.duration.takeIf { it > 0L } ?: 0L
+                ListenStatsCoordinator.onPlayingStateChanged(
+                    isPlaying = isPlaying,
+                    mediaId = currentItem?.mediaId,
+                    songFallback = buildFallbackSongFromMediaItem(currentItem, playerDur),
+                    durationMs = playerDur,
+                    speed = exoPlayer.playbackParameters.speed
+                )
                 if (isPlaying) {
                     if (currentAudioFocusMode == AudioFocusMode.DUCK) {
                         // 仅当当前未持有 DUCK 焦点时才申请，避免缓冲/切歌瞬间强抢导航语音焦点
@@ -995,12 +1005,14 @@ class PlaybackService : MediaSessionService() {
                         audioFocusDuckGain = 1.0f
                     }
                     startBackgroundDesktopLyricProgressTicker()
+                    scheduleListenStatsTick()
                 } else {
                     // 仅在真正暂停/停止（!playWhenReady）时弃焦；缓冲与切歌过渡期间保持现有焦点与闪避状态
                     if (currentAudioFocusMode == AudioFocusMode.DUCK && !exoPlayer.playWhenReady) {
                         abandonDuckAudioFocusRequest()
                     }
                     stopBackgroundDesktopLyricProgressTicker()
+                    stopListenStatsTick()
                     SystemLyricBridge.syncProgressFromService(exoPlayer.currentPosition, false)
                 }
                 refreshMediaSessionCustomLayoutInternal()
@@ -1008,19 +1020,56 @@ class PlaybackService : MediaSessionService() {
 
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
                 // 托管的「播完当前歌曲再停」在单曲循环或自动切歌时直接拦截停播，并通知 ViewModel 不得续播下一首
+                var stoppedBySleep = false
                 if ((reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
                         reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) &&
                     consumePendingTrackEndStop(markViewModelAck = PlaybackCoordinator.onSkipToNextDelegate != null)
                 ) {
+                    stoppedBySleep = true
                     exoPlayer.pause()
                     exoPlayer.volume = 1f
+                }
+                val playerDur = exoPlayer.duration.takeIf { it > 0L } ?: 0L
+                val isEffectivelyPlaying = exoPlayer.isPlaying && !stoppedBySleep
+                ListenStatsCoordinator.onMediaItemTransition(
+                    mediaId = mediaItem?.mediaId,
+                    songFallback = buildFallbackSongFromMediaItem(mediaItem, playerDur),
+                    reason = reason,
+                    durationMs = playerDur,
+                    speed = exoPlayer.playbackParameters.speed,
+                    isPlaying = isEffectivelyPlaying
+                )
+                if (isEffectivelyPlaying) {
+                    scheduleListenStatsTick()
+                } else {
+                    stopListenStatsTick()
+                }
+            }
+
+            override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                ListenStatsCoordinator.onPlaybackSpeedChanged(playbackParameters.speed)
+                if (exoPlayer.isPlaying) {
+                    scheduleListenStatsTick()
                 }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 bgAutoAdvanceRunnable?.let { mainHandler?.removeCallbacks(it) }
                 bgAutoAdvanceRunnable = null
-                if (playbackState == Player.STATE_ENDED) {
+                if (playbackState == Player.STATE_READY) {
+                    val playerDur = exoPlayer.duration.takeIf { it > 0L } ?: 0L
+                    if (playerDur > 0L) {
+                        ListenStatsCoordinator.onTrackDurationUpdated(
+                            mediaId = exoPlayer.currentMediaItem?.mediaId,
+                            durationMs = playerDur
+                        )
+                    }
+                    if (exoPlayer.isPlaying) {
+                        scheduleListenStatsTick()
+                    }
+                } else if (playbackState == Player.STATE_ENDED) {
+                    stopListenStatsTick()
+                    ListenStatsCoordinator.onPlaybackEnded()
                     if (consumePendingTrackEndStop(markViewModelAck = PlaybackCoordinator.onSkipToNextDelegate != null)) {
                         exoPlayer.pause()
                         exoPlayer.volume = 1f
@@ -1347,6 +1396,60 @@ class PlaybackService : MediaSessionService() {
         mainHandler?.removeCallbacks(bgLyricProgressRunnable)
     }
 
+    private fun buildFallbackSongFromMediaItem(
+        item: androidx.media3.common.MediaItem?,
+        durationMs: Long
+    ): com.concept.music.data.model.Song? {
+        val id = item?.mediaId?.takeIf { it.isNotBlank() } ?: return null
+        val meta = item.mediaMetadata
+        val title = meta.title?.toString()?.trim().orEmpty()
+        val artist = meta.artist?.toString()?.trim().orEmpty()
+        if (title.isBlank() && artist.isBlank()) return null
+        return com.concept.music.data.model.Song(
+            id = id,
+            title = title,
+            artist = artist,
+            album = meta.albumTitle?.toString()?.trim().orEmpty(),
+            coverUrl = meta.artworkUri?.toString().orEmpty(),
+            durationMs = durationMs.coerceAtLeast(0L)
+        )
+    }
+
+    /**
+     * 低功耗本机听歌统计检查点定时器：
+     * - 仅在真正播放出声时按需调度（达标前按剩余门槛精确唤醒 <= 10s，达标后每 30s 轻量回补时长）；
+     * - 暂停/停止时彻底取消（零唤醒）；熄屏播放期间持续运行，确保息屏听歌与划卡后台续播零漏记。
+     */
+    private val listenStatsTickRunnable = object : Runnable {
+        override fun run() {
+            val p = player ?: return
+            if (!p.isPlaying) return
+            val nextDelayMs = ListenStatsCoordinator.onPeriodicTick(
+                mediaId = p.currentMediaItem?.mediaId,
+                durationMs = p.duration.takeIf { it > 0L } ?: 0L,
+                speed = p.playbackParameters.speed
+            )
+            if (nextDelayMs > 0L && p.isPlaying) {
+                mainHandler?.postDelayed(this, nextDelayMs)
+            }
+        }
+    }
+
+    private fun scheduleListenStatsTick() {
+        val h = mainHandler ?: return
+        h.removeCallbacks(listenStatsTickRunnable)
+        val p = player ?: return
+        if (!p.isPlaying) return
+        val nextDelayMs = ListenStatsCoordinator.computeNextTickDelayMs()
+        if (nextDelayMs > 0L) {
+            h.postDelayed(listenStatsTickRunnable, nextDelayMs)
+        }
+    }
+
+    private fun stopListenStatsTick() {
+        mainHandler?.removeCallbacks(listenStatsTickRunnable)
+    }
+
     @OptIn(UnstableApi::class)
     internal fun refreshMediaSessionCustomLayoutInternal() {
         val session = mediaSession ?: return
@@ -1428,6 +1531,8 @@ class PlaybackService : MediaSessionService() {
         bgAutoAdvanceRunnable?.let { mainHandler?.removeCallbacks(it) }
         bgAutoAdvanceRunnable = null
         stopBackgroundDesktopLyricProgressTicker()
+        stopListenStatsTick()
+        ListenStatsCoordinator.onServiceDestroyed()
         if (screenStateReceiverRegistered) {
             runCatching { unregisterReceiver(screenStateReceiver) }
             screenStateReceiverRegistered = false

@@ -346,6 +346,8 @@ object PlaybackCoordinator {
                             .build()
                     )
                     .build()
+                ListenStatsCoordinator.registerSongs(queue)
+                ListenStatsCoordinator.prepareMediaItemLoad(targetSong, preserveSession = false)
                 player.setMediaItem(item)
                 player.playbackParameters = androidx.media3.common.PlaybackParameters(savedSpeed, savedPitch)
                 player.repeatMode = if (playMode == PlayMode.REPEAT_ONE) {
