@@ -5366,6 +5366,201 @@ class MusicApiRepository(
         "19"     // 复古 / City Pop / 世界音乐
     )
 
+    /**
+     * 引擎一召回：官方私人 FM 流（/v2/personal_recommend），不再伪造 is_overplay=1 / playtime=180
+     */
+    internal suspend fun recallPersonalFmStream(
+        mode: com.concept.music.data.recommendation.RecommendationMode,
+        anchorSong: Song?,
+        batchIdx: Int,
+        subIdx: Int
+    ): List<Song> {
+        val session = accounts.context()?.session
+        val d = device()
+        val clientTime = System.currentTimeMillis() / 1000
+        val uidNum = session?.userId?.toLongOrNull() ?: 0L
+        val effectiveApiMode = if (mode == com.concept.music.data.recommendation.RecommendationMode.DISCOVERY) "small" else "normal"
+        val reqPoolId = when (mode) {
+            com.concept.music.data.recommendation.RecommendationMode.FAMILIAR -> 1
+            com.concept.music.data.recommendation.RecommendationMode.DISCOVERY -> 2
+            com.concept.music.data.recommendation.RecommendationMode.BALANCED -> (batchIdx + subIdx) % 2
+        }
+        val body = JsonObject().apply {
+            addProperty("appid", KugouSigner.APP_ID)
+            addProperty("clienttime", clientTime)
+            addProperty("mid", d.mid)
+            addProperty("action", "play")
+            addProperty("recommend_source_locked", if (mode != com.concept.music.data.recommendation.RecommendationMode.BALANCED) 1 else 0)
+            addProperty("song_pool_id", reqPoolId)
+            addProperty("callerid", 0)
+            addProperty("m_type", 1)
+            addProperty("platform", "ios")
+            addProperty("area_code", 1)
+            addProperty("remain_songcnt", 0)
+            addProperty("clientver", KugouSigner.CLIENT_VERSION)
+            addProperty("is_overplay", 0)
+            addProperty("mode", effectiveApiMode)
+            addProperty("fakem", "ca981cfc583a4c37f28d2d49000013c16a0a")
+            addProperty("key", KugouSigner.paramsKey(clientTime))
+            if (anchorSong != null && !LocalBlacklistFilter.isBlocked(anchorSong)) {
+                if (anchorSong.hash.isNotBlank()) addProperty("hash", anchorSong.hash.lowercase())
+                val sid = anchorSong.audioId.takeIf { it > 0L } ?: anchorSong.albumAudioId
+                if (sid > 0L) addProperty("songid", sid)
+            }
+            if (session != null) {
+                addProperty("userid", uidNum)
+                addProperty("kguid", uidNum)
+                addProperty("token", session.token)
+                addProperty("vip_type", 6)
+            }
+        }
+        val response = transport.callAdvanced(
+            path = "/v2/personal_recommend",
+            session = session,
+            body = body,
+            method = "POST",
+            headers = mapOf("x-router" to "persnfm.service.kugou.com"),
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+        val parsed = parseSongs(response.data)
+        return if (parsed.isNotEmpty()) parsed else parseSongs(response.body)
+    }
+
+    /**
+     * 引擎二召回：协同过滤相似曲风召回（/recommend, songlistairec.kugou.com）
+     */
+    internal suspend fun recallAiSeedRecommend(seedSongs: List<Song>): List<Song> {
+        val session = accounts.context()?.session
+        val d = device()
+        val clientTime = System.currentTimeMillis() / 1000
+        val uidNum = session?.userId?.toLongOrNull() ?: 0L
+        val seedIds = seedSongs.mapNotNull { s ->
+            s.albumAudioId.takeIf { it > 0L } ?: s.audioId.takeIf { it > 0L }
+        }.distinct().take(10)
+        if (seedIds.isEmpty()) return emptyList()
+        val recSourceArr = JsonArray().apply {
+            seedIds.forEach { idNum -> add(JsonObject().apply { addProperty("ID", idNum) }) }
+        }
+        val body = JsonObject().apply {
+            addProperty("platform", "ios")
+            addProperty("clientver", KugouSigner.CLIENT_VERSION)
+            addProperty("clienttime", clientTime)
+            addProperty("userid", uidNum)
+            add("client_playlist", JsonArray())
+            addProperty("source_type", 2)
+            addProperty("playlist_ver", 2)
+            addProperty("area_code", 1)
+            addProperty("appid", KugouSigner.APP_ID)
+            addProperty("key", KugouSigner.paramsKey(clientTime))
+            addProperty("mid", d.mid)
+            add("recommend_source", recSourceArr)
+        }
+        val response = transport.callAdvanced(
+            path = "/recommend",
+            method = "POST",
+            session = session,
+            body = body,
+            headers = mapOf("x-router" to "songlistairec.kugou.com"),
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+        val parsed = parseSongs(response.data)
+        return if (parsed.isNotEmpty()) parsed else parseSongs(response.body)
+    }
+
+    /**
+     * 引擎三召回：概念版原生 AI 个性化推荐（/concepts/v1/ai/recommend_song）
+     */
+    internal suspend fun recallConceptAiSongs(page: Int): List<Song> {
+        val session = accounts.context()?.session
+        val body = json(
+            "apiver" to 2,
+            "source" to 2,
+            "pagesize" to 30,
+            "page" to page.coerceAtLeast(1)
+        )
+        val response = transport.callAdvanced(
+            path = "/concepts/v1/ai/recommend_song",
+            method = "POST",
+            session = session,
+            body = body,
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+        val parsed = parseSongs(response.data)
+        return if (parsed.isNotEmpty()) parsed else parseSongs(response.body)
+    }
+
+    /**
+     * 引擎四召回：传统单卡推荐（/singlecardrec.service/v1/single_card_recommend）
+     */
+    internal suspend fun recallLegacySingleCard(cardId: String, seedSongs: List<Song>): List<Song> {
+        val session = accounts.context()?.session
+        val d = device()
+        val clientTime = System.currentTimeMillis() / 1000
+        val uidNum = session?.userId?.toLongOrNull() ?: 0L
+        val clientPlaylistArr = JsonArray().apply {
+            seedSongs.take(6).forEach { s ->
+                if (s.hash.isNotBlank()) {
+                    add(JsonObject().apply {
+                        addProperty("hash", s.hash.lowercase())
+                        val aid = s.albumAudioId.takeIf { it > 0L } ?: s.audioId
+                        if (aid > 0L) addProperty("album_audio_id", aid)
+                    })
+                }
+            }
+        }
+        val body = JsonObject().apply {
+            addProperty("appid", KugouSigner.APP_ID)
+            addProperty("clientver", KugouSigner.CLIENT_VERSION)
+            addProperty("platform", "android")
+            addProperty("clienttime", clientTime)
+            addProperty("userid", uidNum)
+            addProperty("key", KugouSigner.paramsKey(clientTime))
+            addProperty("fakem", "60f7ebf1f812edbac3c63a7310001701760f")
+            addProperty("area_code", 1)
+            addProperty("mid", d.mid)
+            addProperty("uuid", "-")
+            add("client_playlist", clientPlaylistArr)
+            addProperty("u_info", "a0c35cd40af564444b5584c2754dedec")
+        }
+        val response = transport.callAdvanced(
+            path = "/singlecardrec.service/v1/single_card_recommend",
+            method = "POST",
+            session = session,
+            query = mapOf(
+                "card_id" to cardId,
+                "fakem" to "60f7ebf1f812edbac3c63a7310001701760f",
+                "area_code" to "1",
+                "platform" to "ios"
+            ),
+            body = body,
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+        val parsed = parseSongs(response.data)
+        return if (parsed.isNotEmpty()) parsed else parseSongs(response.body)
+    }
+
+    /**
+     * 引擎五召回：风格日推（/everydayrec.service/everyday_style_recommend）
+     */
+    internal suspend fun recallEverydayStyleSongs(tagIds: String): List<Song> {
+        val session = accounts.context()?.session
+        val response = transport.callAdvanced(
+            path = "/everydayrec.service/everyday_style_recommend",
+            method = "POST",
+            session = session,
+            query = mapOf("tagids" to tagIds),
+            body = JsonObject(),
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+        val parsed = parseSongs(response.data)
+        return if (parsed.isNotEmpty()) parsed else parseSongs(response.body)
+    }
+
     suspend fun personalFm(
         size: Int = 20,
         mode: String = "normal",

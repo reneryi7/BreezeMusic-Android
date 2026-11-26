@@ -175,6 +175,7 @@ data class UserListeningPreference(
     val langRaw: String = "",
     val styleRaw: String = "",
     val songLangRaw: String = "",
+    val inactiveSingerList: String = "",
     val rawJson: String = ""
 ) {
     val modeLabel: String

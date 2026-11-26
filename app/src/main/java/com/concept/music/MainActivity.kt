@@ -258,6 +258,18 @@ fun MainContent(
         libraryViewModel.onLoginRoute(currentRoute == "login")
     }
 
+    // 绑定猜你喜欢无限续播回调：当私人 FM 播放队列剩余 <= 3 首时静默追加下一批 20 首
+    DisposableEffect(musicPlayerViewModel, homeViewModel) {
+        musicPlayerViewModel.onPersonalFmQueueNeedsRefill = { currentQueue ->
+            homeViewModel.refillMorePersonalFmSongs(currentQueue) { moreSongs ->
+                musicPlayerViewModel.appendPersonalFmQueueSongs(moreSongs)
+            }
+        }
+        onDispose {
+            musicPlayerViewModel.onPersonalFmQueueNeedsRefill = null
+        }
+    }
+
     // 独立叶子组件静默预热首页首屏封面图到 Coil 缓存，避免在根组件 MainContent 订阅高频列表引发整树重组
     CoverPrewarmEffect(homeViewModel = homeViewModel)
 
@@ -742,6 +754,9 @@ fun MainContent(
                                 onSongClick = { song, list ->
                                     musicPlayerViewModel.playSong(song, list)
                                 },
+                                onPlayPersonalFm = { song, list ->
+                                    musicPlayerViewModel.playSong(song, list, isPersonalFm = true)
+                                },
                                 onSearchClick = {
                                     searchViewModel.resetTabToDefault()
                                     navController.navigate("search") { launchSingleTop = true }
@@ -829,6 +844,9 @@ fun MainContent(
                             viewModel = homeViewModel,
                             onSongClick = { song, list ->
                                 musicPlayerViewModel.playSong(song, list)
+                            },
+                            onPlayPersonalFm = { song, list ->
+                                musicPlayerViewModel.playSong(song, list, isPersonalFm = true)
                             },
                             onSearchClick = {
                                 searchViewModel.resetTabToDefault()

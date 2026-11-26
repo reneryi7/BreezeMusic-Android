@@ -126,6 +126,7 @@ data class PlayerUiState(
     val currentIndex: Int = 0,
     val recentQueues: List<SavedPlayQueue> = emptyList(),
     val activeQueueId: String = "",
+    val isPersonalFmQueue: Boolean = false,
     val playMode: PlayMode = PlayMode.REPEAT_ALL,
     val preferredQuality: AudioQuality = AudioQuality.HIGH,
     val currentQualityLabel: String = "高品 320K",
@@ -439,18 +440,70 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    internal var onPersonalFmQueueNeedsRefill: ((currentQueue: List<Song>) -> Unit)? = null
+    private var lastPersonalFmRefillRequestAtMs: Long = 0L
+
+    fun appendPersonalFmQueueSongs(moreSongs: List<Song>) {
+        if (moreSongs.isEmpty()) return
+        val state = mutableState.value
+        if (!state.isPersonalFmQueue) return
+        val existingKeys = state.playlistQueue.map { it.hash.ifBlank { it.id }.lowercase() }.toHashSet()
+        val fresh = moreSongs.filter { it.hash.ifBlank { it.id }.lowercase() !in existingKeys }
+        if (fresh.isEmpty()) return
+        val mergedQueue = state.playlistQueue + fresh
+        val (updatedRecent, activeId) = syncActiveQueueInRecent(
+            queue = mergedQueue,
+            currentIndex = state.currentIndex,
+            currentActiveId = state.activeQueueId,
+            existingRecent = state.recentQueues
+        )
+        mutableState.value = state.copy(
+            playlistQueue = mergedQueue,
+            recentQueues = updatedRecent,
+            activeQueueId = activeId
+        )
+        persistPlaybackStateAsync()
+        prefetchNextSong(mergedQueue, state.currentIndex)
+    }
+
+    private fun maybeTriggerPersonalFmInfiniteRefill(queue: List<Song>, currentIndex: Int, isPersonalFm: Boolean) {
+        if (!isPersonalFm || queue.isEmpty()) return
+        val remaining = (queue.size - 1 - currentIndex).coerceAtLeast(0)
+        val now = System.currentTimeMillis()
+        if (remaining <= 3 && now - lastPersonalFmRefillRequestAtMs >= 5_000L) {
+            lastPersonalFmRefillRequestAtMs = now
+            onPersonalFmQueueNeedsRefill?.invoke(queue)
+        }
+    }
+
     internal fun settleCurrentPlaybackSegment(
         state: String = "完整播放",
         clearActiveSong: Boolean = true,
-        notifySongCompleted: Boolean = false
+        notifySongCompleted: Boolean = false,
+        isRepeat: Boolean = false
     ): Long {
         val nowElapsed = safeElapsedRealtime()
         accumulateActiveSlice(nowElapsed)
         val targetSong = activePlayingSong ?: mutableState.value.currentSong
+        val isFromPersonalFm = mutableState.value.isPersonalFmQueue
         if (targetSong != null) {
             flushGradePlaybackSeconds(nowElapsed, targetSong)
         }
         val playedMs = accumulatedPlayedMs.coerceAtLeast(0L)
+        if (targetSong != null && playedMs >= 1_000L && (clearActiveSong || notifySongCompleted || isRepeat)) {
+            val isManualSkip = state == "切换下一首" && !notifySongCompleted && !isRepeat
+            runCatching {
+                com.concept.music.data.recommendation.PersonalFmFeedbackBridge.onTrackSettled(
+                    song = targetSong,
+                    playedMs = playedMs,
+                    durationMs = targetSong.durationMs.takeIf { it > 0L } ?: mutableState.value.durationMs,
+                    isFromPersonalFm = isFromPersonalFm,
+                    isNaturalComplete = notifySongCompleted,
+                    isRepeat = isRepeat,
+                    isManualSkip = isManualSkip
+                )
+            }
+        }
         if (targetSong != null && csccSegmentOpen && playedMs >= 10_000L) {
             KugouCsccReporter.onSongEnd(targetSong, playedMs, state = state)
             accumulatedPlayedMs = 0L
@@ -482,7 +535,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 settleCurrentPlaybackSegment(
                     state = "完整播放",
                     clearActiveSong = false,
-                    notifySongCompleted = true
+                    notifySongCompleted = true,
+                    isRepeat = true
                 )
                 // 单曲循环下也严格响应「定时结束播完当前歌曲即停」（包含 Service 先行消费的防竞态确认）
                 val shouldStopForSleep = (mutableState.value.sleepPendingStopAtTrackEnd && mutableState.value.sleepTimerRemainingSec <= 0L) ||
@@ -598,6 +652,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         loadLyric(resolvedSong)
         loadComments(isRefresh = true)
         prefetchNextSong(updatedQueue, newIdx)
+        maybeTriggerPersonalFmInfiniteRefill(updatedQueue, newIdx, mutableState.value.isPersonalFmQueue)
     }
 
     init {
@@ -1251,7 +1306,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         song: Song,
         queue: List<Song> = emptyList(),
         seekToPositionMs: Long = 0L,
-        preserveListenSession: Boolean = false
+        preserveListenSession: Boolean = false,
+        isPersonalFm: Boolean = false
     ) {
         val player = activePlayer ?: run {
             mutableState.value = mutableState.value.copy(error = "播放器正在连接，请稍后重试")
@@ -1306,6 +1362,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             currentIndex = index,
             recentQueues = updatedRecentQueues,
             activeQueueId = newActiveQueueId,
+            isPersonalFmQueue = isPersonalFm,
             currentSong = song,
             currentPositionMs = seekToPositionMs,
             durationMs = song.durationMs,
@@ -1714,7 +1771,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         nextShuffleIndex = -1
         val expectedNextSong = queue.getOrNull(nextIndex) ?: return
 
-        playSong(expectedNextSong, queue)
+        playSong(expectedNextSong, queue, isPersonalFm = state.isPersonalFmQueue)
+        maybeTriggerPersonalFmInfiniteRefill(queue, nextIndex, state.isPersonalFmQueue)
     }
 
     fun skipToPrevious() {
@@ -1732,7 +1790,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
         val expectedPrevSong = queue.getOrNull(prevIndex) ?: return
 
-        playSong(expectedPrevSong, queue)
+        playSong(expectedPrevSong, queue, isPersonalFm = state.isPersonalFmQueue)
     }
 
     /**
@@ -1742,17 +1800,17 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val state = mutableState.value
         val currentQueue = state.playlistQueue
         if (currentQueue.isEmpty()) {
-            playSong(song, listOf(song))
+            playSong(song, listOf(song), isPersonalFm = state.isPersonalFmQueue)
             return
         }
         val existingIdx = currentQueue.indexOfFirst { it.id == song.id }
         if (existingIdx != -1) {
-            playSong(song, currentQueue)
+            playSong(song, currentQueue, isPersonalFm = state.isPersonalFmQueue)
         } else {
             val mutableQueue = currentQueue.toMutableList()
             val insertIdx = (state.currentIndex + 1).coerceIn(0, mutableQueue.size)
             mutableQueue.add(insertIdx, song)
-            playSong(song, mutableQueue)
+            playSong(song, mutableQueue, isPersonalFm = state.isPersonalFmQueue)
         }
     }
 
@@ -1805,7 +1863,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
         if (index == state.currentIndex) {
             val newIndex = index.coerceAtMost(queue.size - 1)
-            playSong(queue[newIndex], queue)
+            playSong(queue[newIndex], queue, isPersonalFm = state.isPersonalFmQueue)
         } else {
             val newCurrentIndex = if (index < state.currentIndex) {
                 (state.currentIndex - 1).coerceAtLeast(0)

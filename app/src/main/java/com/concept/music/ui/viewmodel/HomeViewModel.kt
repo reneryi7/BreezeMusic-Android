@@ -4,19 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.LocalBlacklistFilter
-import com.concept.music.data.kugou.editContentBlacklist
-import com.concept.music.data.kugou.fetchContentBlacklist
 import com.concept.music.data.kugou.fetchDailyRecommendHistoryList
 import com.concept.music.data.kugou.fetchDailyRecommendHistorySongs
-import com.concept.music.data.kugou.fetchUserListeningPreference
 import com.concept.music.data.kugou.sendPersonalFmFeedback
 import com.concept.music.data.kugou.suspendRunCatching
-import com.concept.music.data.kugou.updateUserListeningPreference
 import com.concept.music.data.model.BlacklistEntry
 import com.concept.music.data.model.DailyHistoryEntry
 import com.concept.music.data.model.FmChannel
 import com.concept.music.data.model.RankItem
 import com.concept.music.data.model.Song
+import com.concept.music.data.recommendation.PersonalTasteProfileRepository
+import com.concept.music.data.recommendation.RecommendationMode
 import com.concept.music.data.vip.VipManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,7 +24,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
@@ -43,7 +40,8 @@ data class PersonalFmDislikeUndoToken(
 )
 
 class HomeViewModel : ViewModel() {
-    // 每日推荐（独立刷新边界，不受猜你喜欢屏蔽列表影响）
+    // 每日推荐（今日日推应用权重=0硬屏蔽与黑名单过滤；历史日推快照保持原貌绝不篡改）
+    private val _rawDailySongs = MutableStateFlow<List<Song>>(emptyList())
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val dailyRecommendSongs: StateFlow<List<Song>> = _songs.asStateFlow()
 
@@ -63,7 +61,7 @@ class HomeViewModel : ViewModel() {
     private val _dailyHistoryLoading = MutableStateFlow(false)
     val dailyHistoryLoading: StateFlow<Boolean> = _dailyHistoryLoading.asStateFlow()
 
-    // 猜你喜欢（官方私人 FM：独立刷新与专属偏好调校闭环）
+    // 猜你喜欢（端云混合推荐引擎：独立刷新、长期画像精排与偏好闭环）
     private val _personalFmSongs = MutableStateFlow<List<Song>>(emptyList())
     val personalFmSongs: StateFlow<List<Song>> = _personalFmSongs.asStateFlow()
 
@@ -73,13 +71,15 @@ class HomeViewModel : ViewModel() {
     private val _personalFmRefreshing = MutableStateFlow(false)
     val personalFmRefreshing: StateFlow<Boolean> = _personalFmRefreshing.asStateFlow()
 
-    // 推荐模式：0=默认平衡, 1=偏好熟悉（相似风格非重复新曲）, 2=更多尝鲜（跨风格陌生探索）
+    // 推荐模式：0=默认平衡, 1=偏好熟悉, 2=更多尝鲜
     private val _fmSongPoolId = MutableStateFlow(0)
     val fmSongPoolId: StateFlow<Int> = _fmSongPoolId.asStateFlow()
 
     private var dailyHistoryJob: Job? = null
     private var fmPoolJob: Job? = null
     private var fmPreferenceSyncJob: Job? = null
+    private var fmRefillJob: Job? = null
+    private var lastObservedPrefSignature: String = ""
 
     // 新歌速递（独立刷新边界）
     private val _selectedNewSongPeriod = MutableStateFlow("CHINESE")
@@ -126,10 +126,39 @@ class HomeViewModel : ViewModel() {
     init {
         viewModelScope.launch(Dispatchers.IO) {
             val initialUserId = accountState.value.currentId
+            val initialLoggedIn = accountState.value.auth == AuthState.READY
+            // 冷启动 0ms 先从磁盘水合持久化偏好与黑名单，彻底消除首屏模式竞态
+            val hydratedPref = VipManager.recommendationPrefs.activateUser(initialUserId, isLoggedIn = initialLoggedIn)
+            _fmSongPoolId.value = hydratedPref.mode.code
+            lastObservedPrefSignature = buildPreferenceSignature(VipManager.recommendationPrefs.uiState.value)
+
             hydrateFromLocalCache(initialUserId)
             loadedUser = initialUserId
             hasInitialLoaded = true
             refresh(isBackgroundRevalidate = hasAnyContentLoaded(), allowWhileRestoring = true)
+
+            // 监听设置页/云端偏好变更，实时联动模式徽章、今日日推硬屏蔽与猜你喜欢曲池
+            launch {
+                VipManager.recommendationPrefs.uiState.collect { prefState ->
+                    val currentUid = accountState.value.currentId
+                    if (prefState.userId != currentUid) return@collect
+                    val nextMode = prefState.preference.mode.code
+                    val sig = buildPreferenceSignature(prefState)
+                    val modeChanged = nextMode != _fmSongPoolId.value
+                    val prefChanged = sig != lastObservedPrefSignature
+                    lastObservedPrefSignature = sig
+                    if (modeChanged) {
+                        _fmSongPoolId.value = nextMode
+                    }
+                    if (prefChanged && hasInitialLoaded) {
+                        reapplyDailyRecommendHardFilter(currentUid)
+                        applyPersonalFmBlacklistFilterOnly()
+                        if (modeChanged && !_personalFmRefreshing.value) {
+                            refreshPersonalFm()
+                        }
+                    }
+                }
+            }
 
             accountState.collect { state ->
                 if (state.auth != AuthState.RESTORING) {
@@ -139,12 +168,18 @@ class HomeViewModel : ViewModel() {
                         dailyHistoryJob?.cancel()
                         fmPoolJob?.cancel()
                         fmPreferenceSyncJob?.cancel()
+                        fmRefillJob?.cancel()
                         LocalBlacklistFilter.clear()
                         _selectedDailyHistory.value = null
                         _dailyHistoryEntries.value = emptyList()
                         _dailyHistorySongs.value = emptyList()
                         _dailyHistoryLoading.value = false
-                        _fmSongPoolId.value = 0
+                        val userPref = VipManager.recommendationPrefs.activateUser(
+                            state.currentId,
+                            isLoggedIn = state.auth == AuthState.READY
+                        )
+                        _fmSongPoolId.value = userPref.mode.code
+                        lastObservedPrefSignature = buildPreferenceSignature(VipManager.recommendationPrefs.uiState.value)
                         hydrateFromLocalCache(state.currentId)
                         if (state.auth == AuthState.READY) {
                             syncPersonalFmPreferenceAndBlacklistSilently(state.currentId)
@@ -160,32 +195,78 @@ class HomeViewModel : ViewModel() {
         }
     }
 
+    private fun buildPreferenceSignature(state: com.concept.music.data.recommendation.RecommendationPreferenceUiState): String {
+        val p = state.preference
+        return "${p.mode.code}|${p.songLangWeights.toSortedMap()}|${p.enabledStyleIds.sorted()}|${p.inactiveSingers.sorted()}|${state.blacklistedSongs.size}|${state.blacklistedSingers.size}"
+    }
+
     private fun syncPersonalFmPreferenceAndBlacklistSilently(expectedUserId: String?) {
         fmPreferenceSyncJob?.cancel()
         fmPreferenceSyncJob = viewModelScope.launch(Dispatchers.IO) {
-            // 错峰让出首屏与核心登录态同步（profile / vip / userPlaylists），避免登录瞬间高并发请求拥堵
-            delay(650L)
+            delay(450L)
             if (accountState.value.currentId != expectedUserId || accountState.value.auth != AuthState.READY) {
                 return@launch
             }
-            supervisorScope {
-                val prefJob = launch {
-                    val pref = suspendRunCatching { VipManager.music.fetchUserListeningPreference() }.getOrNull()
-                    if (pref != null && accountState.value.currentId == expectedUserId) {
-                        _fmSongPoolId.value = pref.mode.coerceIn(0, 2)
-                    }
+            val (syncedOk, changed) = suspendRunCatching {
+                VipManager.recommendationPrefs.syncFromCloud(expectedUserId, VipManager.music)
+            }.getOrDefault(false to false)
+            if (syncedOk && accountState.value.currentId == expectedUserId) {
+                val latestMode = VipManager.recommendationPrefs.currentPreference(expectedUserId).mode.code
+                val modeChanged = latestMode != _fmSongPoolId.value
+                _fmSongPoolId.value = latestMode
+                if (changed || modeChanged) {
+                    reapplyDailyRecommendHardFilter(expectedUserId)
+                    applyPersonalFmBlacklistFilterOnly()
+                    refreshPersonalFm()
                 }
-                val blackSongJob = launch {
-                    val bSongs = suspendRunCatching { VipManager.music.fetchContentBlacklist("song") }.getOrDefault(emptyList())
-                    val bSingers = suspendRunCatching { VipManager.music.fetchContentBlacklist("singer") }.getOrDefault(emptyList())
-                    if (accountState.value.currentId == expectedUserId && (bSongs.isNotEmpty() || bSingers.isNotEmpty())) {
-                        LocalBlacklistFilter.syncFromEntries(bSongs, bSingers)
-                        applyPersonalFmBlacklistFilterOnly()
-                    }
-                }
-                prefJob.join()
-                blackSongJob.join()
             }
+        }
+    }
+
+    private suspend fun reapplyDailyRecommendHardFilter(userId: String?) {
+        val raw = _rawDailySongs.value.ifEmpty { _songs.value }
+        if (raw.isEmpty()) return
+        val filtered = suspendRunCatching {
+            VipManager.recommendationEngine.filterDailyRecommendHardBlocked(
+                songs = raw,
+                userId = userId,
+                musicRepo = VipManager.music,
+                preferenceRepo = VipManager.recommendationPrefs,
+                tagCache = VipManager.songTagCache
+            )
+        }.getOrDefault(raw)
+        if (accountState.value.currentId == userId && filtered.isNotEmpty() && _songs.value != filtered) {
+            _songs.value = filtered
+        }
+    }
+
+    private suspend fun fetchPersonalizedFmBatch(
+        userId: String?,
+        modeCode: Int,
+        size: Int = 20,
+        extraExcludeKeys: Set<String> = emptySet()
+    ): List<Song> {
+        val mode = RecommendationMode.fromCode(modeCode)
+        val liked = VipManager.discoverCache.getLikedSongs(userId)
+        val recent = VipManager.history.get(userId)
+        return suspendRunCatching {
+            VipManager.recommendationEngine.recommendPersonalFm(
+                userId = userId,
+                mode = mode,
+                size = size,
+                musicRepo = VipManager.music,
+                preferenceRepo = VipManager.recommendationPrefs,
+                tasteProfileRepo = VipManager.tasteProfile,
+                tagCache = VipManager.songTagCache,
+                listenStats = VipManager.listenStats,
+                likedSongs = liked,
+                recentHistory = recent,
+                extraExcludeKeys = extraExcludeKeys
+            )
+        }.getOrDefault(emptyList()).ifEmpty {
+            suspendRunCatching {
+                VipManager.music.personalFm(size = size, poolId = mode.code)
+            }.getOrDefault(emptyList())
         }
     }
 
@@ -200,14 +281,22 @@ class HomeViewModel : ViewModel() {
         val cache = VipManager.discoverCache
         val cachedDaily = cache.getDailyRecommend(userId).ifEmpty { cache.getDailyRecommend(null) }
         if (cachedDaily.isNotEmpty()) {
-            _songs.value = cachedDaily
+            _rawDailySongs.value = cachedDaily
+            val pref = VipManager.recommendationPrefs.currentPreference(userId)
+            val quickFilteredDaily = cachedDaily.filterNot { s ->
+                VipManager.recommendationPrefs.isHardBlocked(s, VipManager.songTagCache.resolveFast(s), pref)
+            }.ifEmpty { cachedDaily }
+            _songs.value = quickFilteredDaily
         }
 
         val cachedFm = cache.getPersonalFm(userId).ifEmpty { cache.getPersonalFm(null) }
         if (cachedFm.isNotEmpty()) {
-            _personalFmSongs.value = cachedFm
-            // 将本地缓存过的猜你喜欢曲目注入已推去重池，防止重启后在熟悉模式下重复推送刚推过的歌
-            VipManager.music.seedSeenPersonalFmHashes(cachedFm.mapNotNull { it.hash.takeIf { h -> h.isNotBlank() } })
+            val pref = VipManager.recommendationPrefs.currentPreference(userId)
+            val quickFilteredFm = cachedFm.filterNot { s ->
+                VipManager.recommendationPrefs.isHardBlocked(s, VipManager.songTagCache.resolveFast(s), pref)
+            }.ifEmpty { cachedFm }
+            _personalFmSongs.value = quickFilteredFm
+            VipManager.music.seedSeenPersonalFmHashes(quickFilteredFm.mapNotNull { it.hash.takeIf { h -> h.isNotBlank() } })
         }
 
         for (periodKey in ALL_NEW_SONG_PERIOD_KEYS) {
@@ -268,30 +357,42 @@ class HomeViewModel : ViewModel() {
                 val dailyJob = launch {
                     val daily = runCatching { VipManager.music.dailyRecommend() }.getOrDefault(emptyList())
                     if (accountState.value.currentId == currentUserId && daily.isNotEmpty()) {
-                        if (_songs.value != daily) {
-                            _songs.value = daily
-                        }
+                        _rawDailySongs.value = daily
+                        // 原始日推快照完整保存供历史日推回溯（不篡改历史快照），今日展示层应用硬屏蔽过滤
                         VipManager.discoverCache.saveDailyRecommend(currentUserId, daily)
                         val todayCompact = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).let { d ->
                             String.format(java.util.Locale.US, "%04d%02d%02d", d.year, d.monthValue, d.dayOfMonth)
                         }
                         VipManager.discoverCache.saveDailyRecommendHistorySnapshot(currentUserId, todayCompact, daily)
+                        val filteredDaily = suspendRunCatching {
+                            VipManager.recommendationEngine.filterDailyRecommendHardBlocked(
+                                songs = daily,
+                                userId = currentUserId,
+                                musicRepo = VipManager.music,
+                                preferenceRepo = VipManager.recommendationPrefs,
+                                tagCache = VipManager.songTagCache
+                            )
+                        }.getOrDefault(daily)
+                        if (accountState.value.currentId == currentUserId && _songs.value != filteredDaily) {
+                            _songs.value = filteredDaily
+                        }
                     }
                 }
                 val fmJob = launch {
                     if (isBackgroundRevalidate) delay(30L)
                     val activePool = _fmSongPoolId.value
-                    val fm = runCatching {
-                        VipManager.music.personalFm(size = 20, poolId = activePool)
-                    }.getOrDefault(emptyList())
+                    val fm = fetchPersonalizedFmBatch(
+                        userId = currentUserId,
+                        modeCode = activePool,
+                        size = 20
+                    )
                     if (accountState.value.currentId == currentUserId && fm.isNotEmpty()) {
-                        val filtered = LocalBlacklistFilter.filterSongs(fm).ifEmpty { fm }
                         val wasEmpty = _personalFmSongs.value.isEmpty()
                         if (wasEmpty || !isBackgroundRevalidate) {
-                            _personalFmSongs.value = filtered
+                            _personalFmSongs.value = fm
                             _personalFmIndex.value = 0
                         }
-                        VipManager.discoverCache.savePersonalFm(currentUserId, filtered)
+                        VipManager.discoverCache.savePersonalFm(currentUserId, fm)
                     }
                 }
                 val newSongJob = launch {
@@ -361,12 +462,22 @@ class HomeViewModel : ViewModel() {
             _dailyRefreshing.value = true
             val daily = runCatching { VipManager.music.dailyRecommend() }.getOrDefault(emptyList())
             if (daily.isNotEmpty()) {
-                _songs.value = daily
+                _rawDailySongs.value = daily
                 VipManager.discoverCache.saveDailyRecommend(currentUserId, daily)
                 val todayCompact = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).let { d ->
                     String.format(java.util.Locale.US, "%04d%02d%02d", d.year, d.monthValue, d.dayOfMonth)
                 }
                 VipManager.discoverCache.saveDailyRecommendHistorySnapshot(currentUserId, todayCompact, daily)
+                val filteredDaily = suspendRunCatching {
+                    VipManager.recommendationEngine.filterDailyRecommendHardBlocked(
+                        songs = daily,
+                        userId = currentUserId,
+                        musicRepo = VipManager.music,
+                        preferenceRepo = VipManager.recommendationPrefs,
+                        tagCache = VipManager.songTagCache
+                    )
+                }.getOrDefault(daily)
+                _songs.value = filteredDaily
             }
             _dailyRefreshing.value = false
             withContext(Dispatchers.Main) {
@@ -376,7 +487,7 @@ class HomeViewModel : ViewModel() {
     }
 
     /**
-     * 刷新「猜你喜欢」曲池：严格按当前选定的模式（平衡 / 熟悉 / 尝鲜）召回新曲并应用专属黑名单过滤
+     * 刷新「猜你喜欢」曲池：通过端云混合引擎严格按当前模式（平衡 / 熟悉 / 尝鲜）、偏好约束与长期画像召回精排新曲
      */
     fun refreshPersonalFm(onLoaded: (List<Song>) -> Unit = {}) {
         if (_personalFmRefreshing.value) return
@@ -386,9 +497,11 @@ class HomeViewModel : ViewModel() {
         fmPoolJob = viewModelScope.launch(Dispatchers.IO) {
             _personalFmRefreshing.value = true
             try {
-                val rawList = suspendRunCatching {
-                    VipManager.music.personalFm(size = 20, poolId = activePool)
-                }.getOrDefault(emptyList()).ifEmpty {
+                val nextBatch = fetchPersonalizedFmBatch(
+                    userId = currentUserId,
+                    modeCode = activePool,
+                    size = 20
+                ).ifEmpty {
                     suspendRunCatching {
                         VipManager.music.sendPersonalFmFeedback(
                             action = "change_song_pool",
@@ -397,17 +510,50 @@ class HomeViewModel : ViewModel() {
                         )
                     }.getOrDefault(emptyList())
                 }
-                val filtered = LocalBlacklistFilter.filterSongs(rawList).ifEmpty { rawList }
-                if (accountState.value.currentId == currentUserId && filtered.isNotEmpty()) {
-                    _personalFmSongs.value = filtered
+                if (accountState.value.currentId == currentUserId && nextBatch.isNotEmpty()) {
+                    _personalFmSongs.value = nextBatch
                     _personalFmIndex.value = 0
-                    VipManager.discoverCache.savePersonalFm(currentUserId, filtered)
+                    VipManager.discoverCache.savePersonalFm(currentUserId, nextBatch)
                 }
             } finally {
                 _personalFmRefreshing.value = false
             }
             withContext(Dispatchers.Main) {
                 onLoaded(_personalFmSongs.value)
+            }
+        }
+    }
+
+    /**
+     * 无限续播：当「猜你喜欢」播放队列剩余 <= 3 首时，静默按当前模式补拉 20 首去重新曲追加到队列末尾
+     */
+    fun refillMorePersonalFmSongs(
+        existingQueue: List<Song>,
+        onAppended: (List<Song>) -> Unit
+    ) {
+        if (fmRefillJob?.isActive == true) return
+        val uid = accountState.value.currentId
+        val activePool = _fmSongPoolId.value
+        val excludeKeys = existingQueue.map { PersonalTasteProfileRepository.normalizeSongKey(it) }.toHashSet()
+        fmRefillJob = viewModelScope.launch(Dispatchers.IO) {
+            val fresh = fetchPersonalizedFmBatch(
+                userId = uid,
+                modeCode = activePool,
+                size = 20,
+                extraExcludeKeys = excludeKeys
+            )
+            if (fresh.isNotEmpty() && accountState.value.currentId == uid) {
+                val cur = _personalFmSongs.value
+                val curKeys = cur.map { PersonalTasteProfileRepository.normalizeSongKey(it) }.toHashSet()
+                val uniqueNew = fresh.filterNot { PersonalTasteProfileRepository.normalizeSongKey(it) in curKeys }
+                if (uniqueNew.isNotEmpty()) {
+                    val merged = (cur + uniqueNew).takeLast(80)
+                    _personalFmSongs.value = merged
+                    VipManager.discoverCache.savePersonalFm(uid, merged)
+                    withContext(Dispatchers.Main) {
+                        onAppended(uniqueNew)
+                    }
+                }
             }
         }
     }
@@ -610,12 +756,15 @@ class HomeViewModel : ViewModel() {
     }
 
     /**
-     * 严格边界：黑名单过滤器仅作用于「猜你喜欢」列表，绝不修改每日推荐或历史日推
+     * 猜你喜欢黑名单与硬屏蔽同步过滤（立即从待播池移除命中项）
      */
     fun applyPersonalFmBlacklistFilterOnly() {
         val uid = accountState.value.currentId
+        val pref = VipManager.recommendationPrefs.currentPreference(uid)
         val curFm = _personalFmSongs.value
-        val nextFm = LocalBlacklistFilter.filterSongs(curFm)
+        val nextFm = curFm.filterNot { song ->
+            VipManager.recommendationPrefs.isHardBlocked(song, VipManager.songTagCache.resolveFast(song), pref)
+        }
         if (nextFm.size != curFm.size) {
             _personalFmSongs.value = nextFm
             _personalFmIndex.value = _personalFmIndex.value.coerceIn(0, (nextFm.size - 1).coerceAtLeast(0))
@@ -696,6 +845,19 @@ class HomeViewModel : ViewModel() {
 
         viewModelScope.launch(Dispatchers.IO) {
             val poolId = _fmSongPoolId.value
+            val pref = VipManager.recommendationPrefs.currentPreference(uid)
+            val meta = VipManager.songTagCache.resolveFast(song)
+            val isReducedProbe = pref.mode == RecommendationMode.DISCOVERY &&
+                meta.languageCode.isNotBlank() &&
+                pref.weightForCode(meta.languageCode) in 1..49
+            VipManager.tasteProfile.recordExplicitDislike(
+                userId = uid,
+                song = song,
+                meta = meta,
+                isArtistDislike = false,
+                isReducedLanguageProbe = isReducedProbe
+            )
+
             val feedbackSongs = suspendRunCatching {
                 VipManager.music.sendPersonalFmFeedback(
                     action = "garbage",
@@ -704,28 +866,20 @@ class HomeViewModel : ViewModel() {
                 )
             }.getOrDefault(emptyList())
 
-            if (isLoggedIn) {
-                val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
-                if (songKey.isNotBlank()) {
-                    suspendRunCatching {
-                        VipManager.music.editContentBlacklist(
-                            label = "song",
-                            key = songKey,
-                            name = "${song.artist} - ${song.title}",
-                            mixSongId = song.mixSongId,
-                            isDelete = false,
-                            moduleId = 474
-                        )
-                    }
-                }
-            }
+            VipManager.recommendationPrefs.addBlockedSong(
+                userId = uid,
+                song = song,
+                musicRepo = VipManager.music,
+                isLoggedIn = isLoggedIn,
+                moduleId = 474
+            )
 
             if (accountState.value.currentId == uid && _personalFmSongs.value.size < 4) {
-                val replenished = LocalBlacklistFilter.filterSongs(
-                    feedbackSongs.ifEmpty {
-                        suspendRunCatching { VipManager.music.personalFm(size = 20, poolId = poolId) }.getOrDefault(emptyList())
-                    }
-                )
+                val replenished = fetchPersonalizedFmBatch(
+                    userId = uid,
+                    modeCode = poolId,
+                    size = 20
+                ).ifEmpty { LocalBlacklistFilter.filterSongs(feedbackSongs) }
                 if (replenished.isNotEmpty() && accountState.value.currentId == uid) {
                     val cur = _personalFmSongs.value
                     val curHashes = cur.map { (it.hash.ifBlank { it.id }).lowercase() }.toHashSet()
@@ -753,7 +907,7 @@ class HomeViewModel : ViewModel() {
     /**
      * 猜你喜欢负反馈 — 「少推该歌手」：
      * 1. 立即清空当前猜你喜欢队列中该歌手的所有曲目并切歌；
-     * 2. 上报私人 FM garbage 负反馈 + 云端黑名单 singer (KG-TID=474) + 用户偏好 inactive_singerlist；
+     * 2. 上报私人 FM garbage + black_singer 负反馈 + 云端黑名单 singer (KG-TID=474) + 追加合并 inactive_singerlist；
      * 3. 后台立即补拉不含该歌手的新推荐池。
      */
     fun dislikeCurrentPersonalFmArtist(
@@ -785,6 +939,19 @@ class HomeViewModel : ViewModel() {
 
         viewModelScope.launch(Dispatchers.IO) {
             val poolId = _fmSongPoolId.value
+            val pref = VipManager.recommendationPrefs.currentPreference(uid)
+            val meta = VipManager.songTagCache.resolveFast(song)
+            val isReducedProbe = pref.mode == RecommendationMode.DISCOVERY &&
+                meta.languageCode.isNotBlank() &&
+                pref.weightForCode(meta.languageCode) in 1..49
+            VipManager.tasteProfile.recordExplicitDislike(
+                userId = uid,
+                song = song,
+                meta = meta,
+                isArtistDislike = true,
+                isReducedLanguageProbe = isReducedProbe
+            )
+
             val feedbackSongs = suspendRunCatching {
                 VipManager.music.sendPersonalFmFeedback(
                     action = "garbage",
@@ -793,26 +960,22 @@ class HomeViewModel : ViewModel() {
                 )
             }.getOrDefault(emptyList())
 
-            if (isLoggedIn && artistKey.isNotBlank()) {
-                suspendRunCatching {
-                    VipManager.music.editContentBlacklist(
-                        label = "singer",
-                        key = artistKey,
-                        name = primaryArtist.ifBlank { artistKey },
-                        isDelete = false,
-                        moduleId = 474
-                    )
-                }
-                suspendRunCatching {
-                    VipManager.music.updateUserListeningPreference(inactiveSingerList = primaryArtist.ifBlank { artistKey })
-                }
-            }
+            VipManager.recommendationPrefs.addBlockedArtist(
+                userId = uid,
+                artistId = artistKey,
+                artistName = primaryArtist,
+                sampleSong = song,
+                musicRepo = VipManager.music,
+                isLoggedIn = isLoggedIn,
+                moduleId = 474
+            )
 
             if (accountState.value.currentId == uid && _personalFmSongs.value.size < 5) {
-                val freshBatch = LocalBlacklistFilter.filterSongs(
-                    suspendRunCatching { VipManager.music.personalFm(size = 20, poolId = poolId) }
-                        .getOrDefault(feedbackSongs)
-                )
+                val freshBatch = fetchPersonalizedFmBatch(
+                    userId = uid,
+                    modeCode = poolId,
+                    size = 20
+                ).ifEmpty { LocalBlacklistFilter.filterSongs(feedbackSongs) }
                 if (freshBatch.isNotEmpty() && accountState.value.currentId == uid) {
                     val cur = _personalFmSongs.value
                     val curHashes = cur.map { (it.hash.ifBlank { it.id }).lowercase() }.toHashSet()
@@ -848,24 +1011,25 @@ class HomeViewModel : ViewModel() {
     ) {
         val uid = accountState.value.currentId
         val song = token.dislikedSong
-        if (token.isArtistDislike) {
-            LocalBlacklistFilter.removeArtistEntry(
-                BlacklistEntry(
-                    key = token.targetArtistKey,
-                    name = token.targetArtistName,
-                    label = "singer"
-                )
+        val entryToRemove = if (token.isArtistDislike) {
+            BlacklistEntry(
+                key = token.targetArtistKey,
+                name = token.targetArtistName,
+                label = "singer"
             )
         } else {
             val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
-            LocalBlacklistFilter.removeSongEntry(
-                BlacklistEntry(
-                    key = songKey,
-                    name = "${song.artist} - ${song.title}",
-                    label = "song",
-                    mixSongId = song.mixSongId
-                )
+            BlacklistEntry(
+                key = songKey,
+                name = "${song.artist} - ${song.title}",
+                label = "song",
+                mixSongId = song.mixSongId
             )
+        }
+        if (token.isArtistDislike) {
+            LocalBlacklistFilter.removeArtistEntry(entryToRemove)
+        } else {
+            LocalBlacklistFilter.removeSongEntry(entryToRemove)
         }
         val restoredList = token.previousQueue.ifEmpty {
             (listOf(song) + _personalFmSongs.value).distinctBy { (it.hash.ifBlank { it.id }).lowercase() }
@@ -876,40 +1040,22 @@ class HomeViewModel : ViewModel() {
         VipManager.discoverCache.savePersonalFm(uid, restoredList)
         onRestored(song, restoredList)
 
-        if (accountState.value.auth == AuthState.READY) {
-            viewModelScope.launch(Dispatchers.IO) {
-                if (token.isArtistDislike && token.targetArtistKey.isNotBlank()) {
-                    suspendRunCatching {
-                        VipManager.music.editContentBlacklist(
-                            label = "singer",
-                            key = token.targetArtistKey,
-                            name = token.targetArtistName.ifBlank { token.targetArtistKey },
-                            isDelete = true,
-                            moduleId = 474
-                        )
-                    }
-                } else {
-                    val songKey = song.hash.ifBlank { song.mixSongId }.trim().lowercase()
-                    if (songKey.isNotBlank()) {
-                        suspendRunCatching {
-                            VipManager.music.editContentBlacklist(
-                                label = "song",
-                                key = songKey,
-                                name = "${song.artist} - ${song.title}",
-                                mixSongId = song.mixSongId,
-                                isDelete = true,
-                                moduleId = 474
-                            )
-                        }
-                    }
-                }
-            }
+        val isLoggedIn = accountState.value.auth == AuthState.READY
+        viewModelScope.launch(Dispatchers.IO) {
+            VipManager.recommendationPrefs.removeBlacklistEntry(
+                userId = uid,
+                entry = entryToRemove,
+                sampleSong = song,
+                musicRepo = VipManager.music,
+                isLoggedIn = isLoggedIn,
+                moduleId = 474
+            )
         }
     }
 
     /**
      * 切换猜你喜欢推荐模式（0=默认平衡 / 1=偏好熟悉 / 2=更多尝鲜）：
-     * 同步更新酷狗云端用户偏好与私人 FM 曲池，并立即按新算法拉取整批新推荐歌曲。
+     * 同步持久化并更新酷狗云端用户偏好与私人 FM 曲池，立即按端云混合引擎拉取整批新推荐歌曲。
      */
     fun switchPersonalFmPool(
         poolId: Int,
@@ -927,26 +1073,21 @@ class HomeViewModel : ViewModel() {
         fmPoolJob = viewModelScope.launch(Dispatchers.IO) {
             _personalFmRefreshing.value = true
             try {
-                if (isLoggedIn) {
-                    launch {
-                        suspendRunCatching { VipManager.music.updateUserListeningPreference(mode = coerced) }
-                        suspendRunCatching {
-                            VipManager.music.sendPersonalFmFeedback(
-                                action = "change_song_pool",
-                                song = null,
-                                songPoolId = coerced
-                            )
-                        }
-                    }
-                }
-                val raw = suspendRunCatching {
-                    VipManager.music.personalFm(size = 20, poolId = coerced)
-                }.getOrDefault(emptyList())
-                val filtered = LocalBlacklistFilter.filterSongs(raw).ifEmpty { raw }
-                if (accountState.value.currentId == uid && filtered.isNotEmpty()) {
-                    _personalFmSongs.value = filtered
+                VipManager.recommendationPrefs.updateMode(
+                    userId = uid,
+                    mode = RecommendationMode.fromCode(coerced),
+                    musicRepo = VipManager.music,
+                    isLoggedIn = isLoggedIn
+                )
+                val nextBatch = fetchPersonalizedFmBatch(
+                    userId = uid,
+                    modeCode = coerced,
+                    size = 20
+                )
+                if (accountState.value.currentId == uid && nextBatch.isNotEmpty()) {
+                    _personalFmSongs.value = nextBatch
                     _personalFmIndex.value = 0
-                    VipManager.discoverCache.savePersonalFm(uid, filtered)
+                    VipManager.discoverCache.savePersonalFm(uid, nextBatch)
                 }
             } finally {
                 if (_fmSongPoolId.value == coerced) {

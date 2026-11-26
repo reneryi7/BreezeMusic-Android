@@ -2,6 +2,10 @@ package com.concept.music.data.vip
 
 import android.content.Context
 import com.concept.music.data.kugou.*
+import com.concept.music.data.recommendation.PersonalRecommendationEngine
+import com.concept.music.data.recommendation.PersonalTasteProfileRepository
+import com.concept.music.data.recommendation.RecommendationPreferenceRepository
+import com.concept.music.data.recommendation.SongTagMetadataCache
 import com.concept.music.data.repository.DiscoverLocalCache
 import com.concept.music.data.repository.LocalListenStatsRepository
 import com.concept.music.data.repository.PlaybackHistoryRepository
@@ -25,6 +29,10 @@ object VipManager {
     var listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null); private set
     var searchHistoryRepo: SearchHistoryRepository = SearchHistoryRepository(null); private set
     var discoverCache: DiscoverLocalCache = DiscoverLocalCache(null); private set
+    var songTagCache: SongTagMetadataCache = SongTagMetadataCache(null); private set
+    var recommendationPrefs: RecommendationPreferenceRepository = RecommendationPreferenceRepository(null); private set
+    var tasteProfile: PersonalTasteProfileRepository = PersonalTasteProfileRepository(null); private set
+    var recommendationEngine: PersonalRecommendationEngine = PersonalRecommendationEngine(); private set
     lateinit var device: () -> DeviceIdentity; private set
 
     @Synchronized
@@ -58,13 +66,18 @@ object VipManager {
         listenStats = LocalListenStatsRepository(appCtx)
         searchHistoryRepo = SearchHistoryRepository(appCtx)
         discoverCache = DiscoverLocalCache(appCtx)
+        songTagCache = SongTagMetadataCache(appCtx)
+        recommendationPrefs = RecommendationPreferenceRepository(appCtx)
+        tasteProfile = PersonalTasteProfileRepository(appCtx)
+        recommendationEngine = PersonalRecommendationEngine()
         ListeningGradeManager.initialize(appCtx)
 
         initScope.launch {
-            // 在进程启动初期（系统图标动画尚未结束前）于 IO 线程并发预热首页/歌单磁盘快照、AndroidKeyStore 会话与风控凭证
+            // 在进程启动初期（系统图标动画尚未结束前）于 IO 线程并发预热首页/歌单磁盘快照、推荐偏好、AndroidKeyStore 会话与风控凭证
             val activeUid = runCatching { store.activeId() }.getOrNull()
             launch {
                 runCatching {
+                    recommendationPrefs.activateUser(activeUid, isLoggedIn = !activeUid.isNullOrBlank())
                     discoverCache.getDailyRecommend(activeUid)
                     discoverCache.getPersonalFm(activeUid)
                     discoverCache.getNewSongs("CHINESE")
@@ -93,7 +106,10 @@ object VipManager {
         lyric: LyricRepository,
         history: PlaybackHistoryRepository,
         device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") },
-        listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null)
+        listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null),
+        songTagCache: SongTagMetadataCache = SongTagMetadataCache(null),
+        recommendationPrefs: RecommendationPreferenceRepository = RecommendationPreferenceRepository(null),
+        tasteProfile: PersonalTasteProfileRepository = PersonalTasteProfileRepository(null)
     ) {
         this.accounts = accounts
         this.auth = auth
@@ -103,6 +119,10 @@ object VipManager {
         this.lyric = lyric
         this.history = history
         this.listenStats = listenStats
+        this.songTagCache = songTagCache
+        this.recommendationPrefs = recommendationPrefs
+        this.tasteProfile = tasteProfile
+        this.recommendationEngine = PersonalRecommendationEngine()
         this.device = device
     }
 }

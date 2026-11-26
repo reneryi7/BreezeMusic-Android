@@ -139,6 +139,12 @@ object LocalBlacklistFilter {
 
     fun blockedArtistNamesSnapshot(): Set<String> = blockedArtistNames.toSet()
 
+    fun hasAnyEntries(): Boolean =
+        blockedSongHashes.isNotEmpty() ||
+            blockedSongMixIds.isNotEmpty() ||
+            blockedArtistIds.isNotEmpty() ||
+            blockedArtistNames.isNotEmpty()
+
     fun isBlocked(song: Song): Boolean {
         if (blockedSongHashes.isEmpty() && blockedSongMixIds.isEmpty() &&
             blockedArtistIds.isEmpty() && blockedArtistNames.isEmpty()
@@ -2650,13 +2656,17 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
     action: String,
     song: Song? = null,
     songPoolId: Int = 0,
-    playTimeSec: Int = 0
+    playTimeSec: Int = 0,
+    isOverplay: Boolean = false,
+    modeOverride: String? = null,
+    curMark: String = ""
 ): List<Song> {
     val session = accounts.context()?.session
     val d = device()
     val nowSec = System.currentTimeMillis() / 1000L
     val coercedPool = songPoolId.coerceIn(0, 2)
-    val effectiveMode = if (coercedPool == 2) "small" else "normal"
+    val effectiveMode = modeOverride?.takeIf { it.isNotBlank() }
+        ?: if (coercedPool == 2) "small" else "normal"
     val body = JsonObject().apply {
         addProperty("appid", KugouSigner.APP_ID)
         addProperty("clienttime", nowSec)
@@ -2670,12 +2680,15 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
         addProperty("area_code", 1)
         addProperty("remain_songcnt", 0)
         addProperty("clientver", KugouSigner.CLIENT_VERSION)
-        addProperty("is_overplay", 0)
+        addProperty("is_overplay", if (isOverplay) 1 else 0)
         addProperty("mode", effectiveMode)
         addProperty("fakem", "ca981cfc583a4c37f28d2d49000013c16a0a")
         addProperty("key", KugouSigner.paramsKey(nowSec))
         if (playTimeSec > 0) {
             addProperty("playtime", playTimeSec)
+        }
+        if (curMark.isNotBlank()) {
+            addProperty("cur_mark", curMark)
         }
         if (session != null) {
             val uidNum = session.userId.toLongOrNull() ?: 0L
@@ -2703,6 +2716,227 @@ suspend fun MusicApiRepository.sendPersonalFmFeedback(
     }.getOrNull() ?: return emptyList()
     val songs = parseSongs(resp.data)
     return suspendRunCatching { enrichSongsPrivilegeLite(songs) }.getOrDefault(songs)
+}
+
+/**
+ * 批量查询候选曲目的真实语种（language）与风格标签（tags），单次并发拉取 /kmr/v2/albums + /kmr/v2/audio
+ * 返回 key（songPrimaryKey / aa:<albumAudioId> / alb:<albumId>） -> Pair(rawLanguage, rawTags)
+ */
+suspend fun MusicApiRepository.batchFetchSongLanguageAndTags(
+    songs: List<Song>
+): Map<String, Pair<String, List<String>>> = coroutineScope {
+    if (songs.isEmpty()) return@coroutineScope emptyMap()
+    val session = accounts.context()?.session
+    val result = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<String>>>()
+
+    val albumIds = songs.map { it.albumId.trim() }
+        .filter { it.isNotBlank() && it != "0" }
+        .distinct()
+        .take(90)
+    val audioIds = songs.map { it.albumAudioId }
+        .filter { it > 0L }
+        .distinct()
+        .take(80)
+
+    val albumJob = async {
+        if (albumIds.isEmpty()) return@async
+        albumIds.chunked(45).map { chunk ->
+            async {
+                suspendRunCatching {
+                    val itemArr = JsonArray().apply {
+                        chunk.forEach { aid ->
+                            add(JsonObject().apply {
+                                val numId = aid.toLongOrNull()
+                                if (numId != null) addProperty("album_id", numId)
+                                else addProperty("album_id", aid)
+                            })
+                        }
+                    }
+                    val body = JsonObject().apply {
+                        add("data", itemArr)
+                        addProperty("is_buy", 0)
+                        addProperty("fields", "album_id,language")
+                    }
+                    val resp = transport.callAdvanced(
+                        path = "/kmr/v2/albums",
+                        method = "POST",
+                        session = session,
+                        body = body,
+                        headers = mapOf(
+                            "x-router" to "openapi.kugou.com",
+                            "kg-tid" to "255"
+                        ),
+                        sign = true,
+                        includeDefaultParams = true
+                    )
+                    val arr = resp.data.arr("data") ?: resp.body.arr("data")
+                    arr?.filter { it.isJsonObject }?.map { it.asJsonObject }?.forEach { obj ->
+                        val aid = (obj.text("album_id") ?: obj.text("albumid") ?: "").trim()
+                        val lang = (obj.text("language") ?: "").trim()
+                        if (aid.isNotBlank() && lang.isNotBlank()) {
+                            result["alb:$aid"] = lang to emptyList()
+                        }
+                    }
+                }
+            }
+        }.awaitAll()
+    }
+
+    val audioJob = async {
+        if (audioIds.isEmpty()) return@async
+        audioIds.chunked(40).map { chunk ->
+            async {
+                suspendRunCatching {
+                    val dataArr = JsonArray().apply {
+                        chunk.forEach { aaid ->
+                            add(JsonObject().apply { addProperty("entity_id", aaid) })
+                        }
+                    }
+                    val body = JsonObject().apply {
+                        add("data", dataArr)
+                        addProperty("fields", "base,album_info,tags")
+                    }
+                    val resp = transport.callAdvanced(
+                        path = "/kmr/v2/audio",
+                        method = "POST",
+                        session = session,
+                        body = body,
+                        headers = mapOf(
+                            "x-router" to "openapi.kugou.com",
+                            "kg-tid" to "36"
+                        ),
+                        sign = true,
+                        includeDefaultParams = true
+                    )
+                    val arr = resp.data.arr("data") ?: resp.body.arr("data")
+                    arr?.filter { it.isJsonObject }?.map { it.asJsonObject }?.forEach { item ->
+                        val baseObj = item.obj("base") ?: item
+                        val albObj = item.obj("album_info")
+                        val aaid = baseObj.longVal("album_audio_id")
+                            ?: item.longVal("album_audio_id")
+                            ?: item.longVal("entity_id")
+                            ?: 0L
+                        val lang = (baseObj.text("language")
+                            ?: albObj?.text("language")
+                            ?: item.text("language")
+                            ?: "").trim()
+                        val tags = mutableListOf<String>()
+                        val rawTagsEl = item.get("tags") ?: baseObj.get("tags")
+                        if (rawTagsEl != null) {
+                            when {
+                                rawTagsEl.isJsonArray -> rawTagsEl.asJsonArray.forEach { el ->
+                                    when {
+                                        el.isJsonPrimitive -> el.asString.trim().takeIf { it.isNotBlank() }?.let(tags::add)
+                                        el.isJsonObject -> {
+                                            val tObj = el.asJsonObject
+                                            (tObj.text("tag_name") ?: tObj.text("name") ?: tObj.text("tagname"))
+                                                ?.trim()?.takeIf { it.isNotBlank() }?.let(tags::add)
+                                        }
+                                    }
+                                }
+                                rawTagsEl.isJsonObject -> {
+                                    rawTagsEl.asJsonObject.entrySet().forEach { (_, v) ->
+                                        if (v.isJsonPrimitive) {
+                                            v.asString.trim().takeIf { it.isNotBlank() }?.let(tags::add)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (aaid > 0L && (lang.isNotBlank() || tags.isNotEmpty())) {
+                            result["aa:$aaid"] = lang to tags
+                        }
+                    }
+                }
+            }
+        }.awaitAll()
+    }
+
+    albumJob.await()
+    audioJob.await()
+
+    // 合并每个曲目的 album 与 audio 结果
+    val finalMap = LinkedHashMap<String, Pair<String, List<String>>>(songs.size)
+    for (s in songs) {
+        val primaryKey = s.hash.ifBlank { s.id }.trim().lowercase(Locale.ROOT)
+        val fromAudio = if (s.albumAudioId > 0L) result["aa:${s.albumAudioId}"] else null
+        val fromAlbum = s.albumId.trim().takeIf { it.isNotBlank() && it != "0" }?.let { result["alb:$it"] }
+        val lang = fromAudio?.first?.takeIf { it.isNotBlank() } ?: fromAlbum?.first.orEmpty()
+        val tags = (fromAudio?.second.orEmpty() + fromAlbum?.second.orEmpty()).distinct()
+        if (lang.isNotBlank() || tags.isNotEmpty()) {
+            finalMap[primaryKey] = lang to tags
+        }
+    }
+    finalMap
+}
+
+/**
+ * 概念版单卡个性推荐（对接 module/top_card_youth.js）
+ * cardId: 3001=私人专属好歌, 3004=小众宝藏佳作, 3005=潮流尝鲜, 3014=喜欢这首歌的TA也喜欢
+ */
+suspend fun MusicApiRepository.fetchYouthSingleCardRecommend(
+    cardId: Int,
+    tagId: String = "",
+    pageSize: Int = 30
+): List<Song> {
+    val session = accounts.context()?.session
+    val body = json(
+        "tagid" to tagId,
+        "u_info" to "",
+        "source_mixsong" to ""
+    )
+    val resp = suspendRunCatching {
+        transport.callAdvanced(
+            path = "/youth/v1/song/single_card_recommend",
+            method = "POST",
+            session = session,
+            query = mapOf(
+                "card_id" to cardId.toString(),
+                "area_code" to "1",
+                "platform" to "ios",
+                "module_id" to "1",
+                "ver" to "v2",
+                "pagesize" to pageSize.coerceIn(10, 40).toString(),
+                "clientver" to "11490"
+            ),
+            body = body,
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+    }.getOrNull() ?: return emptyList()
+    val parsed = parseSongs(resp.data)
+    return if (parsed.isNotEmpty()) parsed else parseSongs(resp.body)
+}
+
+/**
+ * 概念版曲风盲盒（对接 module/top_tag_card_youth.js），用于尝鲜模式高纯度探索召回
+ */
+suspend fun MusicApiRepository.fetchYouthTagCardRecommend(): List<Song> {
+    val session = accounts.context()?.session
+    val body = json(
+        "tagid" to "",
+        "u_info" to "",
+        "source_mixsong" to ""
+    )
+    val resp = suspendRunCatching {
+        transport.callAdvanced(
+            path = "/youth/v1/song/tag_card_recommend",
+            method = "POST",
+            session = session,
+            query = mapOf(
+                "ver" to "v2",
+                "area_code" to "1",
+                "platform" to "ios",
+                "module_id" to "1",
+                "clientver" to "11490"
+            ),
+            body = body,
+            sign = true,
+            includeDefaultParams = true
+        ).requireSuccess()
+    }.getOrNull() ?: return emptyList()
+    val parsed = parseSongs(resp.data)
+    return if (parsed.isNotEmpty()) parsed else parseSongs(resp.body)
 }
 
 suspend fun MusicApiRepository.fetchUserListeningPreference(): UserListeningPreference? {
@@ -2753,6 +2987,7 @@ suspend fun MusicApiRepository.fetchUserListeningPreference(): UserListeningPref
         langRaw = dataObj.text("lang").orEmpty(),
         styleRaw = dataObj.text("style").orEmpty(),
         songLangRaw = dataObj.text("song_lang").orEmpty(),
+        inactiveSingerList = dataObj.text("inactive_singerlist").orEmpty(),
         rawJson = KugouSigner.gson.toJson(dataObj)
     )
 }

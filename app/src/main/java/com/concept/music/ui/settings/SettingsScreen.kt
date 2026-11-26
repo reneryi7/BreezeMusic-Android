@@ -202,6 +202,10 @@ enum class SettingsCategory(
         title = "外设与播放控制",
         subtitle = "多应用混音 · 耳机线控 · 后台保活"
     ),
+    RECOMMENDATION_PREFERENCE(
+        title = "偏好设置",
+        subtitle = "推荐模式 · 语种曲风强度 · 屏蔽与本地画像"
+    ),
     LYRICS(
         title = "歌词显示设置",
         subtitle = "字号排版 · 景深虚化 · 蓝牙校准"
@@ -820,6 +824,10 @@ fun SettingsScreen(
     val themeMode by ThemeManager.themeMode.collectAsState()
     val audioEffectState by AudioEffectManager.state.collectAsState()
     val permissionState by AppPermissionManager.state.collectAsState()
+    val recPrefController = rememberRecommendationPreferenceController()
+    var recBlacklistTab by rememberSaveable { mutableIntStateOf(0) }
+    var recBlacklistExpanded by rememberSaveable { mutableStateOf(false) }
+    var showResetImplicitDialog by remember { mutableStateOf(false) }
 
     var batteryWhitelisted by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
     var systemPermissionRefreshTick by remember { mutableIntStateOf(0) }
@@ -967,6 +975,23 @@ fun SettingsScreen(
                     item {
                         Spacer(modifier = Modifier.height(2.dp))
                         SettingsGroupHeader(title = "播放与控制")
+                    }
+                    item {
+                        val recPrefState = recPrefController.prefState
+                        val recBlockedCnt = recPrefState.blockedPreferenceCount + recPrefState.totalBlacklistCount
+                        val recStatus = if (recBlockedCnt > 0) {
+                            "${recPrefState.preference.mode.label} · 屏蔽$recBlockedCnt"
+                        } else {
+                            "${recPrefState.preference.mode.label}模式"
+                        }
+                        SettingsMenuEntryCard(
+                            category = SettingsCategory.RECOMMENDATION_PREFERENCE,
+                            icon = Icons.Rounded.Tune,
+                            accentColor = ConceptMintAccent,
+                            statusText = recStatus,
+                            selected = highlightedCat == SettingsCategory.RECOMMENDATION_PREFERENCE,
+                            onClick = { selectCategoryAction(SettingsCategory.RECOMMENDATION_PREFERENCE) }
+                        )
                     }
                     item {
                         SettingsMenuEntryCard(
@@ -1211,6 +1236,23 @@ fun SettingsScreen(
                                         )
                                     }
                                 }
+                            }
+
+                            SettingsCategory.RECOMMENDATION_PREFERENCE -> {
+                                recommendationPreferenceDetailItems(
+                                    prefState = recPrefController.prefState,
+                                    tasteSummary = recPrefController.tasteSummary,
+                                    blacklistTab = recBlacklistTab,
+                                    onBlacklistTabChange = { recBlacklistTab = it },
+                                    blacklistExpanded = recBlacklistExpanded,
+                                    onBlacklistExpandedChange = { recBlacklistExpanded = it },
+                                    onRequestResetImplicitDialog = { showResetImplicitDialog = true },
+                                    onSyncCloudNow = recPrefController.onSyncCloudNow,
+                                    onSelectMode = recPrefController.onSelectMode,
+                                    onChangeSongLangWeight = recPrefController.onChangeSongLangWeight,
+                                    onToggleStyleTag = recPrefController.onToggleStyleTag,
+                                    onRemoveBlacklist = recPrefController.onRemoveBlacklist
+                                )
                             }
 
                             SettingsCategory.AUDIO_QUALITY -> {
@@ -2101,6 +2143,43 @@ fun SettingsScreen(
                 }
             }
         }
+
+        if (showResetImplicitDialog) {
+            AlertDialog(
+                onDismissRequest = { showResetImplicitDialog = false },
+                shape = RoundedCornerShape(24.dp),
+                containerColor = conceptFloatingCardColor(),
+                title = {
+                    Text(
+                        text = "重置本地隐式权重？",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
+                    )
+                },
+                text = {
+                    Text(
+                        text = "将清空微风本机记录的「猜你喜欢」秒切降权、尝鲜探针自动收紧记录与时段微调。\n\n你的听歌统计、红心收藏、官方语种/曲风偏好与云端屏蔽名单都会完整保留。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 19.sp
+                    )
+                },
+                dismissButton = {
+                    TextButton(onClick = { showResetImplicitDialog = false }) {
+                        Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
+                confirmButton = {
+                    ConceptTonalActionButton(
+                        text = "确认重置",
+                        accentColor = ConceptCoralAccent,
+                        onClick = {
+                            showResetImplicitDialog = false
+                            recPrefController.onResetImplicitWeights()
+                        }
+                    )
+                }
+            )
+        }
     }
 }
 
@@ -2537,6 +2616,9 @@ internal fun SettingsSectionCard(
 ) {
     val sectionAccent = when {
         title.contains("外观") || title.contains("主题") || title.contains("视觉") -> ConceptVioletAccent
+        title.contains("推荐") || title.contains("语种") || title.contains("画像") -> ConceptMintAccent
+        title.contains("曲风") -> ConceptVioletAccent
+        title.contains("屏蔽") -> ConceptCoralAccent
         title.contains("音质") || title.contains("音效") -> ConceptMintAccent
         title.contains("外设") || title.contains("焦点") || title.contains("播放行为") || title.contains("后台") -> ConceptCoralAccent
         title.contains("歌词") || title.contains("蓝牙") -> ConceptCyanAccent

@@ -1223,6 +1223,12 @@ class LibraryViewModel(
                     }
                     VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, _likedSongs.value)
                     VipManager.discoverCache.saveUserPlaylists(accountState.value.currentId, _playlists.value)
+                    val inFmPool = VipManager.discoverCache.getPersonalFm(accountState.value.currentId).any { isSameSong(it, song) }
+                    com.concept.music.data.recommendation.PersonalFmFeedbackBridge.onFavoriteToggled(
+                        song = song,
+                        isLikedNow = false,
+                        isFromPersonalFm = inFmPool
+                    )
                     onResult(true, false, "已从「我喜欢的音乐」中移除")
                 } else {
                     _likedSongs.value = prevLikedList
@@ -1244,6 +1250,12 @@ class LibraryViewModel(
                     }
                     VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, _likedSongs.value)
                     VipManager.discoverCache.saveUserPlaylists(accountState.value.currentId, _playlists.value)
+                    val inFmPool = VipManager.discoverCache.getPersonalFm(accountState.value.currentId).any { isSameSong(it, song) }
+                    com.concept.music.data.recommendation.PersonalFmFeedbackBridge.onFavoriteToggled(
+                        song = addedSong,
+                        isLikedNow = true,
+                        isFromPersonalFm = inFmPool
+                    )
                     launch {
                         runCatching { VipManager.music.playlistSongs(likedPl) }.getOrNull()?.let { fresh ->
                             _likedSongs.value = fresh
