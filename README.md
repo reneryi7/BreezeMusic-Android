@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.1-00E5FF?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.2-00E5FF?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--34)-3898FF?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Language-Kotlin%201.9-7F52FF?style=flat-square" alt="Kotlin" />
   <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20%2B%20120fps%20Spring-0EA5E9?style=flat-square" alt="Compose" />
@@ -32,7 +32,7 @@
 
 ### 1. 纯端侧直连、曲库生态与双端双向分享
 * **零后端端侧直连**：纯 Kotlin 实现概念版协议签名、RSA/AES 加解密与设备风控注册，所有请求由手机/平板直连官方网关，内置多通道容灾路由。
-* **完整曲库生态与双向同步**：覆盖每日推荐（支持右上角真实历史日期回溯、近 7 日真实快照与当前播放一键居中定位）、私人 FM（点击卡片直达待播队列，支持「平衡 / 熟悉 / 尝鲜」单按钮循环三套专属渐变配色与 4.5s 撤销负反馈）、新歌速递（华语 / 欧美 / 日韩 / 粤语四大精准语种 + 吸顶时间轴）、官方巅峰排行榜、随心听电台广场、实时热搜榜与主搜索多引擎歌词搜歌（自动剥离词曲头并高亮匹配唱词）、歌手/专辑详情、无上限极速音乐云盘（本地缓存秒开与真实音质码率校准）、微风本机听歌排行（周/月/总榜领奖台与歌手榜）、自建歌单云端编辑与队列级平滑拖拽排序/长按批量多选、以及歌曲/歌单/专辑实时评论区。
+* **完整曲库生态、端云混合推荐与双向同步**：覆盖每日推荐（支持右上角真实历史日期回溯、近 7 日真实快照、今日日推端侧硬屏蔽与当前播放一键居中定位）、端云混合「猜你喜欢」（桌面同源黑胶封套舞台与物理换碟动效、极简三模式微点切换、官方语种/曲风/黑名单双向同步、45 天半衰期长期听歌画像、尝鲜受控破圈探针与设置中心统一「推荐偏好」管理页）、新歌速递（华语 / 欧美 / 日韩 / 粤语四大精准语种 + 吸顶时间轴）、官方巅峰排行榜、随心听电台广场、实时热搜榜与主搜索多引擎歌词搜歌（自动剥离词曲头并高亮匹配唱词）、歌手/专辑详情、无上限极速音乐云盘（本地缓存秒开与真实音质码率校准）、微风服务级精准本机听歌排行（50%/4 分钟门槛、一播一会话防重与周/月/总榜领奖台）、自建歌单云端编辑与队列级平滑拖拽排序/长按批量多选、以及歌曲/歌单/专辑实时评论区。
 * **多平台在线设备检测与安全下线**：账号管理页实时识别 Windows / macOS / 手机 / 平板 / 车载 / TV / Web 等全平台在线登录设备并支持安全远程下线。
 * **酷狗双端双向分享与解析**：支持标准版与概念版双向唤醒分享，内置 `KugouShareLinkParser` 零网络离线解码与短链安全解析，支持单曲即刻播放与外部歌单预览/一键批量导入。
 * **账号权益状态同步与低功耗守护**：支持手机短信验证码登录（自动识别同手机号下多账号切换）与二维码扫码登录，支持账号权益状态同步、CSCC 真实听歌时长心跳上报及基于系统 `JobScheduler` 的低功耗定时同步任务。
@@ -83,8 +83,8 @@
 
 | 安装包变体 | 文件名示例 | 包名与特性说明 |
 | :--- | :--- | :--- |
-| **手机版（推荐手机用户）** | `BreezeMusic-phone-v1.4.1.apk` | 包名 `com.concept.music`，竖屏交互优化，支持由历史手机版直接覆盖升级 |
-| **平板版（推荐平板/大屏用户）** | `BreezeMusic-tablet-v1.4.1.apk` | 独立包名 `com.concept.music.tablet` 与独立签名，大屏双栏与自由旋转，可与手机版共存 |
+| **手机版（推荐手机用户）** | `BreezeMusic-phone-v1.4.2.apk` | 包名 `com.concept.music`，竖屏交互优化，支持由历史手机版直接覆盖升级 |
+| **平板版（推荐平板/大屏用户）** | `BreezeMusic-tablet-v1.4.2.apk` | 独立包名 `com.concept.music.tablet` 与独立签名，大屏双栏与自由旋转，可与手机版共存 |
 
 > [!TIP]
 > **安装与校验提示**
@@ -139,7 +139,7 @@ BreezeMusic-Android/
 ├── .github/
 │   └── ISSUE_TEMPLATE/                              # Bug 反馈与功能建议表单模板
 ├── app/
-│   ├── build.gradle.kts                             # 模块级 Gradle 构建配置 (v1.4.1, phone/tablet 双变体独立签名与安全回退)
+│   ├── build.gradle.kts                             # 模块级 Gradle 构建配置 (v1.4.2, phone/tablet 双变体独立签名与安全回退)
 │   ├── proguard-rules.pro                           # Release 混淆、R8 精简与日志剥离规则
 │   └── src/
 │       ├── main/
@@ -151,6 +151,7 @@ BreezeMusic-Android/
 │       │   │   ├── data/
 │       │   │   │   ├── kugou/                       # 酷狗概念版 (appid=3116) 纯端侧协议层、AES-256 会话存储与安全传输网关
 │       │   │   │   ├── model/                       # 领域数据模型 (Song / Lyric / Playlist / Comment / Discover / Library / Search)
+│       │   │   │   ├── recommendation/              # 端云混合个性化推荐引擎、长期听歌画像、官方偏好双向同步与曲目元数据缓存
 │       │   │   │   ├── repository/                  # 本地播放历史、微风本机听歌统计、SWR/云盘快照与搜索历史仓库
 │       │   │   │   ├── share/                       # 酷狗双端双向分享与零网络离线链接解析器
 │       │   │   │   └── vip/                         # 全局仓库门面 (VipManager) 与听歌等级管理

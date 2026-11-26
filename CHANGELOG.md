@@ -10,6 +10,23 @@
 
 ---
 
+## [1.4.2] - 2026-11-26
+
+### 新增 (Added)
+- **端云混合「猜你喜欢」个性化推荐引擎与长期听歌画像**：新增结构化偏好仓库（`RecommendationPreferenceRepository`）、曲目语种/形态元数据缓存（`SongTagMetadataCache`）、长期听歌画像仓库（`PersonalTasteProfileRepository`）与混合推荐引擎（`PersonalRecommendationEngine`）；完整支持酷狗官方 `song_lang`（6 语种 + 4 内容形态）、`style`（15 曲风）及黑名单双向同步，结合 45 天半衰期正向权重、仅限 FM 队列的 `<15s` 秒切冷却与温和降权、4 时段轻度精排（封顶 `±0.10`）、真实播放时长/`is_overplay`/红心反馈闭环及队列剩 `<= 3` 首自动无缝续杯。
+- **三模式舒适区梯度与「今日每日推荐」硬屏蔽**：熟悉模式强化 30%~40% 久违熟歌与常听歌手遗珠，平衡模式兼顾精准新歌与熟歌锚点，尝鲜模式避开 Top-20 常听歌手并禁止单批重复歌手；权重为 `0` 的语种/形态（如 DJ / 翻唱 / 现场 / AI）与黑名单歌曲/歌手在三种模式及「今日每日推荐」100% 硬屏蔽（不改写历史日推快照），尝鲜模式对 `1..49` 手动降权语种开放 1~2 首受控破圈探针并随连续秒切按 `0.45^streak` 自动收敛至 0。
+- **设置中心无边框「推荐偏好」统一管理页**：新增 [SettingsRecommendationPreferenceScreen.kt](app/src/main/java/com/concept/music/ui/settings/SettingsRecommendationPreferenceScreen.kt)（同步适配手机二级页与平板 Master-Detail 分栏），一站式支持三模式双向联动、官方 10 项语种/内容 4 档强度调节与互斥防呆校验（不可屏蔽全部语种、加大 DJ 不可同时屏蔽翻唱）、15 项曲风偏好、长期听歌画像概览与「重置本地隐式权重」确认弹窗及云端黑名单一键恢复。
+
+### 优化 (Changed)
+- **发现页「猜你喜欢」卡片黑胶封套翻新**：迁移桌面端圆角方形封套 + 向右半露 45% 黑胶唱片舞台设计（细密沟槽、对角丝绸高光、`9.5s/圈` 连续零跳变旋转与 480ms 物理收放换碟动效）；将三模式快捷切换重做为极简色点 + 3 枚动态微点胶囊（彻底移除循环小图标），整体精简至黄金舒展布局，保留零高度跳动的底部不喜欢轻提示浮层。
+- **Release 混淆规则加固**：在 `app/proguard-rules.pro` 补充 `com.concept.music.data.recommendation.**` 保留规则，确保 R8 压缩环境下本地推荐画像、偏好配置与元数据缓存 JSON 持久化 100% 稳定。
+
+### 修复 (Fixed)
+- **微风本机听歌统计服务级会话状态机重构与历史无损去重迁移**：新建独立于 UI 与酷狗 CSCC 60s 心跳的 `ListenSessionTracker`，以行业标准 `min(曲长 × 50%, 4 分钟)`（短曲 80% 或播完、未知时长 60s）作为单次有效收听门槛，严格执行「一播一会话」防重（拖动进度条、暂停恢复、缓冲、切音质、切伴奏、前后台切换与重建均不重复计次，达标即时 +1 并在结束时精准增量回补真实听歌耗时）；内置 `v1 -> v2` 一次性无损去重迁移，自动修复 v1.4.1 因 CSCC 60s 切段产生的重复计次。
+- **推荐偏好冷启动竞态与歌手黑名单覆盖修复**：改为 0ms 磁盘优先水合修复启动初期偏好闪回默认模式的问题，修复追加屏蔽歌手时直接覆盖旧 `inactive_singerlist` 的缺陷。
+
+---
+
 ## [1.4.1] - 2026-11-25
 
 ### 新增 (Added)
@@ -76,7 +93,8 @@
 - **v1.0.1**（2026-10-28）：新增系统级穿透桌面歌词、有线耳机线控定制、音频焦点策略、缓存分项清理与透明权限中心。
 - **v1.0.0**（2026-10-28）：首个正式版发布，完成端侧直连、高解析播放、64-bit 母带调音、KRC 逐字歌词与 2K 海报、动态取色及 120Hz 高刷播放舞台。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.3.6...v1.4.0
 [1.3.6]: https://github.com/reneryi7/BreezeMusic-Android/releases/tag/v1.3.6
