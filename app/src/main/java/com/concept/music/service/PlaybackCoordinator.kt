@@ -54,6 +54,75 @@ object PlaybackCoordinator {
     var onSkipToNextDelegate: (() -> Boolean)? = null
 
     @Volatile
+    var onExternalCarSongSelectedDelegate: ((resolvedSong: Song, queue: List<Song>, index: Int, isPersonalFm: Boolean) -> Unit)? = null
+
+    fun adoptCarSelectedSongInBackground(
+        context: Context,
+        resolvedSong: Song,
+        queue: List<Song>,
+        isPersonalFm: Boolean
+    ) {
+        val appCtx = context.applicationContext
+        val idx = queue.indexOfFirst { it.id == resolvedSong.id }.coerceAtLeast(0)
+        val prefs = appCtx.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+        val modeName = prefs.getString("play_mode", PlayMode.REPEAT_ALL.name) ?: PlayMode.REPEAT_ALL.name
+        val playMode = runCatching { PlayMode.valueOf(modeName) }.getOrDefault(PlayMode.REPEAT_ALL)
+        syncQueueSnapshot(queue, idx, playMode.name)
+        ListenStatsCoordinator.registerSongs(queue)
+        ListenStatsCoordinator.prepareMediaItemLoad(resolvedSong, preserveSession = false)
+
+        val delegate = onExternalCarSongSelectedDelegate
+        if (delegate != null) {
+            mainScope.launch {
+                delegate(resolvedSong, queue, idx, isPersonalFm)
+            }
+            return
+        }
+
+        // 若前台 ViewModel 未挂载（如手机锁屏状态下直接从车机大屏选歌点播），由后台协调器独立拉取歌词与持久化队列
+        val userScopeKey = runCatching { VipManager.accounts.state.value.currentId ?: "guest" }.getOrDefault("guest")
+        persistAsync(prefs) {
+            val cleanQueue = queue.map { s -> if (s.isLocalSong) s else s.copy(playUrl = "") }
+            val qJson = KugouSigner.gson.toJson(cleanQueue)
+            putString("saved_queue_json_$userScopeKey", qJson)
+            putInt("saved_current_index_$userScopeKey", idx)
+            putLong("saved_position_ms_$userScopeKey", 0L)
+            putInt("saved_current_index", idx)
+            putLong("saved_position_ms", 0L)
+        }
+        ConceptMusicWidgetUpdater.updateState(
+            context = appCtx,
+            songTitle = resolvedSong.title,
+            artist = resolvedSong.artist,
+            isPlaying = true,
+            lyricLine = ""
+        )
+        SystemLyricBridge.updatePlaybackSnapshot(
+            song = resolvedSong,
+            lyricData = com.concept.music.data.model.LyricData.Empty,
+            currentLyricIndex = -1,
+            currentPositionMs = 0L,
+            isPlaying = true,
+            playMode = playMode
+        )
+        PlaybackService.notifyCarAvrcpLyricDataUpdated()
+        mainScope.launch {
+            val fetchedLyric = withContext(Dispatchers.IO) {
+                suspendRunCatching { VipManager.lyric.getLyric(resolvedSong) }.getOrNull()
+            } ?: com.concept.music.data.model.LyricData.Empty
+            SystemLyricBridge.updatePlaybackSnapshot(
+                song = resolvedSong,
+                lyricData = fetchedLyric,
+                currentLyricIndex = if (fetchedLyric.lines.isNotEmpty()) fetchedLyric.getLineIndexAt(0L) else -1,
+                currentPositionMs = 0L,
+                isPlaying = true,
+                playMode = playMode
+            )
+            PlaybackService.notifyCarAvrcpLyricDataUpdated()
+        }
+    }
+
+    @Volatile
     private var cachedQueue: List<Song> = emptyList()
 
     @Volatile
@@ -380,6 +449,7 @@ object PlaybackCoordinator {
                     isPlaying = true,
                     playMode = playMode
                 )
+                PlaybackService.notifyCarAvrcpLyricDataUpdated()
                 val fetchedLyric = withContext(Dispatchers.IO) {
                     suspendRunCatching { VipManager.lyric.getLyric(targetSong) }.getOrNull()
                 } ?: com.concept.music.data.model.LyricData.Empty
@@ -393,6 +463,7 @@ object PlaybackCoordinator {
                     isPlaying = player.isPlaying,
                     playMode = playMode
                 )
+                PlaybackService.notifyCarAvrcpLyricDataUpdated()
             }
         }
         return true

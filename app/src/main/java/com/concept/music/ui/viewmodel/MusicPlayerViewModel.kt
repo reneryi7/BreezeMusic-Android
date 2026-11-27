@@ -174,6 +174,8 @@ data class PlayerUiState(
     val bluetoothLyricOffsetEnabled: Boolean = false,
     val bluetoothLyricOffsetMs: Long = -200L,
     val isBluetoothAudioConnected: Boolean = false,
+    val isCarModeActive: Boolean = false,
+    val carLyricOffsetMs: Long = -250L,
     val keepPlayingOnTaskRemoved: Boolean = true,
     val autoPlayOnStartup: Boolean = false,
     val commentTargetSong: Song? = null,
@@ -190,13 +192,16 @@ data class PlayerUiState(
 ) {
     val effectiveLyricOffsetMs: Long
         get() {
-            val btAllowed = bluetoothLyricOffsetEnabled &&
-                isBluetoothAudioConnected &&
-                com.concept.music.service.AppPermissionManager.isPermissionEnabled(
-                    com.concept.music.service.AppPermissionType.AUDIO_HARDWARE
-                )
-            return (lyricOffsetMs + if (btAllowed) bluetoothLyricOffsetMs else 0L)
-                .coerceIn(-6000L, 6000L)
+            val hwAllowed = com.concept.music.service.AppPermissionManager.isPermissionEnabled(
+                com.concept.music.service.AppPermissionType.AUDIO_HARDWARE
+            )
+            val deviceOffset = when {
+                !hwAllowed -> 0L
+                isCarModeActive -> carLyricOffsetMs
+                bluetoothLyricOffsetEnabled && isBluetoothAudioConnected -> bluetoothLyricOffsetMs
+                else -> 0L
+            }
+            return (lyricOffsetMs + deviceOffset).coerceIn(-6000L, 6000L)
         }
 }
 
@@ -304,6 +309,20 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun syncEffectiveLyricOffsetToBridge() {
         SystemLyricBridge.lyricOffsetMsSnapshot = mutableState.value.effectiveLyricOffsetMs
+    }
+
+    fun notifyCarLyricOffsetChanged() {
+        val car = com.concept.music.service.CarSessionManager.state.value
+        val active = com.concept.music.service.CarSessionManager.isPhoneCarFeatureSupported() && car.isCarModeActive
+        mutableState.update {
+            it.copy(
+                isCarModeActive = active,
+                carLyricOffsetMs = car.carLyricOffsetMs
+            )
+        }
+        syncEffectiveLyricOffsetToBridge()
+        updateLyricIndex(currentSmoothPositionMs())
+        PlaybackService.notifyCarAvrcpLyricDataUpdated()
     }
 
     fun onAppForegroundChanged(inForeground: Boolean) {
@@ -666,6 +685,76 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
         restorePersistedPlaybackState()
+        com.concept.music.service.CarSessionManager.onApplyAudioFocusModeCallback = { mode ->
+            viewModelScope.launch(Dispatchers.Main) {
+                setAudioFocusMode(mode)
+            }
+        }
+        com.concept.music.service.CarSessionManager.init(context)
+        viewModelScope.launch {
+            com.concept.music.service.CarSessionManager.state.collect { car ->
+                val active = com.concept.music.service.CarSessionManager.isPhoneCarFeatureSupported() && car.isCarModeActive
+                val cur = mutableState.value
+                if (cur.isCarModeActive != active || cur.carLyricOffsetMs != car.carLyricOffsetMs) {
+                    mutableState.update {
+                        it.copy(
+                            isCarModeActive = active,
+                            carLyricOffsetMs = car.carLyricOffsetMs
+                        )
+                    }
+                    syncEffectiveLyricOffsetToBridge()
+                    updateLyricIndex(currentSmoothPositionMs())
+                    PlaybackService.notifyCarAvrcpLyricDataUpdated()
+                }
+            }
+        }
+        PlaybackCoordinator.onExternalCarSongSelectedDelegate = { resolvedSong, queue, idx, isPersonalFm ->
+            val list = queue.ifEmpty { listOf(resolvedSong) }
+            val safeIdx = idx.coerceIn(0, list.lastIndex)
+            list.forEach { songsByMediaId[it.id] = it }
+            songsByMediaId[resolvedSong.id] = resolvedSong
+            val playQuality = resolvedSong.actualPlayQuality ?: resolvedSong.highestQuality
+            val qualityLabel = when (playQuality) {
+                AudioQuality.HI_RES -> "Hi-Res" + (if (resolvedSong.bitrateKbps > 0) " ${resolvedSong.bitrateKbps}k" else "")
+                AudioQuality.LOSSLESS -> "SQ 无损" + (if (resolvedSong.bitrateKbps > 0) " ${resolvedSong.bitrateKbps}k" else "")
+                AudioQuality.HIGH -> "高品 320K"
+                AudioQuality.STANDARD -> "标准 128K"
+            }
+            val (updatedRecent, activeId) = syncActiveQueueInRecent(
+                queue = list,
+                currentIndex = safeIdx,
+                currentActiveId = mutableState.value.activeQueueId,
+                existingRecent = mutableState.value.recentQueues
+            )
+            updatePositionSnapshot(positionMs = 0L, durationMs = resolvedSong.durationMs, bufferedPositionMs = 0L, isPlaying = true)
+            mutableState.update {
+                it.copy(
+                    loading = false,
+                    error = null,
+                    currentSong = resolvedSong,
+                    playlistQueue = list,
+                    currentIndex = safeIdx,
+                    recentQueues = updatedRecent,
+                    activeQueueId = activeId,
+                    isPersonalFmQueue = isPersonalFm,
+                    currentPositionMs = 0L,
+                    durationMs = resolvedSong.durationMs,
+                    currentQualityLabel = qualityLabel,
+                    isPlaying = true,
+                    climaxUnlockedForCurrentSong = false,
+                    songDetail = VipManager.music.songDetail(resolvedSong),
+                    commentTargetSong = null,
+                    comments = emptyList(),
+                    commentCount = 0
+                )
+            }
+            startNewPlaybackSegment(resolvedSong, resolvedSong.id, recordHistory = true)
+            startProgressUpdates()
+            loadLyric(resolvedSong)
+            loadComments(isRefresh = true)
+            persistPlaybackStateAsync()
+            prefetchNextSong(list, safeIdx)
+        }
 
         ConceptMusicWidgetUpdater.onWidgetCommand = { action ->
             viewModelScope.launch(Dispatchers.Main) {
@@ -1594,7 +1683,18 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                         lyricLoading = false,
                         currentLyric = data
                     )
-                    updateLyricIndex(currentSmoothPositionMs())
+                    val curPos = currentSmoothPositionMs()
+                    updateLyricIndex(curPos)
+                    val adjustedPos = (curPos + mutableState.value.effectiveLyricOffsetMs).coerceAtLeast(0L)
+                    SystemLyricBridge.updatePlaybackSnapshot(
+                        song = song,
+                        lyricData = data,
+                        currentLyricIndex = mutableState.value.currentLyricIndex,
+                        currentPositionMs = adjustedPos,
+                        isPlaying = mutableState.value.isPlaying,
+                        playMode = mutableState.value.playMode
+                    )
+                    PlaybackService.notifyCarAvrcpLyricDataUpdated()
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -1762,6 +1862,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             syncPlayer()
         }
         updateLyricIndex(clamped)
+        PlaybackService.notifyCarAvrcpLyricDataUpdated()
         persistPlaybackStateAsync()
     }
 
@@ -2281,6 +2382,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         mutableState.value = mutableState.value.copy(lyricOffsetMs = clamped)
         syncEffectiveLyricOffsetToBridge()
         updateLyricIndex(currentSmoothPositionMs())
+        PlaybackService.notifyCarAvrcpLyricDataUpdated()
         persistPlaybackStateAsync()
     }
 

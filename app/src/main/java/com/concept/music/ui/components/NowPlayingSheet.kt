@@ -427,11 +427,13 @@ fun NowPlayingSheet(
     // 严格限制横屏自动触发范围：
     // 1. 仅在封面播放页 (!showLyricView) 且未打开其它弹窗时才允许通过横放手机进入横屏；
     // 2. 必须同时满足：已开启「设备动作与方向」权限 + 手机系统「自动旋转」开关处于打开状态。
+    var showCarQuickControlSheet by remember { mutableStateOf(false) }
     val isLifecycleStarted = rememberIsLifecycleStarted()
     val canSensorTriggerLandscape = isLifecycleStarted &&
         !showLyricView &&
         !showQueueSheet &&
         !showMoreControlSheet &&
+        !showCarQuickControlSheet &&
         !showLyricSettingsDialog &&
         !showLyricPosterDialog &&
         !showShareSongSheet &&
@@ -570,6 +572,7 @@ fun NowPlayingSheet(
     // 系统返回键：优先关闭已打开的子面板（队列/歌词设置），若正处于横屏播放页则退回竖屏，若处于歌词页则退回封面，否则收起播放页
     BackHandler {
         when {
+            showCarQuickControlSheet -> showCarQuickControlSheet = false
             showArtistPickerDialog -> showArtistPickerDialog = false
             showCoverPreviewDialog -> showCoverPreviewDialog = false
             showQueueSheet -> showQueueSheet = false
@@ -977,6 +980,7 @@ fun NowPlayingSheet(
                             Toast.makeText(context, "已解锁本曲完整播放", Toast.LENGTH_SHORT).show()
                         },
                         onOpenSleepTimer = { showSleepTimerDialog = true },
+                        onOpenCarControl = { showCarQuickControlSheet = true },
                         onShareClick = { showShareSongSheet = true }
                     )
                 }
@@ -1212,6 +1216,13 @@ fun NowPlayingSheet(
                 showShareSongSheet = false
                 showLyricPosterDialog = true
             }
+        )
+    }
+
+    // 车载座舱声学快捷控制面板（仅手机端车载激活时由顶部胶囊呼出）
+    if (showCarQuickControlSheet && !com.concept.music.BuildConfig.IS_TABLET_FLAVOR) {
+        CarModeQuickControlSheet(
+            onDismiss = { showCarQuickControlSheet = false }
         )
     }
 
@@ -1826,9 +1837,14 @@ private fun RedesignedTopHeaderBar(
     onQualityClick: () -> Unit,
     onUnlockFullTrack: () -> Unit,
     onOpenSleepTimer: () -> Unit,
+    onOpenCarControl: (() -> Unit)? = null,
     onShareClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val carState by com.concept.music.service.CarSessionManager.state.collectAsState()
+    val showCarCapsule = !com.concept.music.BuildConfig.IS_TABLET_FLAVOR &&
+        carState.isCarModeActive &&
+        onOpenCarControl != null
     var outputRouteLabel by remember { mutableStateOf(detectAudioOutputRouteLabel(context)) }
     DisposableEffect(context) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -1974,34 +1990,67 @@ private fun RedesignedTopHeaderBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
-                Surface(
-                    shape = RoundedCornerShape(if (isLargeScreen) 10.dp else 8.dp),
-                    color = Color.White.copy(alpha = 0.07f)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(
-                            horizontal = if (isLargeScreen) 10.dp else 7.dp,
-                            vertical = if (isLargeScreen) 3.5.dp else 2.dp
+                if (showCarCapsule) {
+                    Surface(
+                        shape = RoundedCornerShape(if (isLargeScreen) 10.dp else 8.dp),
+                        color = ConceptCyanAccent.copy(alpha = 0.20f),
+                        modifier = Modifier.softCardClickable(
+                            shape = RoundedCornerShape(if (isLargeScreen) 10.dp else 8.dp),
+                            onClick = { onOpenCarControl?.invoke() }
                         )
                     ) {
-                        Icon(
-                            imageVector = if (outputRouteLabel.contains("蓝牙") || outputRouteLabel.contains("耳机")) {
-                                Icons.Rounded.Headphones
-                            } else {
-                                Icons.Rounded.SpeakerGroup
-                            },
-                            contentDescription = null,
-                            tint = Color.White.copy(alpha = 0.66f),
-                            modifier = Modifier.size(if (isLargeScreen) 13.5.dp else 11.dp)
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = outputRouteLabel,
-                            color = Color.White.copy(alpha = 0.72f),
-                            fontSize = if (isLargeScreen) 12.sp else 10.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(
+                                horizontal = if (isLargeScreen) 10.dp else 7.5.dp,
+                                vertical = if (isLargeScreen) 3.5.dp else 2.dp
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DirectionsCar,
+                                contentDescription = "车载座舱控制",
+                                tint = ConceptCyanAccent,
+                                modifier = Modifier.size(if (isLargeScreen) 13.5.dp else 11.5.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "车载 · ${carState.cabinAcousticMode.shortBadge}",
+                                color = ConceptCyanAccent,
+                                fontSize = if (isLargeScreen) 12.sp else 10.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(if (isLargeScreen) 10.dp else 8.dp),
+                        color = Color.White.copy(alpha = 0.07f)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(
+                                horizontal = if (isLargeScreen) 10.dp else 7.dp,
+                                vertical = if (isLargeScreen) 3.5.dp else 2.dp
+                            )
+                        ) {
+                            Icon(
+                                imageVector = if (outputRouteLabel.contains("蓝牙") || outputRouteLabel.contains("耳机")) {
+                                    Icons.Rounded.Headphones
+                                } else {
+                                    Icons.Rounded.SpeakerGroup
+                                },
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.66f),
+                                modifier = Modifier.size(if (isLargeScreen) 13.5.dp else 11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = outputRouteLabel,
+                                color = Color.White.copy(alpha = 0.72f),
+                                fontSize = if (isLargeScreen) 12.sp else 10.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
 

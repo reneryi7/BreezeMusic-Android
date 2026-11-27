@@ -1508,8 +1508,13 @@ internal fun PermissionsSectionContent(
             }
         }
 
-        // 2. 逐项权限公开说明与独立开关卡片
-        AppPermissionType.entries.forEach { permType ->
+        // 2. 逐项权限公开说明与独立开关卡片（平板端自动隐藏手机专属车载蓝牙项，保持大屏界面纯净）
+        val visiblePermissionTypes = remember {
+            AppPermissionType.entries.filter { perm ->
+                !(BuildConfig.IS_TABLET_FLAVOR && perm == AppPermissionType.BLUETOOTH_CAR_INTERCONNECT)
+            }
+        }
+        visiblePermissionTypes.forEach { permType ->
             val isEnabled = permissionState.isEnabled(permType)
             val systemGrant = remember(permType, refreshTick, isEnabled) {
                 AppPermissionManager.querySystemGrantStatus(context, permType)
@@ -1547,6 +1552,7 @@ private fun PermissionDisclosureCard(
         AppPermissionType.MOTION_ORIENTATION -> Icons.Rounded.ScreenRotation to ConceptCoralAccent
         AppPermissionType.AUDIO_HARDWARE -> Icons.Rounded.Headphones to ConceptRoseAccent
         AppPermissionType.CLIPBOARD_ACCESS -> Icons.Rounded.ContentPaste to ConceptPrimary
+        AppPermissionType.BLUETOOTH_CAR_INTERCONNECT -> Icons.Rounded.DirectionsCar to ConceptCyanAccent
     }
     var detailsExpanded by rememberSaveable(type.name) { mutableStateOf(false) }
     val chevronRotation by animateFloatAsState(

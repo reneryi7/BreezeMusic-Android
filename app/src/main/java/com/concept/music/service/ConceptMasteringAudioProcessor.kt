@@ -283,6 +283,14 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
     private val warmthBodyFilter = BiquadStereoFilter()
     private val warmthLowMidFilter = BiquadStereoFilter()
 
+    // 64-bit 车载座舱专属声学滤波器组（行车胎噪 62Hz 低架补偿 + 235Hz 车门防共振净空 + 3.45kHz 仪表台声像抬升）
+    private val carRoadBassFilter = BiquadStereoFilter()
+    private val carDoorAntiBoomFilter = BiquadStereoFilter()
+    private val carStageLiftFilter = BiquadStereoFilter()
+
+    // 智能导航语音中频人声让位滤波器 (Spectral Ducking: 800Hz~3.2kHz 宽带柔和陷波)
+    private val navSpectralDuckFilter = BiquadStereoFilter()
+
     private val reverbInputHpf = BiquadStereoFilter()
     private val reverbInputLpf = BiquadStereoFilter()
 
@@ -294,6 +302,16 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
     private var currentNormGain = 1.0f
     private var smoothLeftGain = 1.0f
     private var smoothRightGain = 1.0f
+    private var currentDuckEnvelope = 1.0f
+    private var lastSpectralDuckCutDb = 0.0
+
+    // 主驾皇帝位左声道独立先导微延迟缓冲（支持最高 192kHz 下 2.25ms = 432 采样点精确 ITD 声程差校准）
+    private val maxCarItdSamples = 1024
+    private val carDriverItdBufferL = FloatArray(maxCarItdSamples)
+    private var carDriverItdWriteIdx = 0
+    private var activeCarLeftItdDelaySamples = 0
+    private var cachedCarRightLinearGain = 1.0f
+    private var hasActiveCarCabinFilter = false
 
     // 双声道耦合包络峰值限制器状态 (True Envelope Peak Limiter)
     private var limiterEnvelope = 0f
@@ -406,10 +424,21 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         vocalAirShelfFilter.resetState()
         warmthBodyFilter.resetState()
         warmthLowMidFilter.resetState()
+        carRoadBassFilter.resetState()
+        carDoorAntiBoomFilter.resetState()
+        carStageLiftFilter.resetState()
+        navSpectralDuckFilter.resetState()
+        navSpectralDuckFilter.setBypass()
+        lastSpectralDuckCutDb = 0.0
+        currentDuckEnvelope = PlaybackService.audioFocusDuckGain.coerceIn(0.15f, 1.0f)
+        carDriverItdWriteIdx = 0
+        carDriverItdBufferL.fill(0f)
         reverbInputHpf.resetState()
         reverbInputLpf.resetState()
         clearReverbBuffers()
     }
+
+    internal fun currentDuckEnvelopeForTest(): Float = currentDuckEnvelope
 
     private fun clearReverbBuffers() {
         preDelayBuffer.fill(0f)
@@ -444,8 +473,10 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
 
         val sr = sampleRate.coerceAtLeast(44100)
         val dspActive = state.isEnabled && state.currentPreset != EffectPreset.OFF && !state.isAbBypassActive
+        val carOverlay = AudioEffectManager.carCabinOverlay
+        val carCabinActive = carOverlay.active && !state.isAbBypassActive
 
-        if (!dspActive && !state.equalLoudnessCompensation) {
+        if (!dspActive && !carCabinActive && !state.equalLoudnessCompensation) {
             eqFilters.forEach { it.setBypass() }
             hpfFilter.setBypass()
             lpfFilter.setBypass()
@@ -459,6 +490,12 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             vocalAirShelfFilter.setBypass()
             warmthBodyFilter.setBypass()
             warmthLowMidFilter.setBypass()
+            carRoadBassFilter.setBypass()
+            carDoorAntiBoomFilter.setBypass()
+            carStageLiftFilter.setBypass()
+            activeCarLeftItdDelaySamples = 0
+            cachedCarRightLinearGain = 1.0f
+            hasActiveCarCabinFilter = false
             reverbInputHpf.setBypass()
             reverbInputLpf.setBypass()
             cachedLinearPreampAndLoudnessGain = 1.0f
@@ -575,15 +612,36 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         warmthBodyFilter.configurePeaking(170.0, sr, warmthNorm * 2.8 * lowOverlapScale, q = 0.85)
         warmthLowMidFilter.configurePeaking(350.0, sr, warmthNorm * 1.8, q = 1.05)
 
-        // 5. 配置 3D 环绕声场宽度、Bauer 交叉馈送与舞台纵深
+        // 5. 配置 3D 环绕声场宽度、Bauer 交叉馈送、舞台纵深与车载座舱声学矩阵
         val virtNorm = if (dspActive) (state.virtualizerStrength / 1000f).coerceIn(0f, 1f) else 0f
         val depthNorm = if (dspActive) (state.soundstageDepthStrength / 1000f).coerceIn(0f, 1f) else 0f
-        val crossfeedNorm = if (dspActive) (state.crossfeedStrength / 1000f).coerceIn(0f, 1f) else 0f
+        val crossfeedNorm = if (dspActive && !carCabinActive) (state.crossfeedStrength / 1000f).coerceIn(0f, 1f) else 0f
+        val carWidthExtra = if (carCabinActive) carOverlay.stereoWidthBoost.coerceIn(0f, 0.50f) else 0f
 
-        cachedWidthFactor = virtNorm * 1.05f
-        cachedHaasCrossMix = virtNorm * 0.20f
+        cachedWidthFactor = (virtNorm * 1.05f + carWidthExtra).coerceIn(0f, 1.25f)
+        cachedHaasCrossMix = virtNorm * 0.20f + carWidthExtra * 0.16f
         cachedCrossfeedMix = crossfeedNorm * 0.28f
-        cachedDepthMix = depthNorm * 0.20f
+        cachedDepthMix = (depthNorm * 0.20f + if (carCabinActive && carOverlay.stageLiftDb > 0.1f) 0.05f else 0f).coerceIn(0f, 0.24f)
+
+        if (carCabinActive) {
+            carRoadBassFilter.configureLowShelf(62.0, sr, carOverlay.roadNoiseSubBoostDb.toDouble() * lowOverlapScale, slope = 0.85)
+            carDoorAntiBoomFilter.configurePeaking(235.0, sr, carOverlay.doorAntiBoomCutDb.toDouble(), q = 1.65)
+            carStageLiftFilter.configurePeaking(3450.0, sr, carOverlay.stageLiftDb.toDouble() * vocalOverlapScale, q = 1.15)
+            activeCarLeftItdDelaySamples = if (carOverlay.leftChannelItdDelayMs > 0.05f) {
+                ((carOverlay.leftChannelItdDelayMs / 1000f) * sr).roundToInt().coerceIn(0, maxCarItdSamples - 4)
+            } else 0
+            cachedCarRightLinearGain = if (abs(carOverlay.rightDistanceTrimDb) > 0.05f) {
+                (10.0.pow(carOverlay.rightDistanceTrimDb.toDouble() / 20.0)).toFloat().coerceIn(0.75f, 1.35f)
+            } else 1.0f
+            hasActiveCarCabinFilter = !carRoadBassFilter.isBypass || !carDoorAntiBoomFilter.isBypass || !carStageLiftFilter.isBypass
+        } else {
+            carRoadBassFilter.setBypass()
+            carDoorAntiBoomFilter.setBypass()
+            carStageLiftFilter.setBypass()
+            activeCarLeftItdDelaySamples = 0
+            cachedCarRightLinearGain = 1.0f
+            hasActiveCarCabinFilter = false
+        }
 
         activeHaasDelay = ((0.00058f * sr).toInt()).coerceIn(12, maxHaasSamples - 4)
         activeCrossfeedDelay = ((0.00028f * sr).toInt()).coerceIn(6, maxHaasSamples - 4)
@@ -635,13 +693,19 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         // 仅在频段综合增益超出安全阈值时执行温和预衰减（最高不超过 -3.2 dB），既避免低频满载破音，又绝不造成预设音量骤降
         val probeFreqs = doubleArrayOf(31.5, 45.0, 63.0, 90.0, 125.0, 175.0, 250.0, 500.0, 1000.0, 2750.0, 4000.0, 8000.0, 12500.0, 16000.0)
         var maxCascadeBoostDb = 0.0
-        if (dspActive) {
+        if (dspActive || carCabinActive) {
             for (pf in probeFreqs) {
-                val peqDb = AudioEffectManager.evaluatePeqMagnitudeDbAtFrequency(pf, state, sr.toDouble()).toDouble()
+                val peqDb = if (dspActive) AudioEffectManager.evaluatePeqMagnitudeDbAtFrequency(pf, state, sr.toDouble()).toDouble() else 0.0
                 val extraBassDb = if (pf <= 110.0) (shelfGainDb * 0.70 + punchGainDb * 0.55) else 0.0
                 val extraVocalDb = if (pf in 2000.0..4500.0) (vocalPresenceDb * 0.75) else if (pf >= 9000.0) maxOf(0.0, netAirShelfDb * 0.65) else 0.0
                 val extraWarmthDb = if (pf in 120.0..380.0) (warmthNorm * 2.2) else 0.0
-                val combinedDb = peqDb + extraBassDb + extraVocalDb + extraWarmthDb
+                val extraCarDb = if (carCabinActive) {
+                    val carSub = if (pf <= 95.0) carOverlay.roadNoiseSubBoostDb * 0.75 else 0.0
+                    val carStage = if (pf in 2400.0..4600.0) carOverlay.stageLiftDb * 0.75 else 0.0
+                    val carRightTrim = maxOf(0.0, carOverlay.rightDistanceTrimDb.toDouble())
+                    carSub + carStage + carRightTrim
+                } else 0.0
+                val combinedDb = peqDb + extraBassDb + extraVocalDb + extraWarmthDb + extraCarDb
                 if (combinedDb > maxCascadeBoostDb) {
                     maxCascadeBoostDb = combinedDb
                 }
@@ -840,13 +904,24 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         val state = AudioEffectManager.state.value
         val balance = state.channelBalance.coerceIn(-1f, 1f)
         val dspActive = state.isEnabled && state.currentPreset != EffectPreset.OFF && !state.isAbBypassActive
+        val carOverlay = AudioEffectManager.carCabinOverlay
+        val carCabinActive = carOverlay.active && !state.isAbBypassActive
         val eqLoudnessComp = state.equalLoudnessCompensation && !state.isAbBypassActive
         val volNorm = state.volumeNormalizationEnabled && !state.isAbBypassActive
-        val antiClip = state.antiClippingEnabled && (dspActive || eqLoudnessComp || volNorm)
+        val antiClip = state.antiClippingEnabled && (dspActive || carCabinActive || eqLoudnessComp || volNorm)
         val focusDuckGain = PlaybackService.audioFocusDuckGain.coerceIn(0.15f, 1.0f)
 
-        // 若处于 0 音染 / Bit-Perfect 原生直通态（或按住 A/B 原音对比）且声道平衡居中，直接零拷贝透传
-        if (abs(balance) < 0.01f && !dspActive && !eqLoudnessComp && !volNorm && focusDuckGain >= 0.99f) {
+        val carInterconnect = CarSessionManager.state.value
+        val smartNavDuckActive = carInterconnect.isCarModeActive && carInterconnect.smartNavDuckingEnabled
+        val duckEnvelopeSettled = focusDuckGain >= 0.99f && currentDuckEnvelope >= 0.995f
+
+        // 若处于 0 音染 / Bit-Perfect 原生直通态（或按住 A/B 原音对比）、未挂载车载声学且闪避包络已完全归位，直接零拷贝透传
+        if (abs(balance) < 0.01f && !dspActive && !carCabinActive && !eqLoudnessComp && !volNorm && duckEnvelopeSettled) {
+            currentDuckEnvelope = 1.0f
+            if (!navSpectralDuckFilter.isBypass) {
+                navSpectralDuckFilter.setBypass()
+                lastSpectralDuckCutDb = 0.0
+            }
             AudioRhythmTelemetry.limiterGainReductionDb = 0f
             val out = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
             out.put(inputBuffer)
@@ -856,10 +931,39 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
 
         updateDspCoefficientsIfNeeded(state, sampleRate)
 
+        // 智能导航中频人声频谱让位（Spectral Ducking: 800Hz~3.2kHz 动态柔和陷波 -3.5dB）
+        val minActiveDuck = minOf(currentDuckEnvelope, focusDuckGain)
+        if (smartNavDuckActive && carInterconnect.navSpectralDuckingEnabled && minActiveDuck < 0.96f) {
+            val denom = (1.0f - carInterconnect.navDuckingTargetGain.coerceIn(0.15f, 0.85f)).coerceAtLeast(0.15f)
+            val depthRatio = ((1.0f - minActiveDuck) / denom).coerceIn(0f, 1f)
+            val targetCutDb = -3.5 * depthRatio
+            if (abs(targetCutDb - lastSpectralDuckCutDb) > 0.12) {
+                navSpectralDuckFilter.configurePeaking(1850.0, sampleRate, targetCutDb, q = 0.85)
+                lastSpectralDuckCutDb = targetCutDb
+            }
+        } else if (!navSpectralDuckFilter.isBypass) {
+            navSpectralDuckFilter.setBypass()
+            lastSpectralDuckCutDb = 0.0
+        }
+
+        val duckAttackAlpha = if (smartNavDuckActive) {
+            // 约 180ms 平滑下潜 (3 * tau = 180ms -> tau = 60ms)
+            (1.0 - kotlin.math.exp(-1.0 / (0.060 * sampleRate))).toFloat().coerceIn(0.00002f, 0.02f)
+        } else {
+            0.004f
+        }
+        val duckReleaseAlpha = if (smartNavDuckActive) {
+            // 约 650ms 丝滑恢复 (3 * tau = 660ms -> tau = 220ms)
+            (1.0 - kotlin.math.exp(-1.0 / (0.220 * sampleRate))).toFloat().coerceIn(0.000005f, 0.006f)
+        } else {
+            0.003f
+        }
+
         val out = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
         val preGain = cachedLinearPreampAndLoudnessGain
-        val targetLeftGain = (if (balance > 0f) (1f - balance).coerceIn(0f, 1f) else 1f) * preGain * focusDuckGain
-        val targetRightGain = (if (balance < 0f) (1f + balance).coerceIn(0f, 1f) else 1f) * preGain * focusDuckGain
+        val carRightGain = if (carCabinActive) cachedCarRightLinearGain else 1.0f
+        val targetLeftBaseGain = (if (balance > 0f) (1f - balance).coerceIn(0f, 1f) else 1f) * preGain
+        val targetRightBaseGain = (if (balance < 0f) (1f + balance).coerceIn(0f, 1f) else 1f) * preGain * carRightGain
 
         val rotSpeed = if (dspActive) state.surroundRotationSpeed else 0
         val phaseStep = if (rotSpeed > 0) (2.0 * PI * (0.20 + rotSpeed * 0.016)) / sampleRate else 0.0
@@ -894,9 +998,11 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             val rawL = readNormalizedSample(inputBuffer, encoding)
             val rawR = if (channels == 2) readNormalizedSample(inputBuffer, encoding) else rawL
 
-            // 平滑增益过渡（消除切换预设或拖动滑杆时的阶跃爆音）
-            smoothLeftGain += (targetLeftGain - smoothLeftGain) * 0.005f
-            smoothRightGain += (targetRightGain - smoothRightGain) * 0.005f
+            // 平滑增益过渡（消除切换预设或拖动滑杆时的阶跃爆音）+ 非对称导航平滑闪避包络
+            smoothLeftGain += (targetLeftBaseGain - smoothLeftGain) * 0.005f
+            smoothRightGain += (targetRightBaseGain - smoothRightGain) * 0.005f
+            val envAlpha = if (focusDuckGain < currentDuckEnvelope) duckAttackAlpha else duckReleaseAlpha
+            currentDuckEnvelope += (focusDuckGain - currentDuckEnvelope) * envAlpha
 
             val normGain = if (volNorm) {
                 val frameEnergy = (abs(rawL) + abs(rawR)) * 0.5f
@@ -904,18 +1010,23 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
                     val alpha = if (frameEnergy > smoothedEnvelope) 0.0005f else 0.00014f
                     smoothedEnvelope += alpha * (frameEnergy - smoothedEnvelope)
                     val targetEnv = 0.24f
-                    val minClamp = if (dspActive) 0.78f else 0.65f
-                    val maxClamp = if (dspActive) 1.24f else 1.45f
+                    val minClamp = if (dspActive || carCabinActive) 0.78f else 0.65f
+                    val maxClamp = if (dspActive || carCabinActive) 1.24f else 1.45f
                     val desiredGain = (targetEnv / smoothedEnvelope.coerceAtLeast(0.05f)).coerceIn(minClamp, maxClamp)
                     currentNormGain += 0.0004f * (desiredGain - currentNormGain)
                 }
                 currentNormGain
             } else 1.0f
 
-            var sL = rawL * normGain * smoothLeftGain
-            var sR = rawR * normGain * smoothRightGain
+            var sL = rawL * normGain * smoothLeftGain * currentDuckEnvelope
+            var sR = rawR * normGain * smoothRightGain * currentDuckEnvelope
 
-            if (dspActive || eqLoudnessComp) {
+            if (!navSpectralDuckFilter.isBypass) {
+                sL = navSpectralDuckFilter.processLeft(sL)
+                sR = navSpectralDuckFilter.processRight(sR)
+            }
+
+            if (dspActive || carCabinActive || eqLoudnessComp) {
                 // 0. 高通 (HPF) 与低通 (LPF) 边界滤波
                 if (hasActiveHpfLpf) {
                     if (!hpfFilter.isBypass) {
@@ -979,6 +1090,26 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
                 if (hasActiveWarmthFilter) {
                     sL = warmthLowMidFilter.processLeft(warmthBodyFilter.processLeft(sL))
                     sR = warmthLowMidFilter.processRight(warmthBodyFilter.processRight(sR))
+                }
+
+                // 4.5. 64-bit 车载座舱专属声学滤波（62Hz 胎噪补偿 + 235Hz 车门防共振净空 + 3.45kHz 仪表台声像抬升 + 主驾左声道 ITD 微延迟）
+                if (hasActiveCarCabinFilter) {
+                    sL = carStageLiftFilter.processLeft(
+                        carDoorAntiBoomFilter.processLeft(
+                            carRoadBassFilter.processLeft(sL)
+                        )
+                    )
+                    sR = carStageLiftFilter.processRight(
+                        carDoorAntiBoomFilter.processRight(
+                            carRoadBassFilter.processRight(sR)
+                        )
+                    )
+                }
+                if (channels == 2 && activeCarLeftItdDelaySamples > 0) {
+                    carDriverItdBufferL[carDriverItdWriteIdx] = sL
+                    val delayedReadIdx = (carDriverItdWriteIdx - activeCarLeftItdDelaySamples + maxCarItdSamples) % maxCarItdSamples
+                    sL = carDriverItdBufferL[delayedReadIdx]
+                    carDriverItdWriteIdx = (carDriverItdWriteIdx + 1) % maxCarItdSamples
                 }
 
                 // 5. 全维空间声场处理 (M/S 低频锚定拓宽 + Haas 微延迟 + Bauer 耳机交叉馈送 + 舞台纵深早期反射)

@@ -121,6 +121,15 @@ enum class AppPermissionType(
         purposeDescription = "用于将歌曲/歌单分享链接、歌曲特征码 Hash 及诊断信息写入系统剪贴板，并在应用切回前台或打开搜索/歌单导入面板时自动识别剪贴板中的酷狗音乐与概念版分享链接。",
         privacyCommitment = "仅在您主动点击复制按钮，或应用处于前台且开启本权限时检测是否存在「kugou.com / kugouyouth://」音乐分享链接；绝不后台轮询、绝不上传或留存任何非音乐链接的私人剪贴板文本。",
         disabledImpactDescription = "关闭后将禁止应用读取剪贴板识别音乐分享口令，同时停用应用内一键复制分享链接与复制特征码功能（您仍可通过系统原生分享面板发送文本）。"
+    ),
+    BLUETOOTH_CAR_INTERCONNECT(
+        key = "perm_bluetooth_car",
+        title = "车载蓝牙识别与车机列表",
+        badge = "车载互联",
+        manifestPermissionName = "BLUETOOTH_CONNECT (neverForLocation) · AudioDeviceInfo",
+        purposeDescription = "用于识别已连接的车载蓝牙音响名称、车载音频硬件类别码（CAR_AUDIO），并支持在未上车时离线浏览和管理手机「已配对车机蓝牙列表」，自动挂载 64-bit 座舱声学与车载蓝牙歌词。",
+        privacyCommitment = "严格声明 neverForLocation 零定位标记，绝不扫描附近未配对蓝牙设备或推导物理位置；未授予系统蓝牙权限时自动降级为通过零权限音频输出路由识别当前设备。",
+        disabledImpactDescription = "关闭后将停止读取蓝牙配对列表与车载硬件类别码，且不再通过蓝牙特征自动触发车载模式。"
     )
 }
 
@@ -142,7 +151,8 @@ data class AppPermissionState(
     val backgroundGuardianEnabled: Boolean = true,
     val motionOrientationEnabled: Boolean = true,
     val audioHardwareEnabled: Boolean = true,
-    val clipboardAccessEnabled: Boolean = true
+    val clipboardAccessEnabled: Boolean = true,
+    val bluetoothCarEnabled: Boolean = true
 ) {
     fun isEnabled(type: AppPermissionType): Boolean = when (type) {
         AppPermissionType.NETWORK_ACCESS -> networkAccessEnabled
@@ -155,6 +165,7 @@ data class AppPermissionState(
         AppPermissionType.MOTION_ORIENTATION -> motionOrientationEnabled
         AppPermissionType.AUDIO_HARDWARE -> audioHardwareEnabled
         AppPermissionType.CLIPBOARD_ACCESS -> clipboardAccessEnabled
+        AppPermissionType.BLUETOOTH_CAR_INTERCONNECT -> bluetoothCarEnabled
     }
 
     val enabledCount: Int
@@ -174,6 +185,7 @@ data class AppPermissionState(
         AppPermissionType.MOTION_ORIENTATION -> copy(motionOrientationEnabled = enabled)
         AppPermissionType.AUDIO_HARDWARE -> copy(audioHardwareEnabled = enabled)
         AppPermissionType.CLIPBOARD_ACCESS -> copy(clipboardAccessEnabled = enabled)
+        AppPermissionType.BLUETOOTH_CAR_INTERCONNECT -> copy(bluetoothCarEnabled = enabled)
     }
 }
 
@@ -221,7 +233,8 @@ object AppPermissionManager {
             backgroundGuardianEnabled = p.getBoolean(AppPermissionType.BACKGROUND_GUARDIAN.key, true),
             motionOrientationEnabled = p.getBoolean(AppPermissionType.MOTION_ORIENTATION.key, legacyMotionEnabled),
             audioHardwareEnabled = p.getBoolean(AppPermissionType.AUDIO_HARDWARE.key, true),
-            clipboardAccessEnabled = p.getBoolean(AppPermissionType.CLIPBOARD_ACCESS.key, true)
+            clipboardAccessEnabled = p.getBoolean(AppPermissionType.CLIPBOARD_ACCESS.key, true),
+            bluetoothCarEnabled = p.getBoolean(AppPermissionType.BLUETOOTH_CAR_INTERCONNECT.key, true)
         )
         _state.value = loaded
     }
@@ -261,6 +274,13 @@ object AppPermissionManager {
                     ?.putBoolean("motion_orientation_sensor_enabled", enabled)
                     ?.apply()
                 onMotionPermissionSyncedCallback?.invoke(enabled)
+            }
+            AppPermissionType.BLUETOOTH_CAR_INTERCONNECT -> {
+                if (!enabled) {
+                    runCatching { CarSessionManager.onBluetoothCarPermissionDisabled(context) }
+                } else if (context != null) {
+                    runCatching { CarSessionManager.reevaluateActiveConnections(context) }
+                }
             }
             else -> {}
         }
@@ -528,6 +548,42 @@ object AppPermissionManager {
                 isSystemGranted = true,
                 actionButtonLabel = null
             )
+            AppPermissionType.BLUETOOTH_CAR_INTERCONNECT -> {
+                val btGranted = hasBluetoothConnectSystemPermission(context)
+                SystemPermissionGrantStatus(
+                    statusLabel = if (btGranted) {
+                        "附近设备(蓝牙连接)已授权 · 完整车机列表可用"
+                    } else {
+                        "零权限音频路由兜底中 · 授权后支持离线配对列表"
+                    },
+                    isSystemGranted = btGranted,
+                    actionButtonLabel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !btGranted) "蓝牙权限设置" else null
+                )
+            }
+        }
+    }
+
+    fun hasBluetoothConnectSystemPermission(context: Context): Boolean {
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.BLUETOOTH
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }.getOrDefault(false)
+    }
+
+    fun requiredBluetoothConnectRuntimePermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            emptyArray()
         }
     }
 

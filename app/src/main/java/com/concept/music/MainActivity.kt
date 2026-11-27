@@ -1700,6 +1700,12 @@ fun MainContent(
             visible = !showViperEffectOverlay,
             onOpenPlayer = { showNowPlaying = true }
         )
+
+        // 独立隔离状态订阅的手机端「首次车载蓝牙连接询问卡」宿主（平板版自动静默旁路）
+        com.concept.music.ui.components.IsolatedCarBluetoothPromptHost(
+            visible = !showViperEffectOverlay,
+            onDecisionApplied = { musicPlayerViewModel.notifyCarLyricOffsetChanged() }
+        )
     }
 }
 

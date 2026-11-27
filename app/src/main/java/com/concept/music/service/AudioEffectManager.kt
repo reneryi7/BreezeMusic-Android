@@ -563,6 +563,24 @@ data class AudioEffectState(
     val syncingOnlineEffects: Boolean = false
 )
 
+/**
+ * 64-bit 车载座舱实时声学叠加层配置（不污染用户日常 Viper 预设与自定义 PEQ 槽位）
+ */
+data class CarCabinDspOverlay(
+    val active: Boolean = false,
+    val mode: CarCabinAcousticMode = CarCabinAcousticMode.DIRECT_BYPASS,
+    val leftChannelItdDelayMs: Float = 0f,
+    val rightDistanceTrimDb: Float = 0f,
+    val stageLiftDb: Float = 0f,
+    val roadNoiseSubBoostDb: Float = 0f,
+    val doorAntiBoomCutDb: Float = 0f,
+    val stereoWidthBoost: Float = 0f
+) {
+    companion object {
+        val Disabled = CarCabinDspOverlay(active = false)
+    }
+}
+
 object AudioEffectManager {
     private var prefs: SharedPreferences? = null
     private var currentSessionId: Int = 0
@@ -572,6 +590,10 @@ object AudioEffectManager {
      * 每次音效状态或详细调音参数修改时递增，供 `ConceptMasteringAudioProcessor` 在音频帧级别零延迟感知并重算 64-bit DSP 滤波器系数
      */
     val dspConfigVersion = AtomicLong(1L)
+
+    @Volatile
+    var carCabinOverlay: CarCabinDspOverlay = CarCabinDspOverlay.Disabled
+        private set
 
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
@@ -1589,6 +1611,100 @@ object AudioEffectManager {
         volumeNormModifiedBeforeInit = true
         _state.value = _state.value.copy(volumeNormalizationEnabled = enabled)
         dspConfigVersion.incrementAndGet()
+        saveToPrefs()
+    }
+
+    /**
+     * 车载会话期间临时启用跨曲目智能响度均衡（不覆写用户日常 SharedPreferences 配置，下车自动由快照还原）
+     */
+    internal fun setVolumeNormalizationTransientForCar(enabled: Boolean) {
+        if (_state.value.volumeNormalizationEnabled != enabled) {
+            _state.value = _state.value.copy(volumeNormalizationEnabled = enabled)
+            dspConfigVersion.incrementAndGet()
+        }
+    }
+
+    fun applyCarCabinOverlay(overlay: CarCabinDspOverlay) {
+        carCabinOverlay = overlay
+        dspConfigVersion.incrementAndGet()
+    }
+
+    fun clearCarCabinOverlay() {
+        if (carCabinOverlay.active || carCabinOverlay.mode != CarCabinAcousticMode.DIRECT_BYPASS) {
+            carCabinOverlay = CarCabinDspOverlay.Disabled
+            dspConfigVersion.incrementAndGet()
+        }
+    }
+
+    internal fun resetForTest() {
+        carCabinOverlay = CarCabinDspOverlay.Disabled
+        volumeNormModifiedBeforeInit = false
+        _state.value = AudioEffectState()
+        dspConfigVersion.incrementAndGet()
+    }
+
+    /**
+     * 下车断开或进程重启冷启动自愈时，从上车前保存的日常快照 100% 还原手机音效与调音台状态
+     */
+    fun restoreFromEverydaySnapshot(snapshot: PreCarEverydaySnapshot) {
+        val restoredPreset = runCatching { EffectPreset.valueOf(snapshot.presetName) }
+            .getOrDefault(EffectPreset.OFF)
+        val restoredReverb = runCatching { ReverbMode.valueOf(snapshot.reverbName) }
+            .getOrDefault(ReverbMode.NONE)
+        val restoredTypes = if (snapshot.tenBandFilterTypeNames.size == 10) {
+            snapshot.tenBandFilterTypeNames.map { name ->
+                runCatching { PeqFilterType.valueOf(name) }.getOrDefault(PeqFilterType.PEAK)
+            }
+        } else {
+            DEFAULT_TEN_BAND_TYPES
+        }
+        val restoredBands = if (snapshot.bandLevels.size == 5) snapshot.bandLevels else defaultBandsForPreset(restoredPreset)
+        val restoredTenBands = if (snapshot.tenBandLevels.size == 10) snapshot.tenBandLevels else defaultTenBandsForPreset(restoredPreset)
+        val restoredQs = if (snapshot.tenBandQFactors.size == 10) snapshot.tenBandQFactors else DEFAULT_TEN_BAND_Q
+        val restoredHz = if (snapshot.tenBandCenterHz.size == 10) snapshot.tenBandCenterHz else DEFAULT_TEN_BAND_HZ
+
+        if (restoredPreset != EffectPreset.OFF) {
+            lastActivePresetBeforeDisable = restoredPreset
+        }
+        volumeNormModifiedBeforeInit = true
+
+        _state.update { cur ->
+            cur.copy(
+                isEnabled = snapshot.effectEnabled && restoredPreset != EffectPreset.OFF,
+                currentPreset = if (snapshot.effectEnabled) restoredPreset else EffectPreset.OFF,
+                isAbBypassActive = false,
+                bassBoostStrength = snapshot.bassBoost.coerceIn(0, 1000),
+                bassPunchStrength = snapshot.bassPunch.coerceIn(0, 1000),
+                bassCutoffHz = snapshot.bassCutoffHz.coerceIn(40, 120),
+                virtualizerStrength = snapshot.virt.coerceIn(0, 1000),
+                soundstageDepthStrength = snapshot.depth.coerceIn(0, 1000),
+                crossfeedStrength = snapshot.crossfeed.coerceIn(0, 1000),
+                vocalClarityStrength = snapshot.clarity.coerceIn(0, 1000),
+                deEsserStrength = snapshot.deEsser.coerceIn(0, 1000),
+                trebleAirStrength = snapshot.air.coerceIn(0, 1000),
+                analogWarmthStrength = snapshot.warmth.coerceIn(0, 1000),
+                transientAttackStrength = snapshot.transientAttack.coerceIn(0, 1000),
+                surroundRotationSpeed = snapshot.rotSpeed.coerceIn(0, 100),
+                loudnessGainMb = snapshot.loudness.coerceIn(0, 1500),
+                preampGainDb = snapshot.preampDb.coerceIn(-12f, 12f),
+                channelBalance = snapshot.channelBalance.coerceIn(-1f, 1f),
+                antiClippingEnabled = snapshot.antiClip,
+                equalLoudnessCompensation = snapshot.eqLoudness,
+                volumeNormalizationEnabled = snapshot.volumeNormalization,
+                reverbMode = restoredReverb,
+                reverbWetMix = snapshot.reverbWet.coerceIn(0, 1000),
+                reverbPreDelayMs = snapshot.reverbPreDelay.coerceIn(0, 80),
+                reverbDamping = snapshot.reverbDamp.coerceIn(0, 1000),
+                bandLevels = restoredBands,
+                tenBandLevels = restoredTenBands,
+                tenBandQFactors = restoredQs,
+                tenBandCenterHz = restoredHz,
+                tenBandFilterTypes = restoredTypes,
+                highPassCutoffHz = snapshot.highPassCutoffHz.coerceIn(0, 120),
+                lowPassCutoffHz = snapshot.lowPassCutoffHz.coerceIn(8000, 20000)
+            )
+        }
+        applyCurrentState()
         saveToPrefs()
     }
 

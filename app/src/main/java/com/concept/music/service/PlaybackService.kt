@@ -1,5 +1,6 @@
 package com.concept.music.service
 
+import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -17,7 +18,10 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.AuxEffectInfo
 import androidx.media3.common.C
+import androidx.media3.common.FlagSet
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
@@ -31,18 +35,23 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.concept.music.MainActivity
 import com.concept.music.R
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +60,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -113,6 +123,9 @@ class HeadsetMediaButtonController(
 
     @Volatile
     var swapDoubleTripleClick: Boolean = false
+
+    @Volatile
+    var bypassMultiClickDelay: Boolean = false
 
     private var pendingClickCount: Int = 0
     private var lastDownTimeMs: Long = -1L
@@ -205,7 +218,7 @@ class HeadsetMediaButtonController(
         }
 
         if (isToggleOrHookKey(keyCode)) {
-            if (!multiClickSkipEnabled) {
+            if (!multiClickSkipEnabled || bypassMultiClickDelay) {
                 cancelScheduled()
                 pendingClickCount = 0
                 onTogglePlay()
@@ -251,15 +264,19 @@ class HeadsetMediaButtonController(
 // 64-bit 纯线性双二阶母带级音频处理器已独立拆分至 ConceptMasteringAudioProcessor.kt (支持 10段 PEQ 与 hasActiveEqBands 零开销短路)
 
 /**
- * AndroidX Media3 官方后台播放服务
- * 提供锁屏控制、通知栏控制面板、有线/蓝牙耳机按键拦截、三档音频焦点与闪避管理、耳机连接自动播放与蓝牙连接检测
+ * AndroidX Media3 官方后台播放与车载媒体树服务 (`MediaLibraryService`)
+ * 提供锁屏控制、通知栏控制面板、有线/蓝牙耳机与方向盘零延迟按键拦截、三档音频焦点与车载导航平滑闪避、
+ * 车载蓝牙高定呼吸歌词推送以及 Android Auto / HiCar / CarWith / Carlink 媒体浏览树服务。
  */
-class PlaybackService : MediaSessionService() {
+class PlaybackService : MediaLibraryService() {
 
     private var player: ExoPlayer? = null
-    private var mediaSession: MediaSession? = null
+    private var mediaSession: MediaLibrarySession? = null
+    private var carForwardingPlayer: CarLyricForwardingPlayer? = null
+    private val libraryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var audioManager: AudioManager? = null
     private var duckFocusRequest: AudioFocusRequest? = null
+    private var duckReleaseHoldRunnable: Runnable? = null
     private var hasActiveDuckFocus: Boolean = false
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var bgAutoAdvanceRunnable: Runnable? = null
@@ -268,10 +285,16 @@ class PlaybackService : MediaSessionService() {
     private val connectedBluetoothIds = mutableSetOf<Int>()
 
     private val duckAudioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        duckReleaseHoldRunnable?.let { mainHandler?.removeCallbacks(it) }
+        duckReleaseHoldRunnable = null
         if (currentAudioFocusMode != AudioFocusMode.DUCK) {
             audioFocusDuckGain = 1.0f
             return@OnAudioFocusChangeListener
         }
+        val carState = CarSessionManager.state.value
+        val useCarSmartDuck = CarSessionManager.isPhoneCarFeatureSupported() &&
+            carState.isCarModeActive &&
+            carState.smartNavDuckingEnabled
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // 永久失去焦点（如用户主动切到其他音乐/视频播放器）：平滑暂停并复位音量增益，避免卡死 30% 音量
@@ -281,11 +304,32 @@ class PlaybackService : MediaSessionService() {
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // 临时闪避（导航/语音/短通知）：不暂停音乐，平滑压低至 30% 音量
-                audioFocusDuckGain = 0.30f
+                // 临时闪避（导航/语音/短通知）：车载模式支持自定义压低比例与频段避让，日常模式默认 30%
+                audioFocusDuckGain = if (useCarSmartDuck) {
+                    carState.navDuckingTargetGain.coerceIn(0.15f, 0.50f)
+                } else {
+                    0.30f
+                }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                audioFocusDuckGain = 1.0f
+                if (useCarSmartDuck) {
+                    // 车载智能防呼吸保持期（350ms Hold）：连续两段导航语音播报停顿间保持平滑压低，消除音量忽大忽小抽搐
+                    val holdRunnable = Runnable {
+                        duckReleaseHoldRunnable = null
+                        if (currentAudioFocusMode == AudioFocusMode.DUCK) {
+                            audioFocusDuckGain = 1.0f
+                        }
+                    }
+                    duckReleaseHoldRunnable = holdRunnable
+                    val h = mainHandler
+                    if (h != null) {
+                        h.postDelayed(holdRunnable, 350L)
+                    } else {
+                        audioFocusDuckGain = 1.0f
+                    }
+                } else {
+                    audioFocusDuckGain = 1.0f
+                }
             }
         }
     }
@@ -721,6 +765,31 @@ class PlaybackService : MediaSessionService() {
             headsetButtonController.multiClickTimeoutMs = sensitivity.timeoutMs
         }
 
+        /**
+         * 车载模式方向盘媒体键零延迟响应开关：
+         * 开启后跳过有线耳机单键 350ms 双击等待窗口，实现方向盘播放/暂停与上下曲物理按键 0ms 即按即响。
+         */
+        fun updateSteeringWheelZeroLatency(enabled: Boolean) {
+            headsetButtonController.bypassMultiClickDelay = enabled
+        }
+
+        /**
+         * 通知后台服务歌词数据、偏移量或车载模式已更新，立即刷新蓝牙 AVRCP 呼吸歌词调度器
+         */
+        fun notifyCarAvrcpLyricDataUpdated() {
+            val svc = activeServiceInstance ?: return
+            runCatching {
+                val mainLooper = Looper.getMainLooper()
+                if (mainLooper == null || Looper.myLooper() == mainLooper) {
+                    svc.refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
+                } else {
+                    mainHandler?.post {
+                        svc.refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
+                    }
+                }
+            }
+        }
+
         fun updateHeadsetAutoPlayConfig(
             enabled: Boolean,
             wiredEnabled: Boolean = autoPlayOnWiredConnectEnabled,
@@ -814,6 +883,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun abandonDuckAudioFocusRequest() {
+        duckReleaseHoldRunnable?.let { mainHandler?.removeCallbacks(it) }
+        duckReleaseHoldRunnable = null
         hasActiveDuckFocus = false
         val am = audioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -865,7 +936,20 @@ class PlaybackService : MediaSessionService() {
                     onBluetoothConnectionChanged?.invoke(btConnectedNow)
                 }
 
-                if (autoPlayOnHeadsetConnectEnabled && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)) {
+                CarSessionManager.reevaluateActiveConnections(
+                    context = applicationContext,
+                    newlyAddedBluetooth = newlyAddedBluetooth,
+                    isInitialBoot = false
+                )
+
+                // 若新增蓝牙设备已归属认证车机白名单，严格交由车载专属自动续播开关 (`autoPlayOnCarConnect`) 独立控制
+                val handledByCarPolicy = newlyAddedBluetooth &&
+                    CarSessionManager.state.value.activeConnectionSource == CarConnectionSource.CONFIRMED_BLUETOOTH
+
+                if (!handledByCarPolicy &&
+                    autoPlayOnHeadsetConnectEnabled &&
+                    AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
+                ) {
                     val shouldTriggerWired = newlyAddedWired && autoPlayOnWiredConnectEnabled
                     val shouldTriggerBt = newlyAddedBluetooth && autoPlayOnBluetoothConnectEnabled
                     if (shouldTriggerWired || shouldTriggerBt) {
@@ -885,6 +969,11 @@ class PlaybackService : MediaSessionService() {
                     isBluetoothAudioOutputConnected = btConnectedNow
                     onBluetoothConnectionChanged?.invoke(btConnectedNow)
                 }
+                CarSessionManager.reevaluateActiveConnections(
+                    context = applicationContext,
+                    newlyAddedBluetooth = false,
+                    isInitialBoot = false
+                )
             }
         }
         audioDeviceCallback = callback
@@ -1015,7 +1104,20 @@ class PlaybackService : MediaSessionService() {
                     stopListenStatsTick()
                     SystemLyricBridge.syncProgressFromService(exoPlayer.currentPosition, false)
                 }
+                refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = false)
                 refreshMediaSessionCustomLayoutInternal()
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                ) {
+                    refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
@@ -1044,6 +1146,7 @@ class PlaybackService : MediaSessionService() {
                 } else {
                     stopListenStatsTick()
                 }
+                refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
             }
 
             override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
@@ -1093,8 +1196,6 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
-        setupAudioDeviceMonitor()
-
         AudioEffectManager.init(applicationContext)
         AudioEffectManager.onAuxEffectChanged = { effectId, sendLevel ->
             runCatching {
@@ -1111,6 +1212,17 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
+        CarSessionManager.onTriggerCarAutoPlayCallback = { ctx ->
+            if (AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)) {
+                PlaybackCoordinator.handleResumeOnHeadsetConnected(ctx, player)
+            }
+        }
+        CarSessionManager.onCarModeChangedCallback = {
+            refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
+        }
+        setupAudioDeviceMonitor()
+        CarSessionManager.init(applicationContext)
+
         val sessionActivityPendingIntent = PendingIntent.getActivity(
             this,
             0,
@@ -1118,73 +1230,59 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
-            override fun getAvailableCommands(): Player.Commands {
-                return super.getAvailableCommands()
-                    .buildUpon()
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                    .add(Player.COMMAND_SEEK_TO_NEXT)
-                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-                    .build()
-            }
-
-            override fun isCommandAvailable(command: Int): Boolean {
-                return when (command) {
-                    Player.COMMAND_SEEK_TO_PREVIOUS,
-                    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
-                    Player.COMMAND_SEEK_TO_NEXT,
-                    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> true
-                    else -> super.isCommandAvailable(command)
-                }
-            }
-
-            override fun hasPreviousMediaItem(): Boolean = true
-
-            override fun hasNextMediaItem(): Boolean = true
-
-            override fun play() {
-                if (exoPlayer.mediaItemCount == 0) {
-                    if (!PlaybackCoordinator.handleTogglePlay(applicationContext, exoPlayer)) {
-                        super.play()
-                    }
-                } else {
-                    super.play()
-                }
-            }
-
-            override fun seekToPrevious() {
-                if (!PlaybackCoordinator.handleSkipToPrevious(applicationContext, exoPlayer)) {
-                    super.seekToPrevious()
-                }
-            }
-
-            override fun seekToPreviousMediaItem() {
-                if (!PlaybackCoordinator.handleSkipToPrevious(applicationContext, exoPlayer)) {
-                    super.seekToPreviousMediaItem()
-                }
-            }
-
-            override fun seekToNext() {
-                if (!PlaybackCoordinator.handleSkipToNext(applicationContext, exoPlayer)) {
-                    super.seekToNext()
-                }
-            }
-
-            override fun seekToNextMediaItem() {
-                if (!PlaybackCoordinator.handleSkipToNext(applicationContext, exoPlayer)) {
-                    super.seekToNextMediaItem()
-                }
-            }
+        val forwardingPlayer = CarLyricForwardingPlayer(exoPlayer).also {
+            carForwardingPlayer = it
         }
 
         runCatching {
-            val notificationProvider = DefaultMediaNotificationProvider.Builder(applicationContext)
+            val delegateProvider = DefaultMediaNotificationProvider.Builder(applicationContext)
                 .build()
                 .apply {
                     setSmallIcon(R.drawable.ic_launcher_concept)
                 }
-            setMediaNotificationProvider(notificationProvider)
+            val stableNotificationProvider = object : MediaNotification.Provider {
+                override fun createNotification(
+                    mediaSession: MediaSession,
+                    customLayout: ImmutableList<CommandButton>,
+                    actionFactory: MediaNotification.ActionFactory,
+                    onNotificationChangedCallback: MediaNotification.Provider.Callback
+                ): MediaNotification {
+                    val mediaNotif = delegateProvider.createNotification(
+                        mediaSession,
+                        customLayout,
+                        actionFactory,
+                        onNotificationChangedCallback
+                    )
+                    if (isCarBluetoothLyricActive()) {
+                        val rawItemMeta = player?.currentMediaItem?.mediaMetadata
+                        val stableTitle = rawItemMeta?.displayTitle?.toString()?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.title?.toString()?.takeIf { it.isNotBlank() }
+                            ?: SystemLyricBridge.currentSongSnapshot?.title
+                        val stableArtist = rawItemMeta?.subtitle?.toString()?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.artist?.toString()?.takeIf { it.isNotBlank() }
+                            ?: SystemLyricBridge.currentSongSnapshot?.artist
+                        runCatching {
+                            val extras = mediaNotif.notification.extras
+                            if (!stableTitle.isNullOrBlank()) {
+                                extras.putCharSequence(Notification.EXTRA_TITLE, stableTitle)
+                            }
+                            if (!stableArtist.isNullOrBlank()) {
+                                extras.putCharSequence(Notification.EXTRA_TEXT, stableArtist)
+                            }
+                        }
+                    }
+                    return mediaNotif
+                }
+
+                override fun handleCustomCommand(
+                    session: MediaSession,
+                    action: String,
+                    extras: Bundle
+                ): Boolean {
+                    return delegateProvider.handleCustomCommand(session, action, extras)
+                }
+            }
+            setMediaNotificationProvider(stableNotificationProvider)
         }
 
         SystemLyricBridge.init(applicationContext)
@@ -1195,36 +1293,59 @@ class PlaybackService : MediaSessionService() {
             }
         }
 
-        val sessionCallback = object : MediaSession.Callback {
+        val sessionCallback = object : MediaLibrarySession.Callback {
             @OptIn(UnstableApi::class)
             override fun onConnect(
                 session: MediaSession,
                 controller: MediaSession.ControllerInfo
             ): MediaSession.ConnectionResult {
                 val isSelfOrSystem = isVerifiedSystemOrSelfController(controller)
-                val customButtons = buildNotificationCustomLayout()
-                return if (isSelfOrSystem) {
-                    val availableSessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
-                        .buildUpon()
-                        .add(SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC)
-                        .add(SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC_LOCK)
-                        .build()
-                    MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                        .setAvailableSessionCommands(availableSessionCommands)
-                        .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
-                        .setCustomLayout(customButtons)
-                        .build()
-                } else {
-                    val restrictedPlayerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
-                        .buildUpon()
-                        .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
-                        .remove(Player.COMMAND_SET_MEDIA_ITEM)
-                        .build()
-                    MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                        .setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS)
-                        .setAvailablePlayerCommands(restrictedPlayerCommands)
-                        .build()
+                val isCarHost = isVerifiedCarHostController(controller)
+                if (isCarHost) {
+                    CarSessionManager.onProjectionControllerConnected(applicationContext, controller.packageName)
                 }
+                val customButtons = buildNotificationCustomLayout()
+                return when {
+                    isSelfOrSystem -> {
+                        val availableSessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+                            .buildUpon()
+                            .add(SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC)
+                            .add(SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC_LOCK)
+                            .build()
+                        MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                            .setAvailableSessionCommands(availableSessionCommands)
+                            .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
+                            .setCustomLayout(customButtons)
+                            .build()
+                    }
+                    isCarHost -> {
+                        MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                            .setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS)
+                            .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
+                            .build()
+                    }
+                    else -> {
+                        val restrictedPlayerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+                            .buildUpon()
+                            .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
+                            .remove(Player.COMMAND_SET_MEDIA_ITEM)
+                            .build()
+                        MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                            .setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS)
+                            .setAvailablePlayerCommands(restrictedPlayerCommands)
+                            .build()
+                    }
+                }
+            }
+
+            override fun onDisconnected(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo
+            ) {
+                if (CarMediaLibraryHelper.isKnownCarProjectionPackage(controller.packageName)) {
+                    CarSessionManager.onProjectionControllerDisconnected(applicationContext, controller.packageName)
+                }
+                super.onDisconnected(session, controller)
             }
 
             override fun onPostConnect(
@@ -1238,6 +1359,138 @@ class PlaybackService : MediaSessionService() {
                     session.setCustomLayout(controller, customButtons)
                     session.setCustomLayout(customButtons)
                 }
+            }
+
+            override fun onGetLibraryRoot(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<MediaItem>> {
+                if (!isVerifiedSystemOrSelfController(browser) && !isVerifiedCarHostController(browser)) {
+                    return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_PERMISSION_DENIED))
+                }
+                return Futures.immediateFuture(
+                    LibraryResult.ofItem(CarMediaLibraryHelper.buildRootMediaItem(), params)
+                )
+            }
+
+            override fun onGetChildren(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                parentId: String,
+                page: Int,
+                pageSize: Int,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+                if (!isVerifiedSystemOrSelfController(browser) && !isVerifiedCarHostController(browser)) {
+                    return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_PERMISSION_DENIED))
+                }
+                val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
+                libraryScope.launch {
+                    val allItems = runCatching {
+                        CarMediaLibraryHelper.loadChildrenForParent(applicationContext, parentId)
+                    }.getOrDefault(emptyList())
+                    val paged = if (page >= 0 && pageSize > 0 && pageSize < Int.MAX_VALUE / 2) {
+                        val from = (page.toLong() * pageSize.toLong()).coerceAtMost(allItems.size.toLong()).toInt()
+                        val to = ((page.toLong() + 1L) * pageSize.toLong()).coerceAtMost(allItems.size.toLong()).toInt()
+                        if (from < to) allItems.subList(from, to) else emptyList()
+                    } else {
+                        allItems
+                    }
+                    future.set(LibraryResult.ofItemList(ImmutableList.copyOf(paged), params))
+                }
+                return future
+            }
+
+            @OptIn(UnstableApi::class)
+            override fun onSetMediaItems(
+                mediaSession: MediaSession,
+                controller: MediaSession.ControllerInfo,
+                mediaItems: MutableList<MediaItem>,
+                startIndex: Int,
+                startPositionMs: Long
+            ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                val safeIdx = if (startIndex in mediaItems.indices) startIndex else 0
+                val targetRawItem = mediaItems.getOrNull(safeIdx)
+                val rawMediaId = targetRawItem?.mediaId.orEmpty()
+                if (!rawMediaId.startsWith(CarMediaLibraryHelper.PREFIX_TRACK)) {
+                    return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
+                }
+                if (!isVerifiedSystemOrSelfController(controller) && !isVerifiedCarHostController(controller)) {
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(emptyList(), C.INDEX_UNSET, C.TIME_UNSET)
+                    )
+                }
+                val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+                libraryScope.launch {
+                    val lookup = CarMediaLibraryHelper.lookupSongAndContextQueue(rawMediaId)
+                    val resolvedPair = if (lookup != null) {
+                        CarMediaLibraryHelper.resolvePlayableItemForCarSelection(applicationContext, lookup.first)
+                    } else null
+                    if (lookup != null && resolvedPair != null) {
+                        val (resolvedSong, playableMediaItem) = resolvedPair
+                        val parentKey = CarMediaLibraryHelper.parseCarTrackMediaId(rawMediaId)?.first.orEmpty()
+                        val isFm = parentKey == CarMediaLibraryHelper.TAB_PERSONAL_FM
+                        PlaybackCoordinator.adoptCarSelectedSongInBackground(
+                            context = applicationContext,
+                            resolvedSong = resolvedSong,
+                            queue = lookup.second,
+                            isPersonalFm = isFm
+                        )
+                        future.set(
+                            MediaSession.MediaItemsWithStartPosition(
+                                listOf(playableMediaItem),
+                                0,
+                                startPositionMs.coerceAtLeast(0L)
+                            )
+                        )
+                    } else {
+                        future.set(
+                            MediaSession.MediaItemsWithStartPosition(emptyList(), C.INDEX_UNSET, C.TIME_UNSET)
+                        )
+                    }
+                }
+                return future
+            }
+
+            override fun onAddMediaItems(
+                mediaSession: MediaSession,
+                controller: MediaSession.ControllerInfo,
+                mediaItems: MutableList<MediaItem>
+            ): ListenableFuture<MutableList<MediaItem>> {
+                val hasCarBrowseItem = mediaItems.any { it.mediaId.startsWith(CarMediaLibraryHelper.PREFIX_TRACK) }
+                if (!hasCarBrowseItem) {
+                    return super.onAddMediaItems(mediaSession, controller, mediaItems)
+                }
+                if (!isVerifiedSystemOrSelfController(controller) && !isVerifiedCarHostController(controller)) {
+                    return Futures.immediateFuture(mutableListOf())
+                }
+                val future = SettableFuture.create<MutableList<MediaItem>>()
+                libraryScope.launch {
+                    val out = mutableListOf<MediaItem>()
+                    for (rawItem in mediaItems) {
+                        if (rawItem.mediaId.startsWith(CarMediaLibraryHelper.PREFIX_TRACK)) {
+                            val lookup = CarMediaLibraryHelper.lookupSongAndContextQueue(rawItem.mediaId)
+                            val resolved = lookup?.let {
+                                CarMediaLibraryHelper.resolvePlayableItemForCarSelection(applicationContext, it.first)
+                            }
+                            if (lookup != null && resolved != null) {
+                                val parentKey = CarMediaLibraryHelper.parseCarTrackMediaId(rawItem.mediaId)?.first.orEmpty()
+                                PlaybackCoordinator.adoptCarSelectedSongInBackground(
+                                    context = applicationContext,
+                                    resolvedSong = resolved.first,
+                                    queue = lookup.second,
+                                    isPersonalFm = parentKey == CarMediaLibraryHelper.TAB_PERSONAL_FM
+                                )
+                                out.add(resolved.second)
+                            }
+                        } else {
+                            out.add(rawItem)
+                        }
+                    }
+                    future.set(out)
+                }
+                return future
             }
 
             override fun onCustomCommand(
@@ -1275,7 +1528,7 @@ class PlaybackService : MediaSessionService() {
                 controllerInfo: MediaSession.ControllerInfo,
                 intent: Intent
             ): Boolean {
-                if (!isVerifiedSystemOrSelfController(controllerInfo)) {
+                if (!isVerifiedSystemOrSelfController(controllerInfo) && !isVerifiedCarHostController(controllerInfo)) {
                     return false
                 }
                 val keyEvent = extractMediaKeyEvent(intent)
@@ -1293,14 +1546,252 @@ class PlaybackService : MediaSessionService() {
         }
 
         val initialCustomButtons = buildNotificationCustomLayout()
-        mediaSession = MediaSession.Builder(this, forwardingPlayer)
+        mediaSession = MediaLibrarySession.Builder(this, forwardingPlayer, sessionCallback)
             .setSessionActivity(sessionActivityPendingIntent)
-            .setCallback(sessionCallback)
             .setCustomLayout(initialCustomButtons)
             .build()
             .also { session ->
                 runCatching { session.setCustomLayout(initialCustomButtons) }
             }
+    }
+
+    @OptIn(UnstableApi::class)
+    private inner class CarLyricForwardingPlayer(
+        private val exoPlayer: ExoPlayer
+    ) : ForwardingPlayer(exoPlayer) {
+
+        private val sessionListeners = CopyOnWriteArraySet<Player.Listener>()
+        private var lastPushedAvrTitle: String = ""
+        private var lastPushedAvrArtist: String = ""
+        private var lastPushElapsedMs: Long = 0L
+
+        override fun addListener(listener: Player.Listener) {
+            sessionListeners.add(listener)
+            super.addListener(listener)
+        }
+
+        override fun removeListener(listener: Player.Listener) {
+            sessionListeners.remove(listener)
+            super.removeListener(listener)
+        }
+
+        override fun getAvailableCommands(): Player.Commands {
+            return super.getAvailableCommands()
+                .buildUpon()
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_NEXT)
+                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .build()
+        }
+
+        override fun isCommandAvailable(command: Int): Boolean {
+            return when (command) {
+                Player.COMMAND_SEEK_TO_PREVIOUS,
+                Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+                Player.COMMAND_SEEK_TO_NEXT,
+                Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> true
+                else -> super.isCommandAvailable(command)
+            }
+        }
+
+        override fun hasPreviousMediaItem(): Boolean = true
+
+        override fun hasNextMediaItem(): Boolean = true
+
+        override fun play() {
+            if (exoPlayer.mediaItemCount == 0) {
+                if (!PlaybackCoordinator.handleTogglePlay(applicationContext, exoPlayer)) {
+                    super.play()
+                }
+            } else {
+                super.play()
+            }
+        }
+
+        override fun seekToPrevious() {
+            if (!PlaybackCoordinator.handleSkipToPrevious(applicationContext, exoPlayer)) {
+                super.seekToPrevious()
+            }
+        }
+
+        override fun seekToPreviousMediaItem() {
+            if (!PlaybackCoordinator.handleSkipToPrevious(applicationContext, exoPlayer)) {
+                super.seekToPreviousMediaItem()
+            }
+        }
+
+        override fun seekToNext() {
+            if (!PlaybackCoordinator.handleSkipToNext(applicationContext, exoPlayer)) {
+                super.seekToNext()
+            }
+        }
+
+        override fun seekToNextMediaItem() {
+            if (!PlaybackCoordinator.handleSkipToNext(applicationContext, exoPlayer)) {
+                super.seekToNextMediaItem()
+            }
+        }
+
+        override fun getMediaMetadata(): MediaMetadata {
+            val base = super.getMediaMetadata()
+            if (!isCarBluetoothLyricActive()) {
+                return base
+            }
+            val snap = buildCurrentCarAvrcpSnapshot(base)
+            return base.buildUpon()
+                .setTitle(snap.avrTitle)
+                .setArtist(snap.avrArtist)
+                .setDisplayTitle(snap.notificationTitle)
+                .setSubtitle(snap.notificationArtist)
+                .build()
+        }
+
+        fun pushAvrcpMetadataIfChanged(force: Boolean = false) {
+            val nowElapsed = safeServiceElapsedRealtime()
+            if (!force && lastPushElapsedMs > 0L && (nowElapsed - lastPushElapsedMs) < 400L) {
+                return
+            }
+            val updatedMeta = mediaMetadata
+            val nextTitle = updatedMeta.title?.toString().orEmpty()
+            val nextArtist = updatedMeta.artist?.toString().orEmpty()
+            if (!force && nextTitle == lastPushedAvrTitle && nextArtist == lastPushedAvrArtist) {
+                return
+            }
+            lastPushedAvrTitle = nextTitle
+            lastPushedAvrArtist = nextArtist
+            lastPushElapsedMs = nowElapsed
+
+            val events = Player.Events(
+                FlagSet.Builder().add(Player.EVENT_MEDIA_METADATA_CHANGED).build()
+            )
+            for (listener in sessionListeners) {
+                runCatching {
+                    listener.onMediaMetadataChanged(updatedMeta)
+                    listener.onEvents(this, events)
+                }
+            }
+        }
+    }
+
+    private fun isCarBluetoothLyricActive(): Boolean {
+        val car = CarSessionManager.state.value
+        return CarSessionManager.isPhoneCarFeatureSupported() &&
+            car.isCarModeActive &&
+            car.carBluetoothLyricEnabled &&
+            AppPermissionManager.isPermissionEnabled(AppPermissionType.NOTIFICATION_MEDIA)
+    }
+
+    private fun resolveCarAdjustedLyricPositionMs(rawPosMs: Long): Long {
+        val car = CarSessionManager.state.value
+        val hwAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
+        // 若前台 ViewModel 已将车载偏移合并入 SystemLyricBridge.lyricOffsetMsSnapshot，直接使用；否则叠加车载校准值
+        val bridgeOffset = SystemLyricBridge.lyricOffsetMsSnapshot
+        val effectiveOffset = if (PlaybackCoordinator.onTogglePlayDelegate != null) {
+            bridgeOffset
+        } else {
+            val baseSongOffset = runCatching {
+                applicationContext.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+                    .getLong("lyric_offset_ms", 0L)
+            }.getOrDefault(0L)
+            baseSongOffset + (if (hwAllowed) car.carLyricOffsetMs else 0L)
+        }
+        return (rawPosMs + effectiveOffset).coerceAtLeast(0L)
+    }
+
+    private fun buildCurrentCarAvrcpSnapshot(baseMeta: MediaMetadata): CarAvrcpMetadataSnapshot {
+        val p = player
+        val activeMediaId = p?.currentMediaItem?.mediaId.orEmpty()
+        val bridgeSong = SystemLyricBridge.currentSongSnapshot
+        val matchedBridgeSong = bridgeSong?.takeIf { activeMediaId.isBlank() || it.id == activeMediaId }
+        val resolvedSong = matchedBridgeSong
+            ?: buildFallbackSongFromMediaItem(p?.currentMediaItem, p?.duration?.takeIf { it > 0L } ?: 0L)
+        val lyricData = if (matchedBridgeSong != null) {
+            SystemLyricBridge.currentLyricSnapshot
+        } else {
+            com.concept.music.data.model.LyricData.Empty
+        }
+        val adjustedPos = resolveCarAdjustedLyricPositionMs(p?.currentPosition ?: 0L)
+        val carState = CarSessionManager.state.value
+        val fallbackTitle = baseMeta.displayTitle?.toString()?.takeIf { it.isNotBlank() }
+            ?: baseMeta.title?.toString()?.takeIf { it.isNotBlank() }
+            ?: "微风音乐"
+        val fallbackArtist = baseMeta.subtitle?.toString()?.takeIf { it.isNotBlank() }
+            ?: baseMeta.artist?.toString()?.takeIf { it.isNotBlank() }
+            ?: "未知歌手"
+        if (resolvedSong == null) {
+            return CarAvrcpMetadataSnapshot(
+                avrTitle = fallbackTitle,
+                avrArtist = fallbackArtist,
+                notificationTitle = fallbackTitle,
+                notificationArtist = fallbackArtist
+            )
+        }
+        return CarAvrcpLyricFormatter.formatMetadataSnapshot(
+            song = resolvedSong,
+            lyricData = lyricData,
+            adjustedPositionMs = adjustedPos,
+            enableCarLyric = true,
+            interludeStyle = carState.carInterludeStyle
+        )
+    }
+
+    private val carAvrcpLyricRunnable = object : Runnable {
+        override fun run() {
+            val p = player ?: return
+            if (!p.isPlaying || !isCarBluetoothLyricActive()) return
+            carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = false)
+            val activeMediaId = p.currentMediaItem?.mediaId.orEmpty()
+            val bridgeSong = SystemLyricBridge.currentSongSnapshot
+            val lyricData = if (bridgeSong != null && (activeMediaId.isBlank() || bridgeSong.id == activeMediaId)) {
+                SystemLyricBridge.currentLyricSnapshot
+            } else {
+                com.concept.music.data.model.LyricData.Empty
+            }
+            val adjustedPos = resolveCarAdjustedLyricPositionMs(p.currentPosition)
+            val delayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
+                lyricData = lyricData,
+                adjustedPositionMs = adjustedPos,
+                playbackSpeed = p.playbackParameters.speed
+            )
+            mainHandler?.postDelayed(this, delayMs)
+        }
+    }
+
+    internal fun refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush: Boolean = false) {
+        val h = mainHandler
+        h?.removeCallbacks(carAvrcpLyricRunnable)
+        carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = forceImmediatePush)
+        val p = player ?: return
+        if (p.isPlaying && isCarBluetoothLyricActive()) {
+            val activeMediaId = p.currentMediaItem?.mediaId.orEmpty()
+            val bridgeSong = SystemLyricBridge.currentSongSnapshot
+            val lyricData = if (bridgeSong != null && (activeMediaId.isBlank() || bridgeSong.id == activeMediaId)) {
+                SystemLyricBridge.currentLyricSnapshot
+            } else {
+                com.concept.music.data.model.LyricData.Empty
+            }
+            val adjustedPos = resolveCarAdjustedLyricPositionMs(p.currentPosition)
+            val delayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
+                lyricData = lyricData,
+                adjustedPositionMs = adjustedPos,
+                playbackSpeed = p.playbackParameters.speed
+            )
+            h?.postDelayed(carAvrcpLyricRunnable, delayMs)
+        }
+    }
+
+    private fun stopCarAvrcpLyricTicker() {
+        mainHandler?.removeCallbacks(carAvrcpLyricRunnable)
+    }
+
+    private fun isVerifiedCarHostController(controller: MediaSession.ControllerInfo): Boolean {
+        return CarSessionManager.isPhoneCarFeatureSupported() &&
+            CarMediaLibraryHelper.isVerifiedCarProjectionController(
+                packageManager = packageManager,
+                packageName = controller.packageName,
+                uid = controller.uid
+            )
     }
 
     @OptIn(UnstableApi::class)
@@ -1523,13 +2014,14 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaSession
     }
 
     override fun onDestroy() {
         bgAutoAdvanceRunnable?.let { mainHandler?.removeCallbacks(it) }
         bgAutoAdvanceRunnable = null
+        stopCarAvrcpLyricTicker()
         stopBackgroundDesktopLyricProgressTicker()
         stopListenStatsTick()
         ListenStatsCoordinator.onServiceDestroyed()
@@ -1538,6 +2030,8 @@ class PlaybackService : MediaSessionService() {
             screenStateReceiverRegistered = false
         }
         SystemLyricBridge.onDesktopLyricNotificationStateChanged = null
+        CarSessionManager.onCarModeChangedCallback = null
+        CarSessionManager.onTriggerCarAutoPlayCallback = null
         headsetButtonController.reset()
         abandonDuckAudioFocusRequest()
         audioFocusDuckGain = 1.0f
@@ -1552,6 +2046,8 @@ class PlaybackService : MediaSessionService() {
         }
         AudioEffectManager.onAuxEffectChanged = null
         AudioEffectManager.releaseEffects()
+        libraryScope.cancel()
+        carForwardingPlayer = null
         runCatching { mediaSession?.release() }
         mediaSession = null
         runCatching { player?.release() }

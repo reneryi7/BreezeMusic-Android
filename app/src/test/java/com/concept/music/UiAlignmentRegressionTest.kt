@@ -57,11 +57,13 @@ class UiAlignmentRegressionTest {
         assertFalse(AudioEffectState().equalLoudnessCompensation)
         assertFalse(state.allowPlayWithOtherApps)
         assertTrue(state.wiredHeadsetControlEnabled)
-        assertEquals(11, com.concept.music.ui.settings.SettingsCategory.entries.size)
+        assertEquals(12, com.concept.music.ui.settings.SettingsCategory.entries.size)
+        assertTrue(com.concept.music.ui.settings.SettingsCategory.entries.contains(com.concept.music.ui.settings.SettingsCategory.CAR_INTERCONNECT))
         assertTrue(com.concept.music.ui.settings.SettingsCategory.entries.contains(com.concept.music.ui.settings.SettingsCategory.RECOMMENDATION_PREFERENCE))
         assertTrue(com.concept.music.ui.settings.SettingsCategory.entries.contains(com.concept.music.ui.settings.SettingsCategory.PERMISSIONS))
         assertTrue(com.concept.music.ui.settings.SettingsCategory.entries.contains(com.concept.music.ui.settings.SettingsCategory.DOWNLOAD))
         assertFalse("音乐下载开关默认必须为关闭状态", com.concept.music.service.AppPermissionState().musicDownloadEnabled)
+        assertFalse("车载连接自动续播默认必须为关闭状态", com.concept.music.service.CarInterconnectState().autoPlayOnCarConnect)
     }
 
     @Test
@@ -1162,8 +1164,8 @@ class UiAlignmentRegressionTest {
         com.concept.music.service.AppPermissionManager.resetForTest()
         try {
             val initialState = com.concept.music.service.AppPermissionManager.state.value
-            assertEquals(10, initialState.totalCount)
-            assertEquals(9, initialState.enabledCount)
+            assertEquals(11, initialState.totalCount)
+            assertEquals(10, initialState.enabledCount)
             assertFalse(
                 "音乐下载与歌词保存独立开关默认应为关闭状态，需用户手动开启",
                 initialState.isEnabled(com.concept.music.service.AppPermissionType.MUSIC_DOWNLOAD)
@@ -1216,11 +1218,11 @@ class UiAlignmentRegressionTest {
                 com.concept.music.service.AppPermissionType.MOTION_ORIENTATION,
                 false
             )
-            assertEquals(6, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
+            assertEquals(7, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
 
             // 4. 一键恢复开启全部权限
             com.concept.music.service.AppPermissionManager.enableAllPermissions(null)
-            assertEquals(10, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
+            assertEquals(11, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
         } finally {
             com.concept.music.service.AppPermissionManager.resetForTest()
         }

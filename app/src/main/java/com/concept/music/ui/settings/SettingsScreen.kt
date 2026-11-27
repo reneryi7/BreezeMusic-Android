@@ -202,6 +202,10 @@ enum class SettingsCategory(
         title = "外设与播放控制",
         subtitle = "多应用混音 · 耳机线控 · 后台保活"
     ),
+    CAR_INTERCONNECT(
+        title = "车载互联与座舱声学",
+        subtitle = "主驾皇帝位 · 导航闪避 · 中控蓝牙歌词"
+    ),
     RECOMMENDATION_PREFERENCE(
         title = "偏好设置",
         subtitle = "推荐模式 · 语种曲风强度 · 屏蔽与本地画像"
@@ -818,6 +822,7 @@ fun SettingsScreen(
 
     val cacheSizeBytes by AudioCacheManager.cacheSizeBytes.collectAsState()
     val detailedCacheStats by AudioCacheManager.detailedStats.collectAsState()
+    val carInterconnectState by com.concept.music.service.CarSessionManager.state.collectAsState()
     val cacheLimit by AudioCacheManager.cacheLimit.collectAsState()
     val downloadConfig by MusicDownloadManager.config.collectAsState()
     val localDefaultTab by com.concept.music.data.vip.VipManager.localMusic.defaultTab.collectAsState()
@@ -1014,6 +1019,24 @@ fun SettingsScreen(
                             selected = highlightedCat == SettingsCategory.PLAYBACK_CONTROL,
                             onClick = { selectCategoryAction(SettingsCategory.PLAYBACK_CONTROL) }
                         )
+                    }
+                    if (!BuildConfig.IS_TABLET_FLAVOR) {
+                        item {
+                            val carStatus = when {
+                                carInterconnectState.isCarModeActive -> carInterconnectState.cabinAcousticMode.shortBadge
+                                !carInterconnectState.featureEnabled -> "已关闭"
+                                carInterconnectState.confirmedCarCount > 0 -> "已绑${carInterconnectState.confirmedCarCount}台"
+                                else -> "座舱就绪"
+                            }
+                            SettingsMenuEntryCard(
+                                category = SettingsCategory.CAR_INTERCONNECT,
+                                icon = Icons.Rounded.DirectionsCar,
+                                accentColor = ConceptCyanAccent,
+                                statusText = carStatus,
+                                selected = highlightedCat == SettingsCategory.CAR_INTERCONNECT,
+                                onClick = { selectCategoryAction(SettingsCategory.CAR_INTERCONNECT) }
+                            )
+                        }
                     }
                     item {
                         val speedPitchStatus = when {
@@ -2053,6 +2076,14 @@ fun SettingsScreen(
                                             }
                                         )
                                     }
+                                }
+                            }
+
+                            SettingsCategory.CAR_INTERCONNECT -> {
+                                item {
+                                    SettingsCarInterconnectSection(
+                                        onSyncLyricOffset = { viewModel.notifyCarLyricOffsetChanged() }
+                                    )
                                 }
                             }
                         }
