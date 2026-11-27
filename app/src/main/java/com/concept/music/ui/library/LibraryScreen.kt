@@ -117,6 +117,7 @@ fun LibraryScreen(
     val account by viewModel.accountState.collectAsState()
     val vip by viewModel.vipState.collectAsState()
     val playlists by viewModel.playlists.collectAsState()
+    val customCoverOverrides by viewModel.customCoverOverrides.collectAsState()
     val userGrade by viewModel.userGrade.collectAsState()
     val isGradeSyncing by viewModel.isGradeSyncing.collectAsState()
     val libraryLoading by viewModel.libraryLoading.collectAsState()
@@ -132,7 +133,20 @@ fun LibraryScreen(
     val selectedTab by viewModel.selectedAssetTab.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
 
-    val myPlaylists = remember(playlists) { playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isDefaultCollect } }
+    val myPlaylists = remember(playlists, customCoverOverrides) {
+        playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isDefaultCollect }.map { pl ->
+            val effectiveCover = viewModel.resolveEffectivePlaylistCover(
+                playlist = pl,
+                fallbackSongCover = "",
+                overrides = customCoverOverrides
+            )
+            if (effectiveCover.isNotBlank() && effectiveCover != pl.coverUrl) {
+                pl.copy(coverUrl = effectiveCover)
+            } else {
+                pl
+            }
+        }
+    }
     val favoritePlaylists = remember(playlists) { playlists.filter { it.isFavorite && !it.isDefaultCollect } }
     val likedPlaylist = remember(playlists) { playlists.firstOrNull { it.isLiked } }
     val historyVersion by VipManager.history.historyVersion.collectAsState()

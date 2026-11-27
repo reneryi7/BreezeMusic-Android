@@ -9,6 +9,7 @@ import com.concept.music.data.recommendation.SongTagMetadataCache
 import com.concept.music.data.repository.DiscoverLocalCache
 import com.concept.music.data.repository.LocalListenStatsRepository
 import com.concept.music.data.repository.PlaybackHistoryRepository
+import com.concept.music.data.repository.PlaylistCoverOverrideRepository
 import com.concept.music.data.repository.SearchHistoryRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +30,7 @@ object VipManager {
     var listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null); private set
     var searchHistoryRepo: SearchHistoryRepository = SearchHistoryRepository(null); private set
     var discoverCache: DiscoverLocalCache = DiscoverLocalCache(null); private set
+    var playlistCoverOverrides: PlaylistCoverOverrideRepository = PlaylistCoverOverrideRepository(null); private set
     var songTagCache: SongTagMetadataCache = SongTagMetadataCache(null); private set
     var recommendationPrefs: RecommendationPreferenceRepository = RecommendationPreferenceRepository(null); private set
     var tasteProfile: PersonalTasteProfileRepository = PersonalTasteProfileRepository(null); private set
@@ -66,6 +68,7 @@ object VipManager {
         listenStats = LocalListenStatsRepository(appCtx)
         searchHistoryRepo = SearchHistoryRepository(appCtx)
         discoverCache = DiscoverLocalCache(appCtx)
+        playlistCoverOverrides = PlaylistCoverOverrideRepository(appCtx)
         songTagCache = SongTagMetadataCache(appCtx)
         recommendationPrefs = RecommendationPreferenceRepository(appCtx)
         tasteProfile = PersonalTasteProfileRepository(appCtx)

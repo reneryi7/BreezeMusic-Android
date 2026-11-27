@@ -14,22 +14,35 @@ import com.concept.music.data.model.SearchResult
 import com.concept.music.data.model.Song
 import com.concept.music.data.model.SongComment
 import com.concept.music.data.model.UserListeningPreference
+import com.concept.music.data.model.stripKnownAudioFileExtension
+import com.concept.music.service.AppPermissionManager
+import com.concept.music.service.AppPermissionType
+import com.concept.music.util.SecurityGuards
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 private const val COMMENT_CODE_SONG = "fc4be23b4e972707f36b8a828a93ba8a"
 private const val COMMENT_CODE_ALBUM = "94f1792ced1df89aa68a7939eaf2efca"
@@ -627,9 +640,37 @@ internal suspend fun MusicApiRepository.callCloudListEncrypted(
     parsed
 }
 
+private fun normalizePlaylistEpochSec(raw: Long?): Long {
+    val v = raw ?: return 0L
+    return when {
+        v > 10_000_000_000L -> v / 1000L
+        v > 0L -> v
+        else -> 0L
+    }
+}
+
 /**
- * 通过私有云歌单权威接口 /v4/get_list_all_file_v3 获取歌单实时 list_ver 与包含真实 fileid 的完整歌曲列表：
- * - 彻底解决公共 CDN /pubsongs 接口不返回 fileid 导致自定义排序为空、以及修改排序后 CDN 缓存延迟不刷新的问题。
+ * 将酷狗私有云接口 /v4/get_list_all_file_v3 返回的曲目数组还原为酷狗官方云端默认顺序：
+ * 1. 已通过自定义排序写入云端序号（cloudSortOrder > 0）的曲目按 cloudSortOrder 升序排列；
+ * 2. 未自定义排序或自定义排序后新加入的曲目（cloudSortOrder == 0）排在顶部，并按添加时间 addTimeSec 降序（最新添加在前）；
+ * 3. 当 addTimeSec 相等或缺失时，依次按 fileId 降序与原始数组倒序，彻底纠正服务端按插入顺序升序返回的问题。
+ */
+internal fun sortCloudPlaylistTracksToOfficialOrder(tracks: List<Song>): List<Song> {
+    if (tracks.size <= 1) return tracks
+    return tracks.withIndex()
+        .sortedWith(
+            compareBy<IndexedValue<Song>> { it.value.cloudSortOrder.coerceAtLeast(0L) }
+                .thenByDescending { it.value.addTimeSec }
+                .thenByDescending { it.value.fileId }
+                .thenByDescending { it.index }
+        )
+        .map { it.value }
+}
+
+/**
+ * 通过私有云歌单权威接口 /v4/get_list_all_file_v3 获取歌单实时 list_ver 与包含真实 fileid、addtime、sort 的完整歌曲列表：
+ * - 彻底解决公共 CDN /pubsongs 接口不返回 fileid 导致自定义排序为空、以及修改排序后 CDN 缓存延迟不刷新的问题；
+ * - 按官方云端排序规则（sort 升序 + 同组 addtime/fileId 降序）输出默认顺序。
  */
 suspend fun MusicApiRepository.fetchCloudPlaylistTracksWithVer(
     listId: Long,
@@ -687,25 +728,43 @@ suspend fun MusicApiRepository.fetchCloudPlaylistTracksWithVer(
         if (arr.size() == 0) break
 
         val rawPageSongs = mutableListOf<Song>()
-        val pageFileIds = ArrayList<Long>(arr.size())
+        val pageCloudMeta = ArrayList<Triple<Long, Long, Long>>(arr.size())
         for (el in arr) {
             if (!el.isJsonObject) continue
             val obj = el.asJsonObject
             val fid = obj.longVal("fileid") ?: obj.longVal("file_id") ?: 0L
+            val addSec = normalizePlaylistEpochSec(
+                obj.longVal("addtime") ?: obj.longVal("add_time") ?: obj.longVal("inlist_time") ?: obj.longVal("create_time")
+            )
+            val sortVal = (obj.longVal("sort") ?: obj.longVal("sort_id") ?: obj.longVal("order") ?: 0L).coerceAtLeast(0L)
             val parsed = parseSong(obj).let { s ->
-                if (fid > 0L && s.fileId != fid) s.copy(fileId = fid) else s
+                val cleanTitle = stripKnownAudioFileExtension(s.title)
+                s.copy(
+                    title = cleanTitle,
+                    fileId = if (fid > 0L) fid else s.fileId,
+                    addTimeSec = if (addSec > 0L) addSec else s.addTimeSec,
+                    cloudSortOrder = if (sortVal > 0L) sortVal else s.cloudSortOrder
+                )
             }
             if (parsed.title.isNotBlank() || parsed.hash.isNotBlank()) {
                 rawPageSongs.add(parsed)
-                pageFileIds.add(parsed.fileId)
+                pageCloudMeta.add(Triple(parsed.fileId, parsed.addTimeSec, parsed.cloudSortOrder))
             }
         }
         if (rawPageSongs.isEmpty()) break
         val enriched = suspendRunCatching { enrichSongsPrivilegeLite(rawPageSongs) }.getOrDefault(rawPageSongs)
         var addedInPage = 0
         enriched.forEachIndexed { idx, s ->
-            val origFid = pageFileIds.getOrNull(idx) ?: s.fileId
-            val restored = if (origFid > 0L && s.fileId != origFid) s.copy(fileId = origFid) else s
+            val meta = pageCloudMeta.getOrNull(idx)
+            val origFid = meta?.first ?: s.fileId
+            val origAddSec = meta?.second ?: s.addTimeSec
+            val origSort = meta?.third ?: s.cloudSortOrder
+            val restored = s.copy(
+                title = stripKnownAudioFileExtension(s.title),
+                fileId = if (origFid > 0L) origFid else s.fileId,
+                addTimeSec = if (origAddSec > 0L) origAddSec else s.addTimeSec,
+                cloudSortOrder = if (origSort > 0L) origSort else s.cloudSortOrder
+            )
             val dedupeKey = if (origFid > 0L) "fid_$origFid" else restored.hash.ifBlank { restored.id }.lowercase(Locale.ROOT)
             if (seenTrackKeys.add(dedupeKey)) {
                 allSongs.add(restored)
@@ -713,12 +772,12 @@ suspend fun MusicApiRepository.fetchCloudPlaylistTracksWithVer(
             }
         }
         if (addedInPage > 0) {
-            onProgress?.invoke(allSongs.toList())
+            onProgress?.invoke(sortCloudPlaylistTracksToOfficialOrder(allSongs))
         }
         if (addedInPage == 0 || arr.size() < pageSize) break
         if (expectedCount > 0 && allSongs.size >= expectedCount) break
     }
-    return resolvedListVer to allSongs
+    return resolvedListVer to sortCloudPlaylistTracksToOfficialOrder(allSongs)
 }
 
 // =========================================================================
@@ -797,7 +856,9 @@ suspend fun MusicApiRepository.updatePlaylistInfo(
     playlist: Playlist,
     newName: String? = null,
     newIntro: String? = null,
-    newTags: String? = null
+    newTags: String? = null,
+    newPic: String? = null,
+    includeName: Boolean = true
 ): Boolean {
     val listId = playlist.resolveEffectiveListId().takeIf { it > 0L } ?: return false
     val cachedMeta = peekCollectedPlaylistMeta(playlist)
@@ -806,7 +867,7 @@ suspend fun MusicApiRepository.updatePlaylistInfo(
     fun buildPayload(ver: Long, includeEmptyTagsFallback: Boolean): JsonObject = JsonObject().apply {
         addProperty("total_ver", ver)
         addProperty("listid", listId)
-        addProperty("type", if (playlist.isCreatedByMe) 0 else 1)
+        addProperty("type", if (playlist.isCreatedByMe || playlist.isLiked) 0 else 1)
         addProperty("sort", 0)
         if (newTags != null) {
             addProperty("tags", newTags)
@@ -814,7 +875,14 @@ suspend fun MusicApiRepository.updatePlaylistInfo(
             addProperty("tags", "")
         }
         addProperty("intro", newIntro ?: playlist.description)
-        addProperty("name", (newName?.trim()?.takeIf { it.isNotBlank() } ?: playlist.title.trim()))
+        val resolvedName = newName?.trim()?.takeIf { it.isNotBlank() }
+            ?: if (includeName) playlist.title.trim().takeIf { it.isNotBlank() } else null
+        if (!resolvedName.isNullOrBlank()) {
+            addProperty("name", resolvedName)
+        }
+        if (!newPic.isNullOrBlank()) {
+            addProperty("pic", newPic.trim())
+        }
     }
 
     var resp = callCloudListEncrypted("/v1/modify_list", buildPayload(effectiveTotalVer, false))
@@ -827,13 +895,124 @@ suspend fun MusicApiRepository.updatePlaylistInfo(
     return resp != null && resp.number("status") == 1 && errCode == 0
 }
 
+private const val KUGOU_IMAGE_UPLOAD_SALT = "hewry678WEK23D"
+
+internal fun computeKugouImageUploadMd5(dateStr: String): String =
+    KugouSigner.md5("${dateStr.trim()}$KUGOU_IMAGE_UPLOAD_SALT")
+
+/**
+ * 直连酷狗官方自定义封面图床（对齐 MakcRe/KuGouMusicApi module/playlist_pic_upload.js）：
+ * - 不携带任何用户登录凭证，使用 NetworkClientProvider.baseClient（含公网 DNS 防重绑定）；
+ * - 优先尝试 HTTPS，遇到证书/连接异常时平滑回退官方 HTTP 图床通道；
+ * - 返回服务端分配的 FileName（用于组合 pic = "custom/<FileName>" 写入 /v1/modify_list）。
+ */
+suspend fun MusicApiRepository.uploadPlaylistCustomCover(
+    imageBytes: ByteArray,
+    extendName: String = ".jpg",
+    uploadEndpointOverride: String? = null
+): String? = withContext(Dispatchers.IO) {
+    if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.NETWORK_ACCESS)) {
+        throw IOException("已关闭「网络访问与网络状态检测」权限，无法上传封面至云端")
+    }
+    if (imageBytes.isEmpty() || imageBytes.size > SecurityGuards.MAX_COVER_IMAGE_BYTES || !SecurityGuards.isSafeImagePayload(imageBytes)) {
+        return@withContext null
+    }
+    val dateStr = ZonedDateTime.now(CHINA_ZONE).format(DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT))
+    val md5Token = computeKugouImageUploadMd5(dateStr)
+    val safeExt = if (extendName.startsWith(".")) extendName.lowercase(Locale.ROOT) else ".${extendName.lowercase(Locale.ROOT)}"
+    val candidateEndpoints = if (!uploadEndpointOverride.isNullOrBlank()) {
+        listOf(uploadEndpointOverride.trim())
+    } else {
+        listOf(
+            "https://imgphp.kugou.com/imageupload/stream.php",
+            "http://imgphp.kugou.com/imageupload/stream.php"
+        )
+    }
+
+    val uploadClient = NetworkClientProvider.baseClient.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .apply {
+            if (!uploadEndpointOverride.isNullOrBlank()) {
+                proxy(java.net.Proxy.NO_PROXY)
+            }
+        }
+        .build()
+
+    for (endpoint in candidateEndpoints) {
+        val uploadedName = suspendRunCatching {
+            val url = endpoint.toHttpUrl().newBuilder()
+                .addQueryParameter("type", "custom")
+                .addQueryParameter("extendName", safeExt)
+                .addQueryParameter("md5", md5Token)
+                .addQueryParameter("jsonResponse", "1")
+                .build()
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Android15-1070-11440-46-0-DiscoveryDRADProtocol-wifi")
+                .post(imageBytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build()
+            uploadClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@suspendRunCatching null
+                val rawBody = SecurityGuards.readBoundedUtf8(resp.body, SecurityGuards.MAX_API_RESPONSE_BYTES).trim()
+                if (rawBody.isEmpty()) return@suspendRunCatching null
+                val root = runCatching { JsonParser.parseString(rawBody) }.getOrNull()?.takeIf { it.isJsonObject }?.asJsonObject
+                    ?: return@suspendRunCatching null
+                val successEl = root.get("IsSuccess")
+                val isSuccess = when {
+                    successEl == null || successEl.isJsonNull -> false
+                    successEl.isJsonPrimitive && successEl.asJsonPrimitive.isBoolean -> successEl.asBoolean
+                    successEl.isJsonPrimitive -> successEl.asString == "1" || successEl.asString.equals("true", ignoreCase = true)
+                    else -> false
+                }
+                if (!isSuccess) return@suspendRunCatching null
+                val fnEl = root.get("FileName")
+                val resolvedName = when {
+                    fnEl == null || fnEl.isJsonNull -> ""
+                    fnEl.isJsonPrimitive -> fnEl.asString.trim()
+                    fnEl.isJsonArray && fnEl.asJsonArray.size() > 0 -> fnEl.asJsonArray[0].asString.trim()
+                    else -> ""
+                }
+                resolvedName.takeIf { it.isNotBlank() }
+            }
+        }.getOrNull()
+        if (!uploadedName.isNullOrBlank()) {
+            return@withContext uploadedName
+        }
+    }
+    null
+}
+
+/**
+ * 两步同步更新歌单自定义封面：先上传图床获取 FileName，再经云歌单加密接口 /v1/modify_list 写入 custom/<FileName>。
+ */
+suspend fun MusicApiRepository.updatePlaylistCoverOnCloud(
+    playlist: Playlist,
+    imageBytes: ByteArray,
+    uploadEndpointOverride: String? = null
+): Pair<Boolean, String?> {
+    val fileName = uploadPlaylistCustomCover(
+        imageBytes = imageBytes,
+        extendName = ".jpg",
+        uploadEndpointOverride = uploadEndpointOverride
+    ) ?: return false to null
+    val picPath = if (fileName.startsWith("custom/", ignoreCase = true)) fileName else "custom/$fileName"
+    val updated = updatePlaylistInfo(
+        playlist = playlist,
+        newPic = picPath,
+        includeName = !playlist.isLiked
+    )
+    return updated to fileName
+}
+
 suspend fun MusicApiRepository.sortPlaylistTracks(
     playlist: Playlist,
     orderedSongs: List<Song>,
     listVer: Long = 0L
 ): Boolean {
     val listId = playlist.resolveEffectiveListId().takeIf { it > 0L } ?: return false
-    val playlistType = if (playlist.isCreatedByMe) 0 else 1
+    val playlistType = if (playlist.isCreatedByMe || playlist.isLiked) 0 else 1
 
     // 优先通过私有云 /v4/get_list_all_file_v3 获取权威 list_ver 与真实 fileid 映射
     var effectiveListVer = listVer

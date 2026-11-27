@@ -45,6 +45,7 @@ class LibraryViewModel(
     val login = loginMutable.asStateFlow()
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     val playlists = _playlists.asStateFlow()
+    val customCoverOverrides = VipManager.playlistCoverOverrides.overrides
     private val _likedSongs = MutableStateFlow<List<Song>>(emptyList())
     val likedSongs = _likedSongs.asStateFlow()
     private val _librarySongs = MutableStateFlow<List<Song>>(emptyList())
@@ -1636,6 +1637,116 @@ class LibraryViewModel(
         }
     }
 
+    fun resolveEffectivePlaylistCover(
+        playlist: Playlist?,
+        fallbackPlaylistId: String = "",
+        fallbackSongCover: String = "",
+        overrides: Map<String, String> = customCoverOverrides.value
+    ): String {
+        val localOverride = VipManager.playlistCoverOverrides.resolveOverrideCoverUri(
+            userId = accountState.value.currentId,
+            playlist = playlist,
+            fallbackPlaylistId = fallbackPlaylistId,
+            snapshot = overrides
+        )
+        if (!localOverride.isNullOrBlank()) return localOverride
+        return playlist?.coverUrl?.takeIf { it.isNotBlank() }
+            ?: fallbackSongCover.takeIf { it.isNotBlank() }
+            ?: ""
+    }
+
+    fun updatePlaylistCover(
+        playlist: Playlist?,
+        fallbackPlaylistId: String = "",
+        croppedJpegBytes: ByteArray,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (croppedJpegBytes.isEmpty() || !com.concept.music.util.SecurityGuards.isSafeImagePayload(croppedJpegBytes)) {
+            onResult(false, "所选图片数据无效，请重新选择")
+            return
+        }
+        val uid = accountState.value.currentId
+        val isLikedTarget = playlist?.isLiked == true || fallbackPlaylistId == "like"
+        viewModelScope.launch(Dispatchers.IO) {
+            var resolvedPlaylist = playlist
+            if (isLikedTarget && (resolvedPlaylist == null || resolvedPlaylist.resolveEffectiveListId() <= 0L)) {
+                val cachedLiked = _playlists.value.firstOrNull { it.isLiked }
+                if (cachedLiked != null && cachedLiked.resolveEffectiveListId() > 0L) {
+                    resolvedPlaylist = cachedLiked
+                } else if (accountState.value.auth == AuthState.READY) {
+                    val freshLists = suspendRunCatching { VipManager.music.userPlaylists() }.getOrDefault(emptyList())
+                    if (freshLists.isNotEmpty() && accounts.state.value.currentId == uid) {
+                        _playlists.value = freshLists
+                        VipManager.discoverCache.saveUserPlaylists(uid, freshLists)
+                    }
+                    freshLists.firstOrNull { it.isLiked }?.let { resolvedPlaylist = it }
+                }
+            }
+
+            // 1. 先写入本机自定义封面覆盖，确保界面 0ms 即时生效，并作为云端受限/审核期兜底
+            val savedLocalUri = VipManager.playlistCoverOverrides.saveOverrideCover(
+                userId = uid,
+                playlist = resolvedPlaylist,
+                fallbackPlaylistId = fallbackPlaylistId,
+                jpegBytes = croppedJpegBytes
+            )
+            if (savedLocalUri.isNullOrBlank()) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, "保存本地封面文件失败，请稍后重试")
+                }
+                return@launch
+            }
+
+            val targetPlaylist = resolvedPlaylist
+            if (accountState.value.auth != AuthState.READY || targetPlaylist == null || targetPlaylist.resolveEffectiveListId() <= 0L) {
+                withContext(Dispatchers.Main) {
+                    onResult(true, "已保存为本机自定义封面")
+                }
+                return@launch
+            }
+
+            val oldCloudCover = targetPlaylist.coverUrl
+            val (cloudOk, _) = suspendRunCatching {
+                VipManager.music.updatePlaylistCoverOnCloud(targetPlaylist, croppedJpegBytes)
+            }.getOrDefault(false to null)
+
+            if (cloudOk && accounts.state.value.currentId == uid) {
+                val refreshedLists = suspendRunCatching { VipManager.music.userPlaylists() }.getOrDefault(emptyList())
+                val matchedFresh = refreshedLists.firstOrNull {
+                    (isLikedTarget && it.isLiked) || it.isSamePlaylistAs(targetPlaylist)
+                }
+                if (refreshedLists.isNotEmpty() && accounts.state.value.currentId == uid) {
+                    _playlists.value = refreshedLists
+                    VipManager.discoverCache.saveUserPlaylists(uid, refreshedLists)
+                }
+                val cloudCoverRefreshed = matchedFresh != null &&
+                    matchedFresh.coverUrl.isNotBlank() &&
+                    !matchedFresh.coverUrl.equals(oldCloudCover, ignoreCase = true)
+                if (cloudCoverRefreshed) {
+                    // 云端已立即回显新封面地址，清掉本机兜底覆盖以直接展示云端同步图
+                    VipManager.playlistCoverOverrides.clearOverrideCover(
+                        userId = uid,
+                        playlist = matchedFresh,
+                        fallbackPlaylistId = fallbackPlaylistId
+                    )
+                }
+                val tip = if (cloudCoverRefreshed) {
+                    "封面已更新并同步云端"
+                } else {
+                    "封面已上传并同步云端（本机已即时生效）"
+                }
+                withContext(Dispatchers.Main) { onResult(true, tip) }
+            } else {
+                val tip = if (isLikedTarget) {
+                    "已更新「我喜欢」本机自定义封面（云端暂不支持同步）"
+                } else {
+                    "云端暂未同步，已先保存为本机自定义封面"
+                }
+                withContext(Dispatchers.Main) { onResult(true, tip) }
+            }
+        }
+    }
+
     fun reorderPlaylistSongs(
         playlist: Playlist,
         orderedSongs: List<Song>,
@@ -1651,33 +1762,49 @@ class LibraryViewModel(
         }
         val uid = accountState.value.currentId
         viewModelScope.launch(Dispatchers.IO) {
+            var resolvedPlaylist = playlist
+            if (resolvedPlaylist.isLiked && resolvedPlaylist.resolveEffectiveListId() <= 0L) {
+                val matchedLiked = _playlists.value.firstOrNull { it.isLiked && it.resolveEffectiveListId() > 0L }
+                    ?: suspendRunCatching { VipManager.music.userPlaylists() }.getOrDefault(emptyList())
+                        .also { fresh ->
+                            if (fresh.isNotEmpty() && accountState.value.currentId == uid) {
+                                _playlists.value = fresh
+                                VipManager.discoverCache.saveUserPlaylists(uid, fresh)
+                            }
+                        }
+                        .firstOrNull { it.isLiked && it.resolveEffectiveListId() > 0L }
+                if (matchedLiked != null) {
+                    resolvedPlaylist = matchedLiked
+                }
+            }
+
             val result = suspendRunCatching {
-                VipManager.music.sortPlaylistTracks(playlist, orderedSongs)
+                VipManager.music.sortPlaylistTracks(resolvedPlaylist, orderedSongs)
             }
             val ok = result.getOrDefault(false)
             if (ok && accountState.value.currentId == uid) {
                 // 从权威私有云接口回拉一次最新曲序与真实 fileId，确保后续再次排序或进入页面时与云端 100% 同步
-                val refreshedTracks = playlist.resolveEffectiveListId().takeIf { it > 0L }?.let { lid ->
+                val refreshedTracks = resolvedPlaylist.resolveEffectiveListId().takeIf { it > 0L }?.let { lid ->
                     suspendRunCatching {
                         VipManager.music.fetchCloudPlaylistTracksWithVer(
                             listId = lid,
-                            type = if (playlist.isCreatedByMe) 0 else 1
+                            type = if (resolvedPlaylist.isCreatedByMe || resolvedPlaylist.isLiked) 0 else 1
                         ).second
                     }.getOrNull()?.takeIf { it.size == orderedSongs.size }
-                } ?: orderedSongs
+                } ?: orderedSongs.mapIndexed { idx, s -> s.copy(cloudSortOrder = (idx + 1).toLong()) }
 
                 val sec = _librarySection.value
                 val secId = sec.removePrefix("歌单:")
-                val matchesCurrentSection = (sec.startsWith("歌单:") && playlist.matchesIdentifier(secId)) ||
-                    (playlist.isLiked && sec == "我喜欢")
+                val matchesCurrentSection = (sec.startsWith("歌单:") && resolvedPlaylist.matchesIdentifier(secId)) ||
+                    (resolvedPlaylist.isLiked && sec == "我喜欢")
                 if (matchesCurrentSection) {
                     _librarySongs.value = refreshedTracks
                 }
-                if (playlist.isLiked) {
+                if (resolvedPlaylist.isLiked) {
                     _likedSongs.value = refreshedTracks
                     VipManager.discoverCache.saveLikedSongs(uid, refreshedTracks)
                 } else {
-                    playlist.candidateIdentityKeys().forEach { cacheKey ->
+                    resolvedPlaylist.candidateIdentityKeys().forEach { cacheKey ->
                         VipManager.discoverCache.savePlaylistSongs(cacheKey, refreshedTracks)
                     }
                 }

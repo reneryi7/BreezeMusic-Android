@@ -1108,6 +1108,9 @@ fun MainContent(
                                 Toast.makeText(context, "该歌单暂不支持查看云端评论", Toast.LENGTH_SHORT).show()
                             }
                         },
+                        onOpenDownloadSettings = {
+                            navController.navigate("settings") { launchSingleTop = true }
+                        },
                         onSubSheetOpenChanged = { isLibrarySubSheetOpen = it }
                     )
                 }

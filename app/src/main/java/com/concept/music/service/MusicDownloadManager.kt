@@ -20,10 +20,15 @@ import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
@@ -101,6 +106,8 @@ object MusicDownloadManager {
     const val DEFAULT_LYRIC_DOWNLOAD_PATH = "/storage/emulated/0/Music/BreezeMusic/Lyrics"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // 有界并发信号量：限制同时最多 2 路音频流下载与标签内嵌，避免批量下载数十首时触发接口限流或内存抖动
+    private val downloadSemaphore = Semaphore(permits = 2)
     private var prefs: SharedPreferences? = null
     private var appContext: Context? = null
 
@@ -349,6 +356,116 @@ object MusicDownloadManager {
         }
     }
 
+    internal fun songDownloadDedupeKey(song: Song): String {
+        val primaryHash = song.hash.trim().lowercase(Locale.ROOT)
+        if (primaryHash.isNotBlank()) return "h:$primaryHash"
+        val cleanId = song.id.trim().lowercase(Locale.ROOT)
+        if (cleanId.isNotBlank()) return "id:$cleanId"
+        return "ta:${song.artist.trim().lowercase(Locale.ROOT)}_${song.title.trim().lowercase(Locale.ROOT)}"
+    }
+
+    internal fun filterPendingBatchDownloadSongs(
+        requestedSongs: List<Song>,
+        existingTasks: List<DownloadTaskItem> = _tasks.value
+    ): List<Song> {
+        val activeKeys = existingTasks.asSequence()
+            .filter {
+                it.status == DownloadTaskStatus.QUEUED ||
+                    it.status == DownloadTaskStatus.RESOLVING ||
+                    it.status == DownloadTaskStatus.DOWNLOADING ||
+                    it.status == DownloadTaskStatus.EMBEDDING
+            }
+            .map { songDownloadDedupeKey(it.song) }
+            .toHashSet()
+        val seenInBatch = HashSet<String>()
+        return requestedSongs.filter { song ->
+            val key = songDownloadDedupeKey(song)
+            key !in activeKeys && seenInBatch.add(key)
+        }
+    }
+
+    /**
+     * 触发多曲批量下载任务（严格受权限管理 MUSIC_DOWNLOAD 开关管控，内置队列去重、2 路有界并发及汇总提示）
+     * @return 成功加入下载队列的曲目数量
+     */
+    fun enqueueBatchDownload(
+        context: Context,
+        songs: List<Song>,
+        quality: AudioQuality = _config.value.defaultDownloadQuality,
+        onPermissionRequired: ((Array<String>) -> Unit)? = null
+    ): Int {
+        if (songs.isEmpty()) return 0
+        if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.NETWORK_ACCESS)) {
+            Toast.makeText(context, "已在权限管理中关闭「网络访问」权限，无法下载音乐", Toast.LENGTH_SHORT).show()
+            return 0
+        }
+        if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.MUSIC_DOWNLOAD)) {
+            Toast.makeText(context, "音乐下载默认关闭，请先在「设置 - 权限管理」中手动开启「音乐下载与歌词保存」开关", Toast.LENGTH_LONG).show()
+            return 0
+        }
+        if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.STORAGE_EXPORT)) {
+            Toast.makeText(context, "已在权限管理中关闭「存储读写与相册导出」权限，请先在设置-权限管理中开启", Toast.LENGTH_LONG).show()
+            return 0
+        }
+        if (!AppPermissionManager.hasMusicDownloadStoragePermission(context)) {
+            val perms = AppPermissionManager.requiredStorageRuntimePermissions()
+            if (onPermissionRequired != null && perms.isNotEmpty()) {
+                onPermissionRequired(perms)
+                return 0
+            }
+        }
+
+        val toEnqueue = filterPendingBatchDownloadSongs(songs)
+        if (toEnqueue.isEmpty()) {
+            Toast.makeText(context, "所选歌曲均已在下载队列中", Toast.LENGTH_SHORT).show()
+            return 0
+        }
+
+        val batchBaseTs = System.currentTimeMillis()
+        val newTasks = toEnqueue.mapIndexed { idx, song ->
+            val safeSongToken = SecurityGuards.sanitizeStagingToken(song.id.ifBlank { song.hash }, fallback = "song")
+            DownloadTaskItem(
+                taskId = "${safeSongToken}_${quality.apiValue}_${batchBaseTs}_$idx",
+                song = song,
+                requestedQuality = quality,
+                status = DownloadTaskStatus.QUEUED,
+                createdAtMs = batchBaseTs + idx
+            )
+        }
+        _tasks.update { newTasks + it }
+        Toast.makeText(
+            context,
+            "已将 ${newTasks.size} 首歌曲加入下载队列 (${quality.label})，可在「设置 → 下载」查看进度",
+            Toast.LENGTH_LONG
+        ).show()
+
+        val appCtx = context.applicationContext
+        scope.launch {
+            val outcomes = coroutineScope {
+                newTasks.map { task ->
+                    async {
+                        executeDownloadTask(appCtx, task, silentToasts = true)
+                    }
+                }.awaitAll()
+            }
+            val completedCnt = outcomes.count { it == DownloadTaskStatus.COMPLETED }
+            val skippedCnt = outcomes.count { it == DownloadTaskStatus.SKIPPED_EXISTING }
+            val failedCnt = outcomes.count { it == DownloadTaskStatus.FAILED }
+            val summary = buildString {
+                append("批量下载完成：")
+                val parts = mutableListOf<String>()
+                if (completedCnt > 0) parts.add("成功 $completedCnt 首")
+                if (skippedCnt > 0) parts.add("已存在跳过 $skippedCnt 首")
+                if (failedCnt > 0) parts.add("失败 $failedCnt 首")
+                append(parts.joinToString("，").ifBlank { "共处理 ${newTasks.size} 首" })
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(appCtx, summary, Toast.LENGTH_LONG).show()
+            }
+        }
+        return newTasks.size
+    }
+
     /**
      * 触发单曲下载任务（含存储与网络权限检查、多音质解析、音频流下载、高清封面与歌词内嵌、独立 .lrc 保存）
      */
@@ -394,7 +511,7 @@ object MusicDownloadManager {
         ).show()
 
         scope.launch {
-            executeDownloadTask(context.applicationContext, newTask)
+            executeDownloadTask(context.applicationContext, newTask, silentToasts = false)
         }
     }
 
@@ -404,7 +521,11 @@ object MusicDownloadManager {
         }
     }
 
-    private suspend fun executeDownloadTask(context: Context, initialTask: DownloadTaskItem) {
+    private suspend fun executeDownloadTask(
+        context: Context,
+        initialTask: DownloadTaskItem,
+        silentToasts: Boolean = false
+    ): DownloadTaskStatus = downloadSemaphore.withPermit {
         val taskId = initialTask.taskId
         val currentCfg = _config.value
         try {
@@ -484,10 +605,12 @@ object MusicDownloadManager {
                     )
                 }
                 persistTasksHistory()
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "本地已存在：《${fullSong.title}》(${actualQuality.label})", Toast.LENGTH_SHORT).show()
+                if (!silentToasts) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "本地已存在：《${fullSong.title}》(${actualQuality.label})", Toast.LENGTH_SHORT).show()
+                    }
                 }
-                return
+                return@withPermit DownloadTaskStatus.SKIPPED_EXISTING
             }
 
             // 3. 先下载音频流至应用缓存临时文件，以便高速完成二进制标签、高清封面与歌词内嵌，再落盘至目标自定义路径
@@ -622,18 +745,21 @@ object MusicDownloadManager {
             }
             persistTasksHistory()
 
-            withContext(Dispatchers.Main) {
-                val lrcNote = when {
-                    finalSavedLrcPath.isNotBlank() && currentCfg.embedLyrics -> "（封面/歌词已内嵌 + 独立.lrc已保存）"
-                    currentCfg.embedLyrics && lrcText.isNotBlank() -> "（高清封面与歌词已内嵌）"
-                    else -> ""
+            if (!silentToasts) {
+                withContext(Dispatchers.Main) {
+                    val lrcNote = when {
+                        finalSavedLrcPath.isNotBlank() && currentCfg.embedLyrics -> "（封面/歌词已内嵌 + 独立.lrc已保存）"
+                        currentCfg.embedLyrics && lrcText.isNotBlank() -> "（高清封面与歌词已内嵌）"
+                        else -> ""
+                    }
+                    Toast.makeText(
+                        context,
+                        "下载完成：《${fullSong.title}》[${actualQuality.label}] $lrcNote",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
-                Toast.makeText(
-                    context,
-                    "下载完成：《${fullSong.title}》[${actualQuality.label}] $lrcNote",
-                    Toast.LENGTH_LONG
-                ).show()
             }
+            DownloadTaskStatus.COMPLETED
         } catch (e: Exception) {
             updateTask(taskId) {
                 it.copy(
@@ -642,13 +768,16 @@ object MusicDownloadManager {
                 )
             }
             persistTasksHistory()
-            withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    context,
-                    "《${initialTask.song.title}》下载失败：${e.message ?: "请检查网络或权限"}",
-                    Toast.LENGTH_LONG
-                ).show()
+            if (!silentToasts) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "《${initialTask.song.title}》下载失败：${e.message ?: "请检查网络或权限"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
+            DownloadTaskStatus.FAILED
         }
     }
 

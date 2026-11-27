@@ -26,6 +26,22 @@ enum class AudioQuality(val apiValue: String, val label: String) {
     }
 }
 
+private val KNOWN_AUDIO_EXTENSION_REGEX = Regex(
+    """\.(mp3|flac|wav|m4a|aac|ogg|ape|dsf|dff|wma|alac|opus)$""",
+    RegexOption.IGNORE_CASE
+)
+
+/**
+ * 剥离酷狗私有云歌单/云盘曲目名末尾附带的音频文件扩展名（如 .mp3 / .flac / .wav），
+ * 仅作用于末尾已知音频后缀，避免误伤包含英文句点的正常曲名（如 Mr. Brightside、3.14）。
+ */
+fun stripKnownAudioFileExtension(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return ""
+    val stripped = KNOWN_AUDIO_EXTENSION_REGEX.replace(trimmed, "").trim()
+    return stripped.ifBlank { trimmed }
+}
+
 @Immutable
 data class Song(
     val id: String,
@@ -68,7 +84,9 @@ data class Song(
     val cloudKvId: Long = 0L,
     val versionTag: String = "",
     val sourceDeviceLabel: String = "",
-    val playCount: Int = 0
+    val playCount: Int = 0,
+    val addTimeSec: Long = 0L,
+    val cloudSortOrder: Long = 0L
 ) {
     val isCloudSong: Boolean
         get() = cloudKvId > 0L || id.startsWith("cloud_")
@@ -160,7 +178,7 @@ data class Song(
             fileSize128 = fileSize128,
             fileSize320 = fileSize320,
             fileSizeFlac = fileSizeFlac,
-            title = (title as String?) ?: "",
+            title = stripKnownAudioFileExtension((title as String?) ?: ""),
             artist = (artist as String?) ?: "",
             artistId = (artistId as String?) ?: "",
             album = (album as String?) ?: "",
@@ -189,7 +207,9 @@ data class Song(
             cloudKvId = cloudKvId,
             versionTag = (versionTag as String?) ?: "",
             sourceDeviceLabel = (sourceDeviceLabel as String?) ?: "",
-            playCount = playCount
+            playCount = playCount,
+            addTimeSec = addTimeSec,
+            cloudSortOrder = cloudSortOrder
         )
         }
 }

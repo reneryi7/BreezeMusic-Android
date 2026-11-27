@@ -14,6 +14,7 @@ import com.concept.music.data.model.RankItem
 import com.concept.music.data.model.SearchIntent
 import com.concept.music.data.model.SearchResult
 import com.concept.music.data.model.Song
+import com.concept.music.data.model.stripKnownAudioFileExtension
 import com.concept.music.data.model.KugouCommentEmojiParser
 import com.concept.music.data.model.SongComment
 import com.concept.music.data.model.SongDetailInfo
@@ -861,10 +862,11 @@ class MusicApiRepository(
             "userid" to session.userId,
             "token" to session.token
         )
-        val fullTrackName = if (song.artist.isNotBlank() && song.artist != "未知歌手" && !song.title.contains(" - ")) {
-            "${song.artist} - ${song.title}"
+        val cleanTitle = stripKnownAudioFileExtension(song.title)
+        val fullTrackName = if (song.artist.isNotBlank() && song.artist != "未知歌手" && !cleanTitle.contains(" - ")) {
+            "${song.artist} - $cleanTitle"
         } else {
-            song.title
+            cleanTitle
         }
         val mixId = song.albumAudioId.takeIf { it > 0L } ?: song.audioId.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: song.id.toLongOrNull() ?: 0L
         val primaryHash = song.hash128.ifBlank { song.hash }.uppercase()
@@ -928,10 +930,11 @@ class MusicApiRepository(
         )
         val dataArr = JsonArray()
         songs.forEachIndexed { idx, song ->
-            val fullTrackName = if (song.artist.isNotBlank() && song.artist != "未知歌手" && !song.title.contains(" - ")) {
-                "${song.artist} - ${song.title}"
+            val cleanTitle = stripKnownAudioFileExtension(song.title)
+            val fullTrackName = if (song.artist.isNotBlank() && song.artist != "未知歌手" && !cleanTitle.contains(" - ")) {
+                "${song.artist} - $cleanTitle"
             } else {
-                song.title
+                cleanTitle
             }
             val mixId = song.albumAudioId.takeIf { it > 0L } ?: song.audioId.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: 0L.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: song.id.toLongOrNull() ?: 0L
             val primaryHash = song.hash128.ifBlank { song.hash }.uppercase()
@@ -8742,8 +8745,10 @@ class MusicApiRepository(
             ?: authorsList.firstOrNull()?.let { it.text("author_id") ?: it.text("id") ?: it.text("singerid") }
             ?: "").takeIf { it != "0" }.orEmpty()
 
-        val rawFilename = o.text("filename") ?: o.text("FileName")
-            ?: base?.text("filename") ?: audioInfo?.text("filename") ?: ""
+        val rawFilename = stripKnownAudioFileExtension(
+            o.text("filename") ?: o.text("FileName")
+                ?: base?.text("filename") ?: audioInfo?.text("filename") ?: ""
+        )
         if (title.isBlank() && rawFilename.contains("-")) {
             val parts = rawFilename.split("-", limit = 2)
             if (artist.isBlank() || artist == "未知歌手" || artist == "群星") artist = parts[0].trim()
@@ -8763,7 +8768,7 @@ class MusicApiRepository(
             }
         }
 
-        title = title.replace("<em>", "").replace("</em>", "").trim()
+        title = stripKnownAudioFileExtension(title.replace("<em>", "").replace("</em>", "").trim())
         artist = artist.replace("<em>", "").replace("</em>", "").trim()
         if (artist.isBlank()) artist = "群星"
 
@@ -9117,6 +9122,18 @@ class MusicApiRepository(
             )
 
         val fileId = o.text("fileid")?.toLongOrNull() ?: o.text("file_id")?.toLongOrNull() ?: 0L
+        val rawAddTime = o.text("addtime") ?: o.text("add_time") ?: o.text("inlist_time") ?: o.text("create_time")
+            ?: audioInfo?.text("addtime") ?: audioInfo?.text("add_time") ?: base?.text("addtime")
+        val addTimeSec = rawAddTime?.trim()?.toLongOrNull()?.let { rawTs ->
+            when {
+                rawTs > 10_000_000_000L -> rawTs / 1000L
+                rawTs > 0L -> rawTs
+                else -> 0L
+            }
+        } ?: 0L
+        val cloudSortOrder = (o.text("sort") ?: o.text("sort_id") ?: o.text("order")
+            ?: audioInfo?.text("sort") ?: base?.text("sort"))
+            ?.trim()?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
         val rawPublishDate = o.text("publish_date") ?: o.text("publish_time") ?: o.text("publishtime")
             ?: o.text("PublishDate") ?: o.text("PublishTime") ?: o.text("release_date")
             ?: o.text("online_time") ?: o.text("inlist_time")
@@ -9198,7 +9215,9 @@ class MusicApiRepository(
             availableQualities = qualities,
             bitrateKbps = estimatedKbps,
             fileSizeByte = maxFileSize,
-            publishDate = publishDate
+            publishDate = publishDate,
+            addTimeSec = addTimeSec,
+            cloudSortOrder = cloudSortOrder
         )
     }
 

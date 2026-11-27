@@ -248,4 +248,269 @@ class PlaylistManagementTest {
         val songItemInDel = deleteSongBody?.getAsJsonArray("data")?.get(0)?.asJsonObject
         assertEquals(998877L, songItemInDel?.get("fileid")?.asLong)
     }
+
+    @Test
+    fun songTitleStripsKnownAudioExtensionsWithoutCorruptingValidDots() {
+        val transport = object : KugouTransport {
+            override suspend fun call(
+                path: String,
+                session: KugouSession?,
+                query: Map<String, String>,
+                body: JsonObject?,
+                host: String,
+                method: String,
+                web: Boolean,
+                headers: Map<String, String>,
+                device: DeviceIdentity?
+            ): ApiResponse = ApiResponse(JsonObject())
+        }
+        val store = MemoryStore()
+        val auth = AuthRepository(transport, store)
+        val repo = MusicApiRepository(transport, AccountRepository(store, auth, transport))
+
+        val mp3Obj = JsonParser.parseString(
+            """{"fileid":101,"hash":"11111111111111111111111111111111","name":"Linkin Park - Numb.mp3","addtime":1700000100,"sort":0}"""
+        ).asJsonObject
+        val parsedMp3 = repo.parseSong(mp3Obj)
+        assertEquals("Numb", parsedMp3.title)
+        assertEquals("Linkin Park", parsedMp3.artist)
+        assertEquals(1700000100L, parsedMp3.addTimeSec)
+        assertEquals(0L, parsedMp3.cloudSortOrder)
+
+        val flacObj = JsonParser.parseString(
+            """{"fileid":102,"hash":"22222222222222222222222222222222","filename":"万妖王 - 白月初，你到底行不行.FLAC"}"""
+        ).asJsonObject
+        val parsedFlac = repo.parseSong(flacObj)
+        assertEquals("白月初，你到底行不行", parsedFlac.title)
+        assertEquals("万妖王", parsedFlac.artist)
+
+        val validDotObj = JsonParser.parseString(
+            """{"fileid":103,"hash":"33333333333333333333333333333333","songname":"Mr. Brightside","singername":"The Killers"}"""
+        ).asJsonObject
+        assertEquals("Mr. Brightside", repo.parseSong(validDotObj).title)
+
+        val cachedLegacy = Song(
+            id = "legacy_1",
+            hash = "44444444444444444444444444444444",
+            title = "In The End.mp3",
+            artist = "Linkin Park"
+        ).sanitizeFromJson()
+        assertEquals("In The End", cachedLegacy.title)
+        assertEquals("3.14", com.concept.music.data.model.stripKnownAudioFileExtension("3.14"))
+    }
+
+    @Test
+    fun cloudPlaylistDefaultSortMatchesOfficialOrderAndSixSortModesWork() = runTest {
+        val mockResponseJson = """
+            {
+              "status": 1,
+              "data": {
+                "list_ver": 42,
+                "count": 4,
+                "info": [
+                  {"fileid": 1001, "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "歌手A - 最早添加.mp3", "addtime": 1700000100, "sort": 0, "timelen": 210},
+                  {"fileid": 1002, "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "歌手B - 较早添加.mp3", "addtime": 1700000200, "sort": 0, "timelen": 280},
+                  {"fileid": 1003, "hash": "cccccccccccccccccccccccccccccccc", "name": "歌手C - 最新添加.mp3", "addtime": 1700000500, "sort": 0, "timelen": 190},
+                  {"fileid": 1004, "hash": "dddddddddddddddddddddddddddddddd", "name": "歌手D - 居中时间.flac", "addtime": 1700000300, "sort": 0, "timelen": 320}
+                ]
+              }
+            }
+        """.trimIndent()
+
+        val transport = object : KugouTransport {
+            override suspend fun call(
+                path: String,
+                session: KugouSession?,
+                query: Map<String, String>,
+                body: JsonObject?,
+                host: String,
+                method: String,
+                web: Boolean,
+                headers: Map<String, String>,
+                device: DeviceIdentity?
+            ): ApiResponse {
+                return if (path == "/v4/get_list_all_file_v3") {
+                    ApiResponse(JsonParser.parseString(mockResponseJson).asJsonObject)
+                } else {
+                    ApiResponse(JsonObject())
+                }
+            }
+        }
+        val store = MemoryStore()
+        val auth = AuthRepository(transport, store)
+        val accounts = AccountRepository(store, auth, transport)
+        val repo = MusicApiRepository(transport, accounts)
+        store.saveSession(KugouSession("123", "mock-token"))
+
+        // 1. 未自定义排序时（全 sort=0），官方默认顺序为按 addtime 降序（最新添加在前）且歌名不含后缀
+        val (ver, officialTracks) = repo.fetchCloudPlaylistTracksWithVer(listId = 2L, type = 0)
+        assertEquals(42L, ver)
+        assertEquals(listOf("最新添加", "居中时间", "较早添加", "最早添加"), officialTracks.map { it.title })
+
+        // 2. 已自定义排序（sort=1,2）且之后新增两首（sort=0）：新加曲目置顶按新到旧，随后按 sort 升序
+        val mixedCustom = listOf(
+            Song(id = "1", hash = "h1", title = "自定义第二", artist = "B", fileId = 10, addTimeSec = 1000L, cloudSortOrder = 2L),
+            Song(id = "2", hash = "h2", title = "自定义第一", artist = "A", fileId = 11, addTimeSec = 2000L, cloudSortOrder = 1L),
+            Song(id = "3", hash = "h3", title = "新加较早", artist = "C", fileId = 12, addTimeSec = 3000L, cloudSortOrder = 0L),
+            Song(id = "4", hash = "h4", title = "新加最新", artist = "D", fileId = 13, addTimeSec = 4000L, cloudSortOrder = 0L)
+        )
+        val orderedMixed = sortCloudPlaylistTracksToOfficialOrder(mixedCustom)
+        assertEquals(listOf("新加最新", "新加较早", "自定义第一", "自定义第二"), orderedMixed.map { it.title })
+
+        // 3. 校验全部 6 种 PlaylistSortMode
+        val newest = com.concept.music.ui.library.sortPlaylistSongs(officialTracks, com.concept.music.ui.library.PlaylistSortMode.ADDED_NEWEST)
+        val oldest = com.concept.music.ui.library.sortPlaylistSongs(officialTracks, com.concept.music.ui.library.PlaylistSortMode.ADDED_OLDEST)
+        val longest = com.concept.music.ui.library.sortPlaylistSongs(officialTracks, com.concept.music.ui.library.PlaylistSortMode.DURATION_DESC)
+        assertEquals(listOf("最新添加", "居中时间", "较早添加", "最早添加"), newest.map { it.title })
+        assertEquals(listOf("最早添加", "较早添加", "居中时间", "最新添加"), oldest.map { it.title })
+        assertEquals("居中时间", longest.first().title)
+    }
+
+    @Test
+    fun uploadPlaylistCustomCoverAndUpdatePlaylistPicProtocol() = runTest {
+        val mockServer = okhttp3.mockwebserver.MockWebServer()
+        mockServer.enqueue(
+            okhttp3.mockwebserver.MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"IsSuccess":true,"FileName":"202611270088.jpg"}""")
+        )
+        mockServer.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
+        try {
+            val capturedPayloads = mutableListOf<JsonObject>()
+            val transport = object : KugouTransport {
+                override suspend fun call(
+                    path: String,
+                    session: KugouSession?,
+                    query: Map<String, String>,
+                    body: JsonObject?,
+                    host: String,
+                    method: String,
+                    web: Boolean,
+                    headers: Map<String, String>,
+                    device: DeviceIdentity?
+                ): ApiResponse = ApiResponse(JsonObject())
+
+                override suspend fun requestBinaryBytes(
+                    path: String,
+                    session: KugouSession?,
+                    query: Map<String, String>,
+                    rawBodyBytes: ByteArray?,
+                    host: String,
+                    method: String,
+                    headers: Map<String, String>,
+                    sign: Boolean,
+                    includeDefaultParams: Boolean,
+                    device: DeviceIdentity?
+                ): ByteArray {
+                    assertEquals("/v1/modify_list", path)
+                    assertFalse("加密请求应包含 RSA 参数 p", query["p"].isNullOrBlank())
+                    assertNotNull("加密请求体不应为空", rawBodyBytes)
+                    assertTrue("加密请求体字节长度应大于 0", (rawBodyBytes?.size ?: 0) > 0)
+                    capturedPayloads.add(JsonObject().apply {
+                        addProperty("path", path)
+                        addProperty("bodySize", rawBodyBytes?.size ?: 0)
+                    })
+                    return """{"status":1,"err_code":0}""".toByteArray(Charsets.UTF_8)
+                }
+            }
+
+            val store = MemoryStore()
+            val auth = AuthRepository(transport, store)
+            val accounts = AccountRepository(store, auth, transport)
+            val repo = MusicApiRepository(transport, accounts)
+            store.saveSession(KugouSession("123", "mock-token"))
+
+            // 构造最小合法 JPEG 头（SOI + SOF0 16x16 + EOI）
+            val validJpeg = byteArrayOf(
+                0xFF.toByte(), 0xD8.toByte(),
+                0xFF.toByte(), 0xC0.toByte(), 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00,
+                0xFF.toByte(), 0xD9.toByte()
+            )
+            val uploadUrl = "http://127.0.0.1:${mockServer.port}/imageupload/stream.php"
+            val likedPl = Playlist(id = "like", title = "我喜欢", listId = 2L, isCreatedByMe = true, isLiked = true)
+
+            val (ok, fileName) = repo.updatePlaylistCoverOnCloud(
+                playlist = likedPl,
+                imageBytes = validJpeg,
+                uploadEndpointOverride = uploadUrl
+            )
+            assertEquals("图床应返回 FileName", "202611270088.jpg", fileName)
+            assertTrue("封面上传并同步云端应返回 true (payloads=${capturedPayloads.size})", ok)
+            assertEquals(1, capturedPayloads.size)
+
+            val recorded = mockServer.takeRequest()
+            assertEquals("custom", recorded.requestUrl?.queryParameter("type"))
+            assertEquals(".jpg", recorded.requestUrl?.queryParameter("extendName"))
+            assertEquals("1", recorded.requestUrl?.queryParameter("jsonResponse"))
+            assertNull("图床上传请求严禁携带用户 token", recorded.requestUrl?.queryParameter("token"))
+            assertNull("图床上传请求严禁携带 Cookie", recorded.getHeader("Cookie"))
+            assertTrue(imageUrl("custom/202611270088.jpg").startsWith("https://imge.kugou.com/custom/400/"))
+            assertTrue(imageUrl("stdmusic/202611270088.jpg").startsWith("https://imge.kugou.com/stdmusic/400/"))
+        } finally {
+            mockServer.shutdown()
+        }
+    }
+
+    @Test
+    fun coverOverridePathGuardAndBatchDownloadDedupeAndPermissionGate() {
+        val tempRoot = java.io.File(System.getProperty("java.io.tmpdir"), "breeze_cover_guard_test_${System.currentTimeMillis()}").apply { mkdirs() }
+        try {
+            val safeFile = java.io.File(tempRoot, "cover_like_1.jpg")
+            assertNotNull(
+                com.concept.music.data.repository.PlaylistCoverOverrideRepository.resolveManagedCoverFileInRoot(
+                    tempRoot,
+                    safeFile.toURI().toString()
+                )
+            )
+            val escaped = java.io.File(tempRoot, "../outside_secret.jpg")
+            assertNull(
+                "必须拒绝越出受管目录的路径穿越封面路径",
+                com.concept.music.data.repository.PlaylistCoverOverrideRepository.resolveManagedCoverFileInRoot(
+                    tempRoot,
+                    escaped.absolutePath
+                )
+            )
+            assertNull(
+                "网络 URL 不应被误判为本地覆盖文件",
+                com.concept.music.data.repository.PlaylistCoverOverrideRepository.resolveManagedCoverFileInRoot(
+                    tempRoot,
+                    "https://imge.kugou.com/custom/400/test.jpg"
+                )
+            )
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+
+        // 验证下载权限默认关闭，以及批量下载去重逻辑
+        com.concept.music.service.AppPermissionManager.resetForTest()
+        assertFalse(
+            "音乐下载权限必须默认关闭",
+            com.concept.music.service.AppPermissionManager.isPermissionEnabled(
+                com.concept.music.service.AppPermissionType.MUSIC_DOWNLOAD
+            )
+        )
+        val s1 = Song(id = "1", hash = "AAAA", title = "歌1", artist = "歌手1")
+        val s1Dup = Song(id = "1", hash = "aaaa", title = "歌1", artist = "歌手1")
+        val s2Active = Song(id = "2", hash = "BBBB", title = "歌2", artist = "歌手2")
+        val s3Done = Song(id = "3", hash = "CCCC", title = "歌3", artist = "歌手3")
+        val existingTasks = listOf(
+            com.concept.music.service.DownloadTaskItem(
+                taskId = "t_active",
+                song = s2Active,
+                requestedQuality = com.concept.music.data.model.AudioQuality.HIGH,
+                status = com.concept.music.service.DownloadTaskStatus.DOWNLOADING
+            ),
+            com.concept.music.service.DownloadTaskItem(
+                taskId = "t_done",
+                song = s3Done,
+                requestedQuality = com.concept.music.data.model.AudioQuality.HIGH,
+                status = com.concept.music.service.DownloadTaskStatus.COMPLETED
+            )
+        )
+        val filtered = com.concept.music.service.MusicDownloadManager.filterPendingBatchDownloadSongs(
+            requestedSongs = listOf(s1, s1Dup, s2Active, s3Done),
+            existingTasks = existingTasks
+        )
+        assertEquals(listOf("1", "3"), filtered.map { it.id })
+    }
 }

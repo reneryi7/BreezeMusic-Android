@@ -385,6 +385,305 @@ fun SongDownloadDialog(
     }
 }
 
+/**
+ * 批量多选下载轻量确认弹窗（仅在「设置 -> 权限管理」手动开启音乐下载权限后触发）：
+ * - 支持一键选定本次批量下载的目标音质（无该档位时单曲自动平滑降级）；
+ * - 快捷切换高清封面内嵌、歌词内嵌、独立 .lrc 与跳过本地已有，确认后通过有界并发队列静默排队下载。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun BatchSongDownloadDialog(
+    songs: List<Song>,
+    sourceTitle: String = "",
+    onDismiss: () -> Unit,
+    onOpenDownloadSettings: (() -> Unit)? = null,
+    onEnqueued: (Int) -> Unit = {}
+) {
+    val context = LocalContext.current
+    val downloadConfig by MusicDownloadManager.config.collectAsState()
+    var selectedQuality by remember(downloadConfig.defaultDownloadQuality) {
+        mutableStateOf(downloadConfig.defaultDownloadQuality)
+    }
+
+    var pendingQualityAfterPerm by remember { mutableStateOf<AudioQuality?>(null) }
+    val storagePermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { resultMap ->
+        val allGranted = resultMap.values.all { it }
+        val targetQ = pendingQualityAfterPerm ?: selectedQuality
+        pendingQualityAfterPerm = null
+        if (!allGranted && !AppPermissionManager.hasMusicDownloadStoragePermission(context)) {
+            Toast.makeText(
+                context,
+                "未授予存储权限，将尝试通过系统 MediaStore 保存至公共音乐目录",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        val count = MusicDownloadManager.enqueueBatchDownload(context, songs, targetQ)
+        onEnqueued(count)
+        onDismiss()
+    }
+
+    val baseSheetBg = conceptSheetContainerColor()
+    val textPrimary = MaterialTheme.colorScheme.onSurface
+    val textSecondary = MaterialTheme.colorScheme.onSurfaceVariant
+    val panelShape = RoundedCornerShape(26.dp)
+
+    ConceptAnimatedOverlaySheet(
+        onDismiss = onDismiss,
+        isLandscape = true,
+        scrimAlpha = 0.56f,
+        zIndex = 92f
+    ) {
+        Surface(
+            shape = panelShape,
+            color = baseSheetBg.copy(alpha = 0.98f),
+            contentColor = textPrimary,
+            shadowElevation = 24.dp,
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .widthIn(max = 430.dp)
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                )
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(ConceptMintAccent.copy(alpha = 0.16f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Download,
+                                contentDescription = null,
+                                tint = ConceptMintAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "批量下载 ${songs.size} 首歌曲",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 16.5.sp,
+                                color = textPrimary
+                            )
+                            Text(
+                                text = if (sourceTitle.isNotBlank()) "来自「$sourceTitle」· 后台限流排队下载" else "后台双通道排队，无目标音质时自动平滑降级",
+                                fontSize = 12.sp,
+                                color = textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    IconButton(onClick = requestDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = textSecondary, modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "优先下载音质（单曲缺失时自动平滑降级）",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = textSecondary
+                    )
+
+                    listOf(
+                        AudioQuality.HI_RES,
+                        AudioQuality.LOSSLESS,
+                        AudioQuality.HIGH,
+                        AudioQuality.STANDARD
+                    ).forEach { quality ->
+                        val isSelected = selectedQuality == quality
+                        val (titleText, descText, badgeColor) = when (quality) {
+                            AudioQuality.HI_RES -> Triple("Hi-Res 高解析度无损", "优先 24bit 母带 FLAC，自动回退 SQ/320K", VipGold)
+                            AudioQuality.LOSSLESS -> Triple("SQ 无损音质 (FLAC)", "优先 16bit CD 级 FLAC，自动回退 320K", ConceptPrimary)
+                            AudioQuality.HIGH -> Triple("HQ 高品音质 (320K)", "320kbps MP3 · 体积与听感均衡", ConceptMintAccent)
+                            AudioQuality.STANDARD -> Triple("标准音质 (128K)", "128kbps MP3/OGG · 省空间极速下载", textSecondary)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isSelected) ConceptPrimary.copy(alpha = 0.14f) else textPrimary.copy(alpha = 0.045f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .softCardClickable(shape = RoundedCornerShape(14.dp)) {
+                                    selectedQuality = quality
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { selectedQuality = quality },
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = titleText,
+                                            fontSize = 13.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSelected) ConceptPrimary else textPrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(5.dp),
+                                            color = badgeColor.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = quality.shortBadge,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = badgeColor,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(text = descText, fontSize = 11.sp, color = textSecondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = textPrimary.copy(alpha = 0.045f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "元数据、歌词与去重选项",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ConceptPrimary
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            DownloadOptionTonalPill(
+                                selected = downloadConfig.embedHdCover,
+                                label = "内嵌高清封面",
+                                icon = Icons.Rounded.Image,
+                                onClick = { MusicDownloadManager.setEmbedHdCover(!downloadConfig.embedHdCover) }
+                            )
+                            DownloadOptionTonalPill(
+                                selected = downloadConfig.embedLyrics,
+                                label = "内嵌歌词",
+                                icon = Icons.Rounded.Lyrics,
+                                onClick = { MusicDownloadManager.setEmbedLyrics(!downloadConfig.embedLyrics) }
+                            )
+                            DownloadOptionTonalPill(
+                                selected = downloadConfig.saveStandaloneLrcFile,
+                                label = "独立保存 .lrc",
+                                icon = Icons.Rounded.Description,
+                                onClick = { MusicDownloadManager.setSaveStandaloneLrcFile(!downloadConfig.saveStandaloneLrcFile) }
+                            )
+                            DownloadOptionTonalPill(
+                                selected = downloadConfig.skipExistingFiles,
+                                label = "跳过本地已有",
+                                icon = Icons.Rounded.CheckCircleOutline,
+                                onClick = { MusicDownloadManager.setSkipExistingFiles(!downloadConfig.skipExistingFiles) }
+                            )
+                        }
+                        Text(
+                            text = "音频保存至：${downloadConfig.downloadDirectoryPath}" +
+                                if (downloadConfig.saveStandaloneLrcFile) "\n歌词保存至：${downloadConfig.lyricDirectoryPath}" else "",
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = textSecondary,
+                            lineHeight = 14.5.sp
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (onOpenDownloadSettings != null) {
+                        TextButton(
+                            onClick = {
+                                requestDismiss()
+                                onOpenDownloadSettings()
+                            }
+                        ) {
+                            Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("路径设置", fontSize = 12.5.sp)
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = requestDismiss) {
+                            Text("取消")
+                        }
+                        Button(
+                            enabled = songs.isNotEmpty(),
+                            onClick = {
+                                var requestedPermission = false
+                                val enqueued = MusicDownloadManager.enqueueBatchDownload(
+                                    context = context,
+                                    songs = songs,
+                                    quality = selectedQuality,
+                                    onPermissionRequired = { perms ->
+                                        requestedPermission = true
+                                        pendingQualityAfterPerm = selectedQuality
+                                        storagePermLauncher.launch(perms)
+                                    }
+                                )
+                                if (!requestedPermission) {
+                                    if (enqueued > 0) {
+                                        onEnqueued(enqueued)
+                                    }
+                                    requestDismiss()
+                                }
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ConceptPrimary,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("开始下载 (${songs.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DownloadOptionTonalPill(
     selected: Boolean,

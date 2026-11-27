@@ -382,7 +382,14 @@ fun imageUrl(raw: String?): String {
     if (raw.isNullOrBlank()) return ""
     val trimmed = raw.trim()
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) return ""
-    var url = trimmed.replace("{size}", "400").replace("{param}", "400")
+    if (trimmed.startsWith("file:", ignoreCase = true)) return trimmed
+    var url = when {
+        trimmed.startsWith("custom/", ignoreCase = true) ->
+            "https://imge.kugou.com/custom/400/${trimmed.substringAfter('/').trimStart('/')}"
+        trimmed.startsWith("stdmusic/", ignoreCase = true) ->
+            "https://imge.kugou.com/stdmusic/400/${trimmed.substringAfter('/').trimStart('/')}"
+        else -> trimmed
+    }.replace("{size}", "400").replace("{param}", "400")
     if (url.startsWith("//")) url = "https:$url"
     else if (url.startsWith("http://", ignoreCase = true)) {
         val rest = url.substring(7)

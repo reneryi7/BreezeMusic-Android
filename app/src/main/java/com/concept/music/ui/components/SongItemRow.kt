@@ -110,9 +110,12 @@ fun rememberOptimizedAsyncImageModel(
     }
     return remember(thumbUrl, sizePx, context) {
         if (thumbUrl.isNotEmpty()) {
+            val managedLocalFile = com.concept.music.data.repository.PlaylistCoverOverrideRepository
+                .resolveManagedCoverFile(context, thumbUrl)
+                ?.takeIf { it.exists() && it.length() > 0L }
             val cacheKey = "${thumbUrl}_s$sizePx"
             ImageRequest.Builder(context)
-                .data(thumbUrl)
+                .data(managedLocalFile ?: thumbUrl)
                 .size(sizePx, sizePx)
                 .precision(Precision.INEXACT)
                 .memoryCacheKey(cacheKey)

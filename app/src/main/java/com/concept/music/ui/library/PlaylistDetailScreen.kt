@@ -1,19 +1,27 @@
 package com.concept.music.ui.library
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -38,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -53,19 +62,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.Song
+import com.concept.music.data.repository.PlaylistCoverOverrideRepository
 import com.concept.music.service.AppPermissionManager
 import com.concept.music.service.AppPermissionType
 import com.concept.music.ui.components.AddToPlaylistDialog
 import com.concept.music.ui.components.ArtworkDownloadCategory
 import com.concept.music.ui.components.ArtworkSaveResult
+import com.concept.music.ui.components.BatchSongDownloadDialog
 import com.concept.music.ui.components.ConceptAdaptiveBottomSheetContainer
 import com.concept.music.ui.components.ConceptListDragReorderState
+import com.concept.music.ui.components.CoverSquareCropDialog
 import com.concept.music.ui.components.CreatePlaylistDialog
 import com.concept.music.ui.components.FloatingScrollToTopButton
 import com.concept.music.ui.components.HdArtworkPreviewDialog
@@ -73,14 +88,13 @@ import com.concept.music.ui.components.HdArtworkSaver
 import com.concept.music.ui.components.SongItemRow
 import com.concept.music.ui.components.rememberProgressiveSongList
 import com.concept.music.ui.components.smoothFastScrollToItem
-import com.concept.music.ui.theme.ConceptCategoryTabItem
 import com.concept.music.ui.theme.ConceptCoralAccent
 import com.concept.music.ui.theme.ConceptCyanAccent
 import com.concept.music.ui.theme.ConceptFluidRefreshIcon
 import com.concept.music.ui.theme.ConceptMintAccent
+import com.concept.music.ui.theme.ConceptMotion
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptPrimaryDark
-import com.concept.music.ui.theme.ConceptSlidingCategoryTabs
 import com.concept.music.ui.theme.ConceptStageBackground
 import com.concept.music.ui.theme.LocalConceptAdaptiveInfo
 import com.concept.music.ui.theme.conceptCyanAccentColor
@@ -92,19 +106,86 @@ import com.concept.music.ui.theme.softCardClickable
 import com.concept.music.ui.theme.softClickable
 import com.concept.music.ui.viewmodel.LibraryViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.Collator
+import java.util.Locale
 
 /**
- * 歌单内排序模式（无门槛直接标配，不设 200 首门槛限制；自建歌单云端自定义排序保存后直接作为「默认顺序」呈现）
+ * 歌单内排序模式（6 项竖向弹窗展示，无门槛直接标配；「我喜欢」与自建歌单云端自定义排序保存后直接作为「默认排序」呈现）
  */
 private fun Song.selectionKey(): String = "${id}_${hash}"
 
 enum class PlaylistSortMode(val label: String) {
-    DEFAULT("默认顺序"),
+    DEFAULT("默认排序"),
+    ADDED_NEWEST("从新到旧"),
+    ADDED_OLDEST("从旧到新"),
     TITLE_AZ("歌名 A-Z"),
     ARTIST_AZ("歌手名"),
     DURATION_DESC("时长最长")
+}
+
+private val LEADING_SORT_PUNCTUATION_REGEX = Regex("""^[\s《》〈〉「」『』【】()（）\[\]"'“”‘’·\-_:：]+""")
+
+private fun normalizeSortText(raw: String): String {
+    val trimmed = raw.trim()
+    val stripped = LEADING_SORT_PUNCTUATION_REGEX.replace(trimmed, "").trim()
+    return stripped.ifBlank { trimmed }
+}
+
+internal fun sortPlaylistSongs(songs: List<Song>, sortMode: PlaylistSortMode): List<Song> {
+    if (songs.size <= 1) return songs
+    return when (sortMode) {
+        PlaylistSortMode.DEFAULT -> songs
+        PlaylistSortMode.ADDED_NEWEST -> {
+            val hasTimeOrFileId = songs.any { it.addTimeSec > 0L || it.fileId > 0L }
+            if (!hasTimeOrFileId) {
+                songs
+            } else {
+                songs.withIndex()
+                    .sortedWith(
+                        compareByDescending<IndexedValue<Song>> { it.value.addTimeSec }
+                            .thenByDescending { it.value.fileId }
+                            .thenBy { it.index }
+                    )
+                    .map { it.value }
+            }
+        }
+        PlaylistSortMode.ADDED_OLDEST -> {
+            val hasTimeOrFileId = songs.any { it.addTimeSec > 0L || it.fileId > 0L }
+            if (!hasTimeOrFileId) {
+                songs.asReversed()
+            } else {
+                songs.withIndex()
+                    .sortedWith(
+                        compareBy<IndexedValue<Song>> {
+                            if (it.value.addTimeSec > 0L) it.value.addTimeSec else Long.MAX_VALUE
+                        }
+                            .thenBy {
+                                if (it.value.fileId > 0L) it.value.fileId else Long.MAX_VALUE
+                            }
+                            .thenByDescending { it.index }
+                    )
+                    .map { it.value }
+            }
+        }
+        PlaylistSortMode.TITLE_AZ -> {
+            val collator = Collator.getInstance(Locale.CHINA)
+            songs.sortedWith { a, b ->
+                val cmp = collator.compare(normalizeSortText(a.title), normalizeSortText(b.title))
+                if (cmp != 0) cmp else collator.compare(normalizeSortText(a.artist), normalizeSortText(b.artist))
+            }
+        }
+        PlaylistSortMode.ARTIST_AZ -> {
+            val collator = Collator.getInstance(Locale.CHINA)
+            songs.sortedWith { a, b ->
+                val cmp = collator.compare(normalizeSortText(a.artist), normalizeSortText(b.artist))
+                if (cmp != 0) cmp else collator.compare(normalizeSortText(a.title), normalizeSortText(b.title))
+            }
+        }
+        PlaylistSortMode.DURATION_DESC -> songs.sortedByDescending { it.durationMs }
+    }
 }
 
 private data class SortableTrackEntry(
@@ -124,6 +205,7 @@ fun PlaylistDetailScreen(
     onSongMoreClick: ((Song, (() -> Unit)?) -> Unit)? = null,
     onSharePlaylist: ((Playlist) -> Unit)? = null,
     onOpenPlaylistComments: ((Playlist) -> Unit)? = null,
+    onOpenDownloadSettings: (() -> Unit)? = null,
     onSubSheetOpenChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -134,6 +216,8 @@ fun PlaylistDetailScreen(
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val playlists by viewModel.playlists.collectAsState()
+    val customCoverOverrides by viewModel.customCoverOverrides.collectAsState()
+    val permissionState by AppPermissionManager.state.collectAsState()
     val songs by viewModel.librarySongs.collectAsState()
     val loading by viewModel.libraryLoading.collectAsState()
     val error by viewModel.libraryError.collectAsState()
@@ -145,11 +229,41 @@ fun PlaylistDetailScreen(
     var selectedSongIds by remember { mutableStateOf(setOf<String>()) }
     var showBatchAddToPlaylistDialog by remember { mutableStateOf(false) }
     var showBatchRemoveDialog by remember { mutableStateOf(false) }
+    var showBatchDownloadDialog by remember { mutableStateOf(false) }
     var isBatchRemoving by remember { mutableStateOf(false) }
     var showPlaylistCoverPreview by remember { mutableStateOf(false) }
+    var pendingCropCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var isUpdatingPlaylistCover by remember { mutableStateOf(false) }
     var showEditPlaylistDialog by remember { mutableStateOf(false) }
     var showManageSheet by remember { mutableStateOf(false) }
     var isSubSheetDismissing by remember { mutableStateOf(false) }
+
+    val fallbackCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            pendingCropCoverUri = uri
+        }
+    }
+    val photoCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            pendingCropCoverUri = uri
+        }
+    }
+    val launchCoverPicker: () -> Unit = {
+        runCatching {
+            photoCoverPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        }.onFailure {
+            runCatching { fallbackCoverPickerLauncher.launch("image/*") }
+                .onFailure {
+                    Toast.makeText(context, "无法打开系统相册，请确认系统图库可用", Toast.LENGTH_SHORT).show()
+                }
+        }
+    }
 
     // 页内直接拖拽排序状态（点击外置「排序」后直接在歌单页内将列表序号变为可拖动手柄，并出现取消/完成按钮）
     var isInlineReorderMode by remember(playlistId) { mutableStateOf(false) }
@@ -224,12 +338,7 @@ fun PlaylistDetailScreen(
                     s.album.contains(q, ignoreCase = true)
             }
         }
-        when (sortMode) {
-            PlaylistSortMode.DEFAULT -> filtered
-            PlaylistSortMode.TITLE_AZ -> filtered.sortedBy { it.title.lowercase() }
-            PlaylistSortMode.ARTIST_AZ -> filtered.sortedBy { it.artist.lowercase() }
-            PlaylistSortMode.DURATION_DESC -> filtered.sortedByDescending { it.durationMs }
-        }
+        sortPlaylistSongs(filtered, sortMode)
     }
 
     val playingSongIndex = remember(filteredAndSortedSongs, currentSong) {
@@ -272,17 +381,35 @@ fun PlaylistDetailScreen(
         }
     }
 
+    val isLikedPlaylist = remember(currentPlaylist, playlistId) {
+        playlistId == "like" || currentPlaylist?.isLiked == true
+    }
+
     val isCustomCreated = remember(currentPlaylist, playlistId, isHistory) {
         currentPlaylist != null && currentPlaylist.isCreatedByMe && !currentPlaylist.isLiked && playlistId != "like" && !isHistory
     }
+
+    val canCustomSortTracks = remember(isCustomCreated, isLikedPlaylist, isHistory) {
+        (isCustomCreated || isLikedPlaylist) && !isHistory
+    }
+
+    val canEditCover = remember(isCustomCreated, isLikedPlaylist, isHistory) {
+        (isCustomCreated || isLikedPlaylist) && !isHistory
+    }
+
+    val canBatchDownload = permissionState.musicDownloadEnabled && !isHistory
 
     val isExternalPlaylist = remember(currentPlaylist, playlistId, isHistory) {
         currentPlaylist != null && !currentPlaylist.isCreatedByMe && playlistId != "like" && !isHistory
     }
 
-    val effectivePlaylistCoverUrl = remember(currentPlaylist?.coverUrl, songs) {
-        currentPlaylist?.coverUrl?.takeIf { it.isNotBlank() }
-            ?: songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+    val effectivePlaylistCoverUrl = remember(currentPlaylist, playlistId, songs, customCoverOverrides) {
+        viewModel.resolveEffectivePlaylistCover(
+            playlist = currentPlaylist,
+            fallbackPlaylistId = playlistId,
+            fallbackSongCover = songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty(),
+            overrides = customCoverOverrides
+        )
     }
 
     val commitInlineReorder: () -> Unit = {
@@ -573,6 +700,7 @@ fun PlaylistDetailScreen(
                             songCount = songs.size,
                             isExternal = isExternalPlaylist,
                             isCustomCreated = isCustomCreated,
+                            canEditCover = canEditCover,
                             isInlineReorderMode = isInlineReorderMode,
                             onPlayAll = {
                                 if (filteredAndSortedSongs.isNotEmpty()) {
@@ -581,9 +709,8 @@ fun PlaylistDetailScreen(
                             },
                             onCollectClick = onCollectToggle,
                             onEditMetaClick = { showEditPlaylistDialog = true },
-                            onStartInlineSortClick = { enterInlineReorderMode() },
                             onCoverClick = {
-                                if (effectivePlaylistCoverUrl.isNotBlank()) {
+                                if (effectivePlaylistCoverUrl.isNotBlank() || canEditCover) {
                                     showPlaylistCoverPreview = true
                                 }
                             }
@@ -603,7 +730,11 @@ fun PlaylistDetailScreen(
                                         searchQuery = searchQuery,
                                         onSearchQueryChange = { searchQuery = it },
                                         sortMode = sortMode,
-                                        onSortModeChange = { sortMode = it }
+                                        onSortModeChange = { sortMode = it },
+                                        totalSongCount = songs.size,
+                                        filteredSongCount = filteredAndSortedSongs.size,
+                                        canCustomSortTracks = canCustomSortTracks,
+                                        onEnterCustomSort = { enterInlineReorderMode() }
                                     )
                                 }
                             }
@@ -767,7 +898,7 @@ fun PlaylistDetailScreen(
                                 .fillMaxSize(),
                             contentPadding = PaddingValues(bottom = if (isMultiSelectMode) 176.dp else 128.dp)
                         ) {
-                            // 1. 歌单头部 Header（外置自建歌单「编辑」与「排序」入口）
+                            // 1. 歌单头部 Header（已将自定义排序统一收纳至右侧排序小窗，头部仅保留清爽的核心操作）
                             item(key = "pl_header", contentType = "pl_header") {
                                 PlaylistHeaderCard(
                                     playlist = currentPlaylist,
@@ -775,6 +906,7 @@ fun PlaylistDetailScreen(
                                     songCount = songs.size,
                                     isExternal = isExternalPlaylist,
                                     isCustomCreated = isCustomCreated,
+                                    canEditCover = canEditCover,
                                     isInlineReorderMode = isInlineReorderMode,
                                     onPlayAll = {
                                         if (filteredAndSortedSongs.isNotEmpty()) {
@@ -783,23 +915,26 @@ fun PlaylistDetailScreen(
                                     },
                                     onCollectClick = onCollectToggle,
                                     onEditMetaClick = { showEditPlaylistDialog = true },
-                                    onStartInlineSortClick = { enterInlineReorderMode() },
                                     onCoverClick = {
-                                        if (effectivePlaylistCoverUrl.isNotBlank()) {
+                                        if (effectivePlaylistCoverUrl.isNotBlank() || canEditCover) {
                                             showPlaylistCoverPreview = true
                                         }
                                     }
                                 )
                             }
 
-                            // 2. 歌单内搜索 + 排序切换栏（排序模式下直接进入可拖动列表，不再显示冗余横条）
+                            // 2. 歌单内搜索 + 右侧无框排序小窗入口（排序模式下直接进入可拖动列表，不再显示冗余横条）
                             if (!isInlineReorderMode) {
                                 item(key = "pl_toolbar", contentType = "pl_toolbar") {
                                     PlaylistToolbarSection(
                                         searchQuery = searchQuery,
                                         onSearchQueryChange = { searchQuery = it },
                                         sortMode = sortMode,
-                                        onSortModeChange = { sortMode = it }
+                                        onSortModeChange = { sortMode = it },
+                                        totalSongCount = songs.size,
+                                        filteredSongCount = filteredAndSortedSongs.size,
+                                        canCustomSortTracks = canCustomSortTracks,
+                                        onEnterCustomSort = { enterInlineReorderMode() }
                                     )
                                 }
                             }
@@ -1008,15 +1143,49 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            if (showPlaylistCoverPreview && effectivePlaylistCoverUrl.isNotBlank()) {
+            if (showPlaylistCoverPreview && (effectivePlaylistCoverUrl.isNotBlank() || canEditCover)) {
+                val previewAccent = if (isLikedPlaylist) ConceptCoralAccent else ConceptPrimary
+                val previewGradient = if (isLikedPlaylist) {
+                    listOf(ConceptCoralAccent, Color(0xFFC2410C))
+                } else {
+                    listOf(ConceptPrimary, ConceptPrimaryDark)
+                }
                 HdArtworkPreviewDialog(
                     artworkUrl = effectivePlaylistCoverUrl,
-                    title = currentPlaylist?.title ?: "精选歌单",
+                    title = currentPlaylist?.title ?: if (isLikedPlaylist) "我喜欢的音乐" else "精选歌单",
                     subtitle = currentPlaylist?.creatorName.orEmpty(),
                     category = ArtworkDownloadCategory.PLAYLIST_COVER,
                     iconOnlySaveButton = false,
-                    accentColor = ConceptPrimary,
-                    onDismiss = { showPlaylistCoverPreview = false }
+                    accentColor = previewAccent,
+                    canChangeCover = canEditCover,
+                    isUpdatingCover = isUpdatingPlaylistCover,
+                    onChangeCoverClick = launchCoverPicker,
+                    placeholderIcon = if (isLikedPlaylist) Icons.Rounded.Favorite else Icons.Rounded.MusicNote,
+                    placeholderGradientColors = previewGradient,
+                    onDismiss = { if (!isUpdatingPlaylistCover) showPlaylistCoverPreview = false }
+                )
+            }
+
+            if (pendingCropCoverUri != null) {
+                val targetUri = pendingCropCoverUri!!
+                val cropAccent = if (isLikedPlaylist) ConceptCoralAccent else ConceptPrimary
+                CoverSquareCropDialog(
+                    imageUri = targetUri,
+                    title = if (isLikedPlaylist) "裁剪「我喜欢」封面" else "裁剪歌单封面",
+                    accentColor = cropAccent,
+                    onDismiss = { pendingCropCoverUri = null },
+                    onConfirmCroppedJpeg = { croppedJpeg ->
+                        pendingCropCoverUri = null
+                        isUpdatingPlaylistCover = true
+                        viewModel.updatePlaylistCover(
+                            playlist = currentPlaylist,
+                            fallbackPlaylistId = playlistId,
+                            croppedJpegBytes = croppedJpeg
+                        ) { _, msg ->
+                            isUpdatingPlaylistCover = false
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                    }
                 )
             }
 
@@ -1136,6 +1305,16 @@ fun PlaylistDetailScreen(
                             onClick = { showBatchAddToPlaylistDialog = true },
                             modifier = Modifier.weight(1f)
                         )
+                        if (canBatchDownload) {
+                            MultiSelectDockAction(
+                                icon = Icons.Rounded.Download,
+                                label = "下载",
+                                tint = ConceptMintAccent,
+                                enabled = hasSelection,
+                                onClick = { showBatchDownloadDialog = true },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                         if (isCustomCreated && currentPlaylist != null) {
                             MultiSelectDockAction(
                                 icon = Icons.Rounded.DeleteOutline,
@@ -1147,6 +1326,26 @@ fun PlaylistDetailScreen(
                             )
                         }
                     }
+                }
+            }
+
+            if (showBatchDownloadDialog && canBatchDownload) {
+                val chosenSongs = remember(filteredAndSortedSongs, selectedSongIds) {
+                    filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
+                }
+                if (chosenSongs.isNotEmpty()) {
+                    BatchSongDownloadDialog(
+                        songs = chosenSongs,
+                        sourceTitle = currentPlaylist?.title ?: if (isLikedPlaylist) "我喜欢的音乐" else "当前歌单",
+                        onDismiss = { showBatchDownloadDialog = false },
+                        onOpenDownloadSettings = onOpenDownloadSettings,
+                        onEnqueued = {
+                            isMultiSelectMode = false
+                            selectedSongIds = emptySet()
+                        }
+                    )
+                } else {
+                    showBatchDownloadDialog = false
                 }
             }
         }
@@ -1683,7 +1882,11 @@ private fun PlaylistToolbarSection(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     sortMode: PlaylistSortMode,
-    onSortModeChange: (PlaylistSortMode) -> Unit
+    onSortModeChange: (PlaylistSortMode) -> Unit,
+    totalSongCount: Int,
+    filteredSongCount: Int,
+    canCustomSortTracks: Boolean,
+    onEnterCustomSort: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1732,15 +1935,6 @@ private fun PlaylistToolbarSection(
                 .heightIn(min = 48.dp)
         )
 
-        val sortTabItems = remember {
-            PlaylistSortMode.entries.map { mode ->
-                ConceptCategoryTabItem(
-                    key = mode.name,
-                    label = mode.label,
-                    accentColor = ConceptPrimary
-                )
-            }
-        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1748,34 +1942,349 @@ private fun PlaylistToolbarSection(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            Text(
+                text = when {
+                    searchQuery.isNotBlank() -> "找到 $filteredSongCount / $totalSongCount 首"
+                    totalSongCount > 0 -> "共 $totalSongCount 首曲目"
+                    else -> ""
+                },
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            PlaylistSortPopupButton(
+                sortMode = sortMode,
+                onSortModeChange = onSortModeChange,
+                canCustomSortTracks = canCustomSortTracks,
+                onEnterCustomSort = onEnterCustomSort
+            )
+        }
+    }
+}
+
+private fun PlaylistSortMode.menuIcon() = when (this) {
+    PlaylistSortMode.DEFAULT -> Icons.AutoMirrored.Rounded.Sort
+    PlaylistSortMode.ADDED_NEWEST -> Icons.Rounded.Schedule
+    PlaylistSortMode.ADDED_OLDEST -> Icons.Rounded.History
+    PlaylistSortMode.TITLE_AZ -> Icons.Rounded.SortByAlpha
+    PlaylistSortMode.ARTIST_AZ -> Icons.Rounded.Person
+    PlaylistSortMode.DURATION_DESC -> Icons.Rounded.Timer
+}
+
+/**
+ * 右侧无框纯色排序按钮 + 丝滑灵动锚点小窗：
+ * - 无外框纯色质感按钮，默认显示「默认排序」，切换后以轻盈垂直淡入动画更新当前标签；
+ * - 点击以 `ConceptMotion.floatingPopupSpring()` 从按钮右上角锚点弹性绽放，竖向呈现全部 6 种排序；
+ * - 弹窗内配备流体滑动高亮胶囊与弹性勾选动效，点击后先完成约 220ms 选中过渡动画再柔顺收拢，绝不瞬间切换；
+ * - 针对「我喜欢」与自建歌单，在底部以极细分隔线统一收纳「自定义默认排序」入口。
+ */
+@Composable
+private fun PlaylistSortPopupButton(
+    sortMode: PlaylistSortMode,
+    onSortModeChange: (PlaylistSortMode) -> Unit,
+    canCustomSortTracks: Boolean,
+    onEnterCustomSort: () -> Unit
+) {
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val cyanAccent = conceptCyanAccentColor()
+
+    var showPopup by remember { mutableStateOf(false) }
+    var isClosing by remember { mutableStateOf(false) }
+    var isSelectingTransition by remember { mutableStateOf(false) }
+    var displaySelectedMode by remember { mutableStateOf(sortMode) }
+    val popupProgress = remember { Animatable(0f) }
+
+    LaunchedEffect(sortMode, showPopup) {
+        if (!showPopup) {
+            displaySelectedMode = sortMode
+        }
+    }
+
+    val closePopupAnimated: ((() -> Unit)?) -> Unit = remember(scope) {
+        { afterClosed ->
+            if (showPopup && !isClosing) {
+                isClosing = true
+                scope.launch {
+                    popupProgress.animateTo(
+                        targetValue = 0f,
+                        animationSpec = tween(
+                            durationMillis = 175,
+                            easing = ConceptMotion.GentleSpatialExitEasing
+                        )
+                    )
+                    showPopup = false
+                    isClosing = false
+                    isSelectingTransition = false
+                    afterClosed?.invoke()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(showPopup) {
+        if (showPopup) {
+            isClosing = false
+            isSelectingTransition = false
+            displaySelectedMode = sortMode
+            popupProgress.snapTo(0f)
+            popupProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = ConceptMotion.floatingPopupSpring()
+            )
+        }
+    }
+
+    val isExpanded = showPopup && !isClosing
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = ConceptMotion.expressiveSpring(),
+        label = "playlistSortArrowRotate"
+    )
+    val isAccentActive = sortMode != PlaylistSortMode.DEFAULT || isExpanded
+    val buttonBgColor by animateColorAsState(
+        targetValue = if (isAccentActive) ConceptPrimary.copy(alpha = 0.14f) else conceptFloatingCardColor(),
+        animationSpec = tween(220),
+        label = "playlistSortBtnBg"
+    )
+    val buttonContentColor by animateColorAsState(
+        targetValue = if (isAccentActive) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(220),
+        label = "playlistSortBtnFg"
+    )
+
+    Box(contentAlignment = Alignment.CenterEnd) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = buttonBgColor,
+            shadowElevation = 0.dp,
+            modifier = Modifier
+                .height(32.dp)
+                .softCardClickable(shape = RoundedCornerShape(12.dp)) {
+                    if (showPopup) {
+                        closePopupAnimated(null)
+                    } else {
+                        showPopup = true
+                    }
+                }
+        ) {
             Row(
+                modifier = Modifier.padding(horizontal = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(bottom = 6.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.Sort,
-                    contentDescription = "排序",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(15.dp)
+                    contentDescription = "切换排序方式",
+                    tint = buttonContentColor,
+                    modifier = Modifier.size(14.5.dp)
                 )
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                    text = "排序",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                AnimatedContent(
+                    targetState = sortMode.label,
+                    transitionSpec = {
+                        (fadeIn(tween(180)) + slideInVertically(tween(200)) { it / 3 }) togetherWith
+                            (fadeOut(tween(130)) + slideOutVertically(tween(160)) { -it / 3 })
+                    },
+                    label = "playlistSortBtnLabel"
+                ) { label ->
+                    Text(
+                        text = label,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = buttonContentColor,
+                        maxLines = 1
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = buttonContentColor,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer { rotationZ = arrowRotation }
                 )
             }
-            ConceptSlidingCategoryTabs(
-                tabs = sortTabItems,
-                selectedKey = sortMode.name,
-                onSelectTab = { key ->
-                    PlaylistSortMode.entries.find { it.name == key }?.let { onSortModeChange(it) }
-                },
-                itemSpacing = 16.dp,
-                fontSize = 12.5.sp,
-                indicatorWidth = 16.dp,
-                fillWidth = false
-            )
+        }
+
+        if (showPopup) {
+            val popupOffsetYPx = with(density) { 38.dp.roundToPx() }
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, popupOffsetYPx),
+                onDismissRequest = { closePopupAnimated(null) },
+                properties = PopupProperties(focusable = true)
+            ) {
+                val modes = PlaylistSortMode.entries
+                val rowHeight = 40.dp
+                val selectedIdx = modes.indexOf(displaySelectedMode).coerceAtLeast(0)
+                val highlightOffsetY by animateDpAsState(
+                    targetValue = rowHeight * selectedIdx,
+                    animationSpec = ConceptMotion.expressiveSpring(),
+                    label = "playlistSortHighlightSlide"
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = conceptSheetContainerColor().copy(alpha = 0.98f),
+                    shadowElevation = 18.dp,
+                    modifier = Modifier
+                        .width(206.dp)
+                        .graphicsLayer {
+                            val rawP = popupProgress.value
+                            val clampedP = rawP.coerceIn(0f, 1f)
+                            val s = (0.84f + 0.16f * rawP).coerceIn(0.76f, 1.04f)
+                            scaleX = s
+                            scaleY = s
+                            translationY = (1f - rawP) * -10.dp.toPx()
+                            alpha = (clampedP * 1.12f).coerceIn(0f, 1f)
+                            transformOrigin = TransformOrigin(0.90f, 0f)
+                        }
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            // 底层流体滑动高亮胶囊：选中切换时弹簧顺滑滑至目标行
+                            Box(
+                                modifier = Modifier
+                                    .offset(y = highlightOffsetY)
+                                    .fillMaxWidth()
+                                    .height(rowHeight)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(ConceptPrimary.copy(alpha = 0.14f))
+                            )
+
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                modes.forEach { mode ->
+                                    val isSelected = mode == displaySelectedMode
+                                    val itemColor by animateColorAsState(
+                                        targetValue = if (isSelected) ConceptPrimary else MaterialTheme.colorScheme.onSurface,
+                                        animationSpec = tween(180),
+                                        label = "sortOptionColor_${mode.name}"
+                                    )
+                                    val iconTint by animateColorAsState(
+                                        targetValue = if (isSelected) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        animationSpec = tween(180),
+                                        label = "sortOptionIcon_${mode.name}"
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(rowHeight)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .softClickable(
+                                                enabled = !isClosing && !isSelectingTransition,
+                                                pressScale = 0.97f
+                                            ) {
+                                                if (isSelectingTransition || isClosing) return@softClickable
+                                                isSelectingTransition = true
+                                                val changed = mode != displaySelectedMode
+                                                if (changed) {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    displaySelectedMode = mode
+                                                    onSortModeChange(mode)
+                                                }
+                                                scope.launch {
+                                                    delay(if (changed) 225L else 85L)
+                                                    closePopupAnimated(null)
+                                                }
+                                            }
+                                            .padding(horizontal = 11.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = mode.menuIcon(),
+                                            contentDescription = null,
+                                            tint = iconTint,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = mode.label,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                            color = itemColor,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        AnimatedVisibility(
+                                            visible = isSelected,
+                                            enter = scaleIn(
+                                                initialScale = 0.45f,
+                                                animationSpec = ConceptMotion.expressiveSpring()
+                                            ) + fadeIn(tween(150)),
+                                            exit = scaleOut(
+                                                targetScale = 0.55f,
+                                                animationSpec = tween(110)
+                                            ) + fadeOut(tween(100))
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = "当前已选",
+                                                tint = ConceptPrimary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (canCustomSortTracks) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                                thickness = 0.5.dp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(cyanAccent.copy(alpha = 0.10f))
+                                    .softClickable(
+                                        enabled = !isClosing && !isSelectingTransition,
+                                        pressScale = 0.97f
+                                    ) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        closePopupAnimated { onEnterCustomSort() }
+                                    }
+                                    .padding(horizontal = 11.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SwapVert,
+                                    contentDescription = "自定义默认排序",
+                                    tint = cyanAccent,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(9.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "自定义默认排序",
+                                        fontSize = 12.8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = cyanAccent,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = "拖拽调整 · 同步云端",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1787,13 +2296,14 @@ private fun PlaylistSideHeroPane(
     songCount: Int,
     isExternal: Boolean,
     isCustomCreated: Boolean = false,
+    canEditCover: Boolean = false,
     isInlineReorderMode: Boolean = false,
     onPlayAll: () -> Unit,
     onCollectClick: () -> Unit,
     onEditMetaClick: () -> Unit = {},
-    onStartInlineSortClick: () -> Unit = {},
     onCoverClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val isLikedPlaylist = playlist?.id == "like" || playlist?.isLiked == true
     val isHistoryPlaylist = playlist?.id == "history"
     val accentColor = when {
@@ -1801,11 +2311,14 @@ private fun PlaylistSideHeroPane(
         isHistoryPlaylist -> ConceptMintAccent
         else -> ConceptPrimary
     }
-    val cyanAccent = conceptCyanAccentColor()
     val gradientColors = when {
         isLikedPlaylist -> listOf(ConceptCoralAccent, Color(0xFFC2410C))
         isHistoryPlaylist -> listOf(ConceptMintAccent, ConceptPrimaryDark)
         else -> listOf(ConceptPrimary, ConceptPrimaryDark)
+    }
+    val localCoverFile = remember(effectiveCoverUrl) {
+        PlaylistCoverOverrideRepository.resolveManagedCoverFile(context, effectiveCoverUrl)
+            ?.takeIf { it.exists() && it.length() > 0L }
     }
 
     Surface(
@@ -1831,14 +2344,14 @@ private fun PlaylistSideHeroPane(
                     .background(Brush.linearGradient(colors = gradientColors))
                     .softCardClickable(
                         shape = RoundedCornerShape(26.dp),
-                        enabled = effectiveCoverUrl.isNotBlank(),
+                        enabled = effectiveCoverUrl.isNotBlank() || canEditCover,
                         onClick = onCoverClick
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (effectiveCoverUrl.isNotBlank()) {
+                if (localCoverFile != null || effectiveCoverUrl.isNotBlank()) {
                     AsyncImage(
-                        model = effectiveCoverUrl,
+                        model = localCoverFile ?: effectiveCoverUrl,
                         contentDescription = playlist?.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -1931,74 +2444,36 @@ private fun PlaylistSideHeroPane(
 
             if (isCustomCreated) {
                 Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = ConceptPrimary.copy(alpha = 0.12f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp)
+                        .softCardClickable(
+                            shape = RoundedCornerShape(16.dp),
+                            enabled = !isInlineReorderMode,
+                            onClick = onEditMetaClick
+                        )
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = ConceptPrimary.copy(alpha = 0.12f),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(38.dp)
-                            .softCardClickable(
-                                shape = RoundedCornerShape(16.dp),
-                                enabled = !isInlineReorderMode,
-                                onClick = onEditMetaClick
-                            )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize()
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Edit,
-                                contentDescription = "编辑歌单信息",
-                                tint = ConceptPrimary,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = "编辑信息",
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ConceptPrimary
-                            )
-                        }
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (isInlineReorderMode) cyanAccent.copy(alpha = 0.22f) else cyanAccent.copy(alpha = 0.12f),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(38.dp)
-                            .softCardClickable(
-                                shape = RoundedCornerShape(16.dp),
-                                enabled = songCount >= 2 && !isInlineReorderMode,
-                                onClick = onStartInlineSortClick
-                            )
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.SwapVert,
-                                contentDescription = "自定义排序",
-                                tint = cyanAccent,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isInlineReorderMode) "排序中..." else "自定义排序",
-                                fontSize = 12.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = cyanAccent
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Rounded.Edit,
+                            contentDescription = "编辑歌单信息",
+                            tint = ConceptPrimary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "编辑信息",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ConceptPrimary
+                        )
                     }
                 }
             }
@@ -2074,13 +2549,14 @@ private fun PlaylistHeaderCard(
     songCount: Int,
     isExternal: Boolean = false,
     isCustomCreated: Boolean = false,
+    canEditCover: Boolean = false,
     isInlineReorderMode: Boolean = false,
     onPlayAll: () -> Unit,
     onCollectClick: () -> Unit = {},
     onEditMetaClick: () -> Unit = {},
-    onStartInlineSortClick: () -> Unit = {},
     onCoverClick: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     var isDescExpanded by remember { mutableStateOf(false) }
     val isLikedPlaylist = playlist?.id == "like" || playlist?.isLiked == true
     val isHistoryPlaylist = playlist?.id == "history"
@@ -2089,11 +2565,14 @@ private fun PlaylistHeaderCard(
         isHistoryPlaylist -> ConceptMintAccent
         else -> ConceptPrimary
     }
-    val cyanAccent = conceptCyanAccentColor()
     val gradientColors = when {
         isLikedPlaylist -> listOf(ConceptCoralAccent, Color(0xFFC2410C))
         isHistoryPlaylist -> listOf(ConceptMintAccent, ConceptPrimaryDark)
         else -> listOf(ConceptPrimary, ConceptPrimaryDark)
+    }
+    val localCoverFile = remember(effectiveCoverUrl) {
+        PlaylistCoverOverrideRepository.resolveManagedCoverFile(context, effectiveCoverUrl)
+            ?.takeIf { it.exists() && it.length() > 0L }
     }
 
     Column(
@@ -2113,14 +2592,14 @@ private fun PlaylistHeaderCard(
                     .background(Brush.linearGradient(colors = gradientColors))
                     .softCardClickable(
                         shape = RoundedCornerShape(20.dp),
-                        enabled = effectiveCoverUrl.isNotBlank(),
+                        enabled = effectiveCoverUrl.isNotBlank() || canEditCover,
                         onClick = onCoverClick
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (effectiveCoverUrl.isNotBlank()) {
+                if (localCoverFile != null || effectiveCoverUrl.isNotBlank()) {
                     AsyncImage(
-                        model = effectiveCoverUrl,
+                        model = localCoverFile ?: effectiveCoverUrl,
                         contentDescription = playlist?.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -2168,7 +2647,7 @@ private fun PlaylistHeaderCard(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -2210,7 +2689,7 @@ private fun PlaylistHeaderCard(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Edit,
@@ -2218,41 +2697,12 @@ private fun PlaylistHeaderCard(
                                     tint = ConceptPrimary,
                                     modifier = Modifier.size(14.dp)
                                 )
-                                Spacer(modifier = Modifier.width(3.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = "编辑",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = ConceptPrimary
-                                )
-                            }
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(15.dp),
-                            color = if (isInlineReorderMode) cyanAccent.copy(alpha = 0.22f) else cyanAccent.copy(alpha = 0.12f),
-                            modifier = Modifier.softCardClickable(
-                                shape = RoundedCornerShape(15.dp),
-                                enabled = songCount >= 2 && !isInlineReorderMode,
-                                onClick = onStartInlineSortClick
-                            )
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.SwapVert,
-                                    contentDescription = "自定义排序",
-                                    tint = cyanAccent,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = "排序",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = cyanAccent
                                 )
                             }
                         }

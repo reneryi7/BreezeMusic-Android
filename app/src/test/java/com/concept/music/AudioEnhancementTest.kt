@@ -376,7 +376,11 @@ class AudioEnhancementTest {
         assertTrue(modes.contains(com.concept.music.ui.theme.AppThemeMode.LIGHT_WATERCOLOR))
 
         val sortModes = com.concept.music.ui.library.PlaylistSortMode.entries
-        assertEquals(4, sortModes.size)
+        assertEquals(6, sortModes.size)
+        assertEquals(
+            listOf("默认排序", "从新到旧", "从旧到新", "歌名 A-Z", "歌手名", "时长最长"),
+            sortModes.map { it.label }
+        )
     }
 
     @Test

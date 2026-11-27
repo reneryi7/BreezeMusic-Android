@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -46,6 +48,7 @@ import coil.request.SuccessResult
 import coil.size.Size
 import com.concept.music.data.kugou.NetworkClientProvider
 import com.concept.music.data.model.Song
+import com.concept.music.data.repository.PlaylistCoverOverrideRepository
 import com.concept.music.service.AppPermissionManager
 import com.concept.music.service.AppPermissionType
 import com.concept.music.ui.theme.ConceptMotion
@@ -141,11 +144,27 @@ object HdArtworkSaver {
             return@withContext ArtworkSaveResult.Failure("暂无可用的${category.label}地址")
         }
 
-        val candidates = buildHdArtworkUrlCandidates(effectiveUrl)
         var bitmap: Bitmap? = null
 
+        // 0. 若命中应用受管私有目录内的自定义本地封面文件，直接安全解码（零网络消耗、离线可用）
+        val managedLocalFile = PlaylistCoverOverrideRepository.resolveManagedCoverFile(context, effectiveUrl)
+        if (managedLocalFile != null && managedLocalFile.exists() && managedLocalFile.length() > 0L) {
+            bitmap = runCatching {
+                val bytes = managedLocalFile.inputStream().use { input ->
+                    SecurityGuards.readBoundedBytes(input, SecurityGuards.MAX_COVER_IMAGE_BYTES)
+                }
+                SecurityGuards.decodeBoundedBitmap(
+                    bytes = bytes,
+                    maxBytes = SecurityGuards.MAX_COVER_IMAGE_BYTES,
+                    targetMaxDimensionPx = 2048
+                )
+            }.getOrNull()
+        }
+
+        val candidates = if (bitmap == null) buildHdArtworkUrlCandidates(effectiveUrl) else emptyList()
+
         // 1. 仅在开启「网络访问」权限时直连下载 1000x1000 高清原图字节流（严格遵循离线隔离模式）
-        if (AppPermissionManager.isPermissionEnabled(AppPermissionType.NETWORK_ACCESS)) {
+        if (bitmap == null && AppPermissionManager.isPermissionEnabled(AppPermissionType.NETWORK_ACCESS)) {
             for (candidateUrl in candidates) {
                 bitmap = downloadBitmapDirectly(candidateUrl)
                 if (bitmap != null) break
@@ -303,15 +322,29 @@ fun HdArtworkPreviewDialog(
     songForFallback: Song? = null,
     iconOnlySaveButton: Boolean = false,
     accentColor: Color = ConceptPrimary,
+    canChangeCover: Boolean = false,
+    isUpdatingCover: Boolean = false,
+    onChangeCoverClick: (() -> Unit)? = null,
+    placeholderIcon: ImageVector? = null,
+    placeholderGradientColors: List<Color>? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var isSaving by remember { mutableStateOf(false) }
 
-    var resolvedCoverUrl by remember(artworkUrl, songForFallback?.id) {
-        mutableStateOf(HdArtworkSaver.resolveBestPreviewUrl(artworkUrl))
+    val managedLocalFile = remember(artworkUrl) {
+        PlaylistCoverOverrideRepository.resolveManagedCoverFile(context, artworkUrl)
+            ?.takeIf { it.exists() && it.length() > 0L }
     }
+
+    var resolvedCoverUrl by remember(artworkUrl, songForFallback?.id) {
+        mutableStateOf(
+            if (managedLocalFile != null) artworkUrl.trim()
+            else HdArtworkSaver.resolveBestPreviewUrl(artworkUrl)
+        )
+    }
+    val hasVisualCover = managedLocalFile != null || resolvedCoverUrl.isNotBlank() || artworkUrl.isNotBlank()
 
     LaunchedEffect(artworkUrl, songForFallback?.id) {
         if (resolvedCoverUrl.isBlank() && songForFallback != null) {
@@ -472,18 +505,39 @@ fun HdArtworkPreviewDialog(
                             }
                         }
                 ) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data(resolvedCoverUrl.ifBlank { artworkUrl })
-                            .size(Size.ORIGINAL)
-                            .crossfade(200)
-                            .build(),
-                        contentDescription = title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clip(cardShape)
-                    )
+                    if (hasVisualCover) {
+                        val imageData: Any = managedLocalFile ?: resolvedCoverUrl.ifBlank { artworkUrl }
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(imageData)
+                                .size(Size.ORIGINAL)
+                                .crossfade(200)
+                                .build(),
+                            contentDescription = title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(cardShape)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.linearGradient(
+                                        colors = placeholderGradientColors ?: listOf(accentColor, Color(0xFF1B3A6B))
+                                    )
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = placeholderIcon ?: Icons.Rounded.PhotoCamera,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.9f),
+                                modifier = Modifier.size(72.dp)
+                            )
+                        }
+                    }
                 }
 
                 if (!iconOnlySaveButton && title.isNotBlank()) {
@@ -544,8 +598,95 @@ fun HdArtworkPreviewDialog(
                         }
                     }
                 }
+            } else if (canChangeCover && onChangeCoverClick != null) {
+                // 「我喜欢」与自建歌单封面预览：底部居中提供「下载封面」与「更改封面」双无边框纯色胶囊操作
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 28.dp, start = 20.dp, end = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (hasVisualCover) {
+                        Surface(
+                            onClick = triggerSaveAction,
+                            enabled = !isSaving && !isUpdatingCover,
+                            shape = RoundedCornerShape(999.dp),
+                            color = Color.White.copy(alpha = 0.14f),
+                            shadowElevation = 8.dp,
+                            modifier = Modifier.height(48.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 20.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                            ) {
+                                if (isSaving) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Download,
+                                        contentDescription = "下载${category.label}",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                                Text(
+                                    text = if (isSaving) "保存中..." else "下载封面",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp
+                                    ),
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+
+                    Surface(
+                        onClick = { if (!isUpdatingCover) onChangeCoverClick() },
+                        enabled = !isUpdatingCover,
+                        shape = RoundedCornerShape(999.dp),
+                        color = accentColor.copy(alpha = 0.92f),
+                        shadowElevation = 12.dp,
+                        modifier = Modifier.height(48.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 22.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            if (isUpdatingCover) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.PhotoCamera,
+                                    contentDescription = "更改${category.label}",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                            Text(
+                                text = if (isUpdatingCover) "正在同步..." else "更改封面",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                ),
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
             } else {
-                // 专辑详情 / 歌单详情 / 歌手主页点击封面或头像预览：底部居中保存按钮
+                // 专辑详情 / 外部歌单 / 歌手主页点击封面或头像预览：底部居中保存按钮
                 Surface(
                     onClick = triggerSaveAction,
                     shape = RoundedCornerShape(999.dp),
