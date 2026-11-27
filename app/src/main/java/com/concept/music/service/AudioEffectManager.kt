@@ -1644,24 +1644,71 @@ object AudioEffectManager {
     }
 
     /**
-     * 下车断开或进程重启冷启动自愈时，从上车前保存的日常快照 100% 还原手机音效与调音台状态
+     * 下车断开或进程重启冷启动自愈时，从上车前保存的日常快照 100% 还原手机音效与调音台状态。
+     * 所有集合与字符串字段均执行运行时类型防御转换，避免历史混淆快照或泛型擦除导致 ClassCastException / NPE。
      */
     fun restoreFromEverydaySnapshot(snapshot: PreCarEverydaySnapshot) {
-        val restoredPreset = runCatching { EffectPreset.valueOf(snapshot.presetName) }
+        val rawPresetName = (snapshot.presetName as String?)?.trim().orEmpty()
+        val rawReverbName = (snapshot.reverbName as String?)?.trim().orEmpty()
+        val restoredPreset = runCatching { EffectPreset.valueOf(rawPresetName) }
             .getOrDefault(EffectPreset.OFF)
-        val restoredReverb = runCatching { ReverbMode.valueOf(snapshot.reverbName) }
+        val restoredReverb = runCatching { ReverbMode.valueOf(rawReverbName) }
             .getOrDefault(ReverbMode.NONE)
-        val restoredTypes = if (snapshot.tenBandFilterTypeNames.size == 10) {
-            snapshot.tenBandFilterTypeNames.map { name ->
+
+        val rawFilterTypes: List<*> = (snapshot.tenBandFilterTypeNames as List<*>?) ?: emptyList<Any>()
+        val restoredTypes = if (rawFilterTypes.size == 10) {
+            rawFilterTypes.map { item ->
+                val name = item?.toString()?.trim().orEmpty()
                 runCatching { PeqFilterType.valueOf(name) }.getOrDefault(PeqFilterType.PEAK)
             }
         } else {
             DEFAULT_TEN_BAND_TYPES
         }
-        val restoredBands = if (snapshot.bandLevels.size == 5) snapshot.bandLevels else defaultBandsForPreset(restoredPreset)
-        val restoredTenBands = if (snapshot.tenBandLevels.size == 10) snapshot.tenBandLevels else defaultTenBandsForPreset(restoredPreset)
-        val restoredQs = if (snapshot.tenBandQFactors.size == 10) snapshot.tenBandQFactors else DEFAULT_TEN_BAND_Q
-        val restoredHz = if (snapshot.tenBandCenterHz.size == 10) snapshot.tenBandCenterHz else DEFAULT_TEN_BAND_HZ
+
+        val rawBands: List<*> = (snapshot.bandLevels as List<*>?) ?: emptyList<Any>()
+        val parsedBands = rawBands.mapNotNull { item ->
+            when (item) {
+                is Number -> item.toInt().coerceIn(-1000, 1000)
+                is String -> item.trim().toDoubleOrNull()?.toInt()?.coerceIn(-1000, 1000)
+                else -> null
+            }
+        }
+        val restoredBands = if (parsedBands.size == 5) parsedBands else defaultBandsForPreset(restoredPreset)
+
+        val rawTenBands: List<*> = (snapshot.tenBandLevels as List<*>?) ?: emptyList<Any>()
+        val parsedTenBands = rawTenBands.mapNotNull { item ->
+            when (item) {
+                is Number -> item.toInt().coerceIn(-1000, 1000)
+                is String -> item.trim().toDoubleOrNull()?.toInt()?.coerceIn(-1000, 1000)
+                else -> null
+            }
+        }
+        val restoredTenBands = if (parsedTenBands.size == 10) parsedTenBands else defaultTenBandsForPreset(restoredPreset)
+
+        val rawQs: List<*> = (snapshot.tenBandQFactors as List<*>?) ?: emptyList<Any>()
+        val parsedQs = rawQs.mapNotNull { item ->
+            val v = when (item) {
+                is Number -> item.toFloat()
+                is String -> item.trim().toFloatOrNull()
+                else -> null
+            }
+            v?.takeIf { it.isFinite() }?.coerceIn(0.30f, 8.00f)
+        }
+        val restoredQs = if (parsedQs.size == 10) parsedQs else DEFAULT_TEN_BAND_Q
+
+        val rawHz: List<*> = (snapshot.tenBandCenterHz as List<*>?) ?: emptyList<Any>()
+        val parsedHz = rawHz.mapNotNull { item ->
+            val v = when (item) {
+                is Number -> item.toFloat()
+                is String -> item.trim().toFloatOrNull()
+                else -> null
+            }
+            v?.takeIf { it.isFinite() }?.coerceIn(20f, 20000f)
+        }
+        val restoredHz = if (parsedHz.size == 10) parsedHz else DEFAULT_TEN_BAND_HZ
+
+        val safePreampDb = if (snapshot.preampDb.isFinite()) snapshot.preampDb.coerceIn(-12f, 12f) else 0f
+        val safeChannelBalance = if (snapshot.channelBalance.isFinite()) snapshot.channelBalance.coerceIn(-1f, 1f) else 0f
 
         if (restoredPreset != EffectPreset.OFF) {
             lastActivePresetBeforeDisable = restoredPreset
@@ -1686,8 +1733,8 @@ object AudioEffectManager {
                 transientAttackStrength = snapshot.transientAttack.coerceIn(0, 1000),
                 surroundRotationSpeed = snapshot.rotSpeed.coerceIn(0, 100),
                 loudnessGainMb = snapshot.loudness.coerceIn(0, 1500),
-                preampGainDb = snapshot.preampDb.coerceIn(-12f, 12f),
-                channelBalance = snapshot.channelBalance.coerceIn(-1f, 1f),
+                preampGainDb = safePreampDb,
+                channelBalance = safeChannelBalance,
                 antiClippingEnabled = snapshot.antiClip,
                 equalLoudnessCompensation = snapshot.eqLoudness,
                 volumeNormalizationEnabled = snapshot.volumeNormalization,

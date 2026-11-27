@@ -15,7 +15,8 @@ import android.os.Build
 import androidx.compose.runtime.Immutable
 import com.concept.music.BuildConfig
 import com.concept.music.data.kugou.KugouSigner
-import com.google.gson.reflect.TypeToken
+import com.google.gson.JsonParser
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -90,7 +91,10 @@ enum class CarConnectionSource(val label: String) {
 }
 
 enum class CarDeviceClassification {
+    @SerializedName("CONFIRMED_CAR")
     CONFIRMED_CAR,
+
+    @SerializedName("IGNORED_NON_CAR")
     IGNORED_NON_CAR
 }
 
@@ -101,11 +105,11 @@ enum class CarInterludeStyle(val label: String, val subtitle: String) {
 
 @Immutable
 data class CarBluetoothDeviceRecord(
-    val deviceKey: String,
-    val displayName: String,
-    val macAddress: String = "",
-    val classification: CarDeviceClassification,
-    val updatedAtMs: Long = System.currentTimeMillis()
+    @SerializedName("deviceKey") val deviceKey: String = "",
+    @SerializedName("displayName") val displayName: String = "",
+    @SerializedName("macAddress") val macAddress: String = "",
+    @SerializedName("classification") val classification: CarDeviceClassification = CarDeviceClassification.IGNORED_NON_CAR,
+    @SerializedName("updatedAtMs") val updatedAtMs: Long = System.currentTimeMillis()
 )
 
 @Immutable
@@ -130,38 +134,38 @@ data class ConnectedBluetoothAudioSink(
  */
 @Immutable
 data class PreCarEverydaySnapshot(
-    val effectEnabled: Boolean,
-    val presetName: String,
-    val bassBoost: Int,
-    val bassPunch: Int,
-    val bassCutoffHz: Int,
-    val virt: Int,
-    val depth: Int,
-    val crossfeed: Int,
-    val clarity: Int,
-    val deEsser: Int,
-    val air: Int,
-    val warmth: Int,
-    val transientAttack: Int,
-    val rotSpeed: Int,
-    val loudness: Int,
-    val preampDb: Float,
-    val channelBalance: Float,
-    val antiClip: Boolean,
-    val eqLoudness: Boolean,
-    val volumeNormalization: Boolean,
-    val reverbName: String,
-    val reverbWet: Int,
-    val reverbPreDelay: Int,
-    val reverbDamp: Int,
-    val bandLevels: List<Int>,
-    val tenBandLevels: List<Int>,
-    val tenBandQFactors: List<Float>,
-    val tenBandCenterHz: List<Float>,
-    val tenBandFilterTypeNames: List<String>,
-    val highPassCutoffHz: Int,
-    val lowPassCutoffHz: Int,
-    val audioFocusModeName: String
+    @SerializedName("effectEnabled") val effectEnabled: Boolean = false,
+    @SerializedName("presetName") val presetName: String = EffectPreset.OFF.name,
+    @SerializedName("bassBoost") val bassBoost: Int = 0,
+    @SerializedName("bassPunch") val bassPunch: Int = 0,
+    @SerializedName("bassCutoffHz") val bassCutoffHz: Int = 60,
+    @SerializedName("virt") val virt: Int = 0,
+    @SerializedName("depth") val depth: Int = 0,
+    @SerializedName("crossfeed") val crossfeed: Int = 0,
+    @SerializedName("clarity") val clarity: Int = 0,
+    @SerializedName("deEsser") val deEsser: Int = 0,
+    @SerializedName("air") val air: Int = 0,
+    @SerializedName("warmth") val warmth: Int = 0,
+    @SerializedName("transientAttack") val transientAttack: Int = 0,
+    @SerializedName("rotSpeed") val rotSpeed: Int = 0,
+    @SerializedName("loudness") val loudness: Int = 0,
+    @SerializedName("preampDb") val preampDb: Float = 0f,
+    @SerializedName("channelBalance") val channelBalance: Float = 0f,
+    @SerializedName("antiClip") val antiClip: Boolean = true,
+    @SerializedName("eqLoudness") val eqLoudness: Boolean = false,
+    @SerializedName("volumeNormalization") val volumeNormalization: Boolean = true,
+    @SerializedName("reverbName") val reverbName: String = ReverbMode.NONE.name,
+    @SerializedName("reverbWet") val reverbWet: Int = 0,
+    @SerializedName("reverbPreDelay") val reverbPreDelay: Int = 0,
+    @SerializedName("reverbDamp") val reverbDamp: Int = 0,
+    @SerializedName("bandLevels") val bandLevels: List<Int> = listOf(0, 0, 0, 0, 0),
+    @SerializedName("tenBandLevels") val tenBandLevels: List<Int> = List(10) { 0 },
+    @SerializedName("tenBandQFactors") val tenBandQFactors: List<Float> = AudioEffectManager.DEFAULT_TEN_BAND_Q,
+    @SerializedName("tenBandCenterHz") val tenBandCenterHz: List<Float> = AudioEffectManager.DEFAULT_TEN_BAND_HZ,
+    @SerializedName("tenBandFilterTypeNames") val tenBandFilterTypeNames: List<String> = List(10) { PeqFilterType.PEAK.name },
+    @SerializedName("highPassCutoffHz") val highPassCutoffHz: Int = 0,
+    @SerializedName("lowPassCutoffHz") val lowPassCutoffHz: Int = 20000,
+    @SerializedName("audioFocusModeName") val audioFocusModeName: String = AudioFocusMode.EXCLUSIVE.name
 )
 
 @Immutable
@@ -219,7 +223,12 @@ object CarSessionManager {
     }
 
     private var prefs: SharedPreferences? = null
-    private val activeProjectionPackages = LinkedHashSet<String>()
+    @Volatile
+    private var isInitialized: Boolean = false
+    private val activeProjectionCounts = LinkedHashMap<String, Int>()
+    private val temporarilyDismissedBluetoothKeys = LinkedHashSet<String>()
+    private var temporarilyDismissedProjection: Boolean = false
+    private var pendingSnapshotCache: PreCarEverydaySnapshot? = null
 
     @Volatile
     private var isUiModeCar: Boolean = false
@@ -309,6 +318,65 @@ object CarSessionManager {
         return recName.isNotBlank() && recName == sinkName
     }
 
+    private fun sanitizeKnownDeviceRecord(rec: CarBluetoothDeviceRecord?): CarBluetoothDeviceRecord? {
+        if (rec == null) return null
+        val rawKey = (rec.deviceKey as String?)?.trim().orEmpty()
+        val rawName = (rec.displayName as String?)?.trim().orEmpty()
+        val rawMac = (rec.macAddress as String?)?.trim().orEmpty()
+        @Suppress("USELESS_ELVIS")
+        val rawClass: CarDeviceClassification = rec.classification ?: return null
+        val resolvedKey = rawKey.ifBlank {
+            if (rawMac.isBlank() && rawName.isBlank()) return null
+            normalizeDeviceKey(rawMac, rawName)
+        }
+        return CarBluetoothDeviceRecord(
+            deviceKey = resolvedKey,
+            displayName = rawName.ifBlank { rawMac.ifBlank { "车载蓝牙设备" } },
+            macAddress = rawMac,
+            classification = rawClass,
+            updatedAtMs = if (rec.updatedAtMs > 0L) rec.updatedAtMs else System.currentTimeMillis()
+        )
+    }
+
+    private fun isValidEverydaySnapshotJson(rawJson: String?): Boolean {
+        if (rawJson.isNullOrBlank()) return false
+        return runCatching {
+            val root = JsonParser.parseString(rawJson)
+            if (!root.isJsonObject) return@runCatching false
+            val obj = root.asJsonObject
+            // 必须同时存在规范字段键，彻底拦截旧版混淆包残留的 a..F 字段 JSON，避免用默认值误覆写用户日常音效
+            obj.has("presetName") && obj.has("audioFocusModeName") && obj.has("tenBandLevels")
+        }.getOrDefault(false)
+    }
+
+    private fun parseValidEverydaySnapshot(rawJson: String?): PreCarEverydaySnapshot? {
+        if (!isValidEverydaySnapshotJson(rawJson)) return null
+        val snapshot = runCatching {
+            KugouSigner.gson.fromJson(rawJson, PreCarEverydaySnapshot::class.java)
+        }.getOrNull() ?: return null
+        return snapshot.takeIf { isValidEverydaySnapshot(it) }
+    }
+
+    private fun isValidEverydaySnapshot(snapshot: PreCarEverydaySnapshot?): Boolean {
+        if (snapshot == null) return false
+        val presetName = snapshot.presetName as String?
+        val reverbName = snapshot.reverbName as String?
+        val focusName = snapshot.audioFocusModeName as String?
+        val tenBands = snapshot.tenBandLevels as List<*>?
+        return !presetName.isNullOrBlank() &&
+            !reverbName.isNullOrBlank() &&
+            !focusName.isNullOrBlank() &&
+            tenBands != null
+    }
+
+    private fun resolveEverydayFocusModeFallback(): AudioFocusMode {
+        val rawName = pendingSnapshotCache?.audioFocusModeName?.trim().orEmpty()
+        if (rawName.isNotBlank()) {
+            runCatching { AudioFocusMode.valueOf(rawName) }.getOrNull()?.let { return it }
+        }
+        return AudioFocusMode.EXCLUSIVE
+    }
+
     @Synchronized
     fun init(context: Context) {
         if (!isPhoneCarFeatureSupported()) {
@@ -317,9 +385,16 @@ object CarSessionManager {
             return
         }
         val appCtx = context.applicationContext ?: context
+        // 必须在捕获/还原日常音效快照之前同步确保 AudioEffectManager 已完成磁盘加载，避免冷启动竞态抓到空默认预设
+        AudioEffectManager.init(appCtx)
         if (prefs == null) {
             prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         }
+        if (isInitialized) {
+            reevaluateActiveConnections(appCtx, newlyAddedBluetooth = false, isInitialBoot = false)
+            return
+        }
+        isInitialized = true
         loadPersistedSettings()
         detectSystemCarUiMode(appCtx)
         reevaluateActiveConnections(appCtx, isInitialBoot = true)
@@ -327,10 +402,14 @@ object CarSessionManager {
 
     internal fun resetForTest() {
         prefs = null
+        isInitialized = false
         isTabletFlavorOverrideForTest = null
-        synchronized(activeProjectionPackages) {
-            activeProjectionPackages.clear()
+        synchronized(activeProjectionCounts) {
+            activeProjectionCounts.clear()
         }
+        temporarilyDismissedBluetoothKeys.clear()
+        temporarilyDismissedProjection = false
+        pendingSnapshotCache = null
         isUiModeCar = false
         onCarModeChangedCallback = null
         onApplyAudioFocusModeCallback = null
@@ -342,9 +421,13 @@ object CarSessionManager {
 
     internal fun initWithSharedPreferencesForTest(testPrefs: SharedPreferences) {
         prefs = testPrefs
-        synchronized(activeProjectionPackages) {
-            activeProjectionPackages.clear()
+        isInitialized = true
+        synchronized(activeProjectionCounts) {
+            activeProjectionCounts.clear()
         }
+        temporarilyDismissedBluetoothKeys.clear()
+        temporarilyDismissedProjection = false
+        pendingSnapshotCache = null
         isUiModeCar = false
         _state.value = CarInterconnectState()
         loadPersistedSettings()
@@ -383,12 +466,24 @@ object CarSessionManager {
         val knownJson = p.getString(KEY_KNOWN_DEVICES_JSON, null)
         val knownList: List<CarBluetoothDeviceRecord> = if (!knownJson.isNullOrBlank()) {
             runCatching {
-                val type = object : TypeToken<List<CarBluetoothDeviceRecord>>() {}.type
-                KugouSigner.gson.fromJson<List<CarBluetoothDeviceRecord>>(knownJson, type).orEmpty()
+                val root = JsonParser.parseString(knownJson)
+                if (!root.isJsonArray) return@runCatching emptyList()
+                root.asJsonArray.mapNotNull { el ->
+                    if (!el.isJsonObject) return@mapNotNull null
+                    val obj = el.asJsonObject
+                    if (!obj.has("deviceKey") || !obj.has("classification")) return@mapNotNull null
+                    val parsed = runCatching {
+                        KugouSigner.gson.fromJson(obj, CarBluetoothDeviceRecord::class.java)
+                    }.getOrNull()
+                    sanitizeKnownDeviceRecord(parsed)
+                }
             }.getOrDefault(emptyList())
         } else {
             emptyList()
         }
+
+        val pendingRaw = p.getString(KEY_PENDING_SNAPSHOT_JSON, null)
+        pendingSnapshotCache = parseValidEverydaySnapshot(pendingRaw)
 
         _state.update { cur ->
             cur.copy(
@@ -423,16 +518,29 @@ object CarSessionManager {
 
     fun onProjectionControllerConnected(context: Context?, packageName: String) {
         if (!isPhoneCarFeatureSupported()) return
-        synchronized(activeProjectionPackages) {
-            activeProjectionPackages.add(packageName)
+        val cleanPkg = packageName.trim()
+        if (cleanPkg.isBlank()) return
+        synchronized(activeProjectionCounts) {
+            val prev = activeProjectionCounts[cleanPkg] ?: 0
+            activeProjectionCounts[cleanPkg] = prev + 1
+            if (prev == 0) {
+                temporarilyDismissedProjection = false
+            }
         }
         evaluateAndApplyCarSession(context, newlyAddedBluetooth = false, isInitialBoot = false)
     }
 
     fun onProjectionControllerDisconnected(context: Context?, packageName: String) {
         if (!isPhoneCarFeatureSupported()) return
-        synchronized(activeProjectionPackages) {
-            activeProjectionPackages.remove(packageName)
+        val cleanPkg = packageName.trim()
+        if (cleanPkg.isBlank()) return
+        synchronized(activeProjectionCounts) {
+            val prev = activeProjectionCounts[cleanPkg] ?: 0
+            if (prev <= 1) {
+                activeProjectionCounts.remove(cleanPkg)
+            } else {
+                activeProjectionCounts[cleanPkg] = prev - 1
+            }
         }
         evaluateAndApplyCarSession(context, newlyAddedBluetooth = false, isInitialBoot = false)
     }
@@ -507,7 +615,7 @@ object CarSessionManager {
             if (!isBtType) continue
 
             val rawProdName = runCatching { dev.productName?.toString()?.trim() }.getOrNull().orEmpty()
-            val rawAddress = if (canUseBtApi) {
+            val rawAddress = if (canUseBtApi && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 runCatching { dev.address.trim() }.getOrNull().orEmpty()
             } else {
                 ""
@@ -602,19 +710,41 @@ object CarSessionManager {
             return
         }
 
-        val projectionPkg = synchronized(activeProjectionPackages) { activeProjectionPackages.firstOrNull() }
+        val projectionPkg = synchronized(activeProjectionCounts) {
+            activeProjectionCounts.entries.firstOrNull { it.value > 0 }?.key
+        }
+        // 清理已断开连接设备的临时退出标记，确保下次重新上车连接时自动恢复感知
+        if (temporarilyDismissedBluetoothKeys.isNotEmpty()) {
+            val activeKeysAndNames = buildSet {
+                cur.currentBluetoothSinks.forEach { s ->
+                    add(s.deviceKey)
+                    cur.knownDevices.filter { matchesDeviceRecord(it, s) }.forEach { add(it.deviceKey) }
+                }
+            }
+            temporarilyDismissedBluetoothKeys.retainAll(activeKeysAndNames)
+        }
+        if (projectionPkg == null && !isUiModeCar) {
+            temporarilyDismissedProjection = false
+        }
+
         val confirmedSink = if (AppPermissionManager.isPermissionEnabled(AppPermissionType.BLUETOOTH_CAR_INTERCONNECT)) {
             cur.currentBluetoothSinks.firstOrNull { sink ->
-                cur.knownDevices.any { rec ->
+                val matchedRecord = cur.knownDevices.firstOrNull { rec ->
                     rec.classification == CarDeviceClassification.CONFIRMED_CAR && matchesDeviceRecord(rec, sink)
                 }
+                matchedRecord != null &&
+                    sink.deviceKey !in temporarilyDismissedBluetoothKeys &&
+                    matchedRecord.deviceKey !in temporarilyDismissedBluetoothKeys
             }
         } else null
 
+        val effectiveProjectionPkg = if (temporarilyDismissedProjection) null else projectionPkg
+        val effectiveUiModeCar = isUiModeCar && !temporarilyDismissedProjection
+
         // 计算是否需要弹出首次疑似车载蓝牙询问卡
         val nextPrompt: PendingCarPromptCandidate? = if (
-            projectionPkg == null &&
-            !isUiModeCar &&
+            effectiveProjectionPkg == null &&
+            !effectiveUiModeCar &&
             confirmedSink == null &&
             !cur.manualPreviewActive &&
             AppPermissionManager.isPermissionEnabled(AppPermissionType.BLUETOOTH_CAR_INTERCONNECT)
@@ -644,8 +774,8 @@ object CarSessionManager {
 
         val (targetSource, targetDeviceName) = when {
             confirmedSink != null -> CarConnectionSource.CONFIRMED_BLUETOOTH to confirmedSink.displayName
-            projectionPkg != null -> CarConnectionSource.PROJECTION_HOST to resolveFriendlyHostName(projectionPkg)
-            isUiModeCar -> CarConnectionSource.PROJECTION_HOST to "车载系统投屏"
+            effectiveProjectionPkg != null -> CarConnectionSource.PROJECTION_HOST to resolveFriendlyHostName(effectiveProjectionPkg)
+            effectiveUiModeCar -> CarConnectionSource.PROJECTION_HOST to "车载系统投屏"
             cur.manualPreviewActive -> CarConnectionSource.MANUAL_PREVIEW to "车载声学预览"
             else -> CarConnectionSource.NONE to ""
         }
@@ -745,9 +875,13 @@ object CarSessionManager {
                 stereoWidthBoost = cur.cabinAcousticMode.stereoWidthBoost
             )
         )
-        // 车载模式下自动启用跨曲目响度均衡（避免行车途中不同音源音量忽大忽小）
+        // 车载模式下自动启用跨曲目响度均衡（避免行车途中不同音源音量忽大忽小）；切至「原车音响直通」时还原上车前响度开关
         if (cur.cabinAcousticMode != CarCabinAcousticMode.DIRECT_BYPASS) {
             AudioEffectManager.setVolumeNormalizationTransientForCar(true)
+        } else {
+            val originalVolNorm = pendingSnapshotCache?.volumeNormalization
+                ?: AudioEffectManager.state.value.volumeNormalizationEnabled
+            AudioEffectManager.setVolumeNormalizationTransientForCar(originalVolNorm)
         }
         if (cur.smartNavDuckingEnabled) {
             onApplyAudioFocusModeCallback?.invoke(AudioFocusMode.DUCK)
@@ -758,9 +892,16 @@ object CarSessionManager {
 
     private fun captureEverydaySnapshotIfNeeded() {
         val p = prefs ?: return
-        if (!p.getString(KEY_PENDING_SNAPSHOT_JSON, null).isNullOrBlank()) {
-            // 已有未归还的日常快照（例如车载途中切换了另一个蓝牙或重启恢复），绝不覆盖原始日常快照
-            return
+        val existingRaw = p.getString(KEY_PENDING_SNAPSHOT_JSON, null)
+        if (!existingRaw.isNullOrBlank()) {
+            // 已有未归还的日常快照（例如车载途中切换了另一个蓝牙或重启恢复），绝不覆盖原始日常快照；若是旧版损坏快照则允许用当前有效状态覆写
+            val existingValid = parseValidEverydaySnapshot(existingRaw)
+            if (existingValid != null) {
+                if (pendingSnapshotCache == null) {
+                    pendingSnapshotCache = existingValid
+                }
+                return
+            }
         }
         val dsp = AudioEffectManager.state.value
         val snapshot = PreCarEverydaySnapshot(
@@ -797,6 +938,7 @@ object CarSessionManager {
             lowPassCutoffHz = dsp.lowPassCutoffHz,
             audioFocusModeName = PlaybackService.currentAudioFocusMode.name
         )
+        pendingSnapshotCache = snapshot
         runCatching {
             p.edit().putString(KEY_PENDING_SNAPSHOT_JSON, KugouSigner.gson.toJson(snapshot)).commit()
         }
@@ -805,17 +947,26 @@ object CarSessionManager {
     private fun restoreEverydaySnapshotIfPending() {
         val p = prefs ?: return
         val rawJson = p.getString(KEY_PENDING_SNAPSHOT_JSON, null)
-        if (rawJson.isNullOrBlank()) return
-        val snapshot = runCatching {
-            KugouSigner.gson.fromJson(rawJson, PreCarEverydaySnapshot::class.java)
-        }.getOrNull()
-        p.edit().remove(KEY_PENDING_SNAPSHOT_JSON).commit()
+        if (rawJson.isNullOrBlank()) {
+            pendingSnapshotCache = null
+            return
+        }
+        val snapshot = parseValidEverydaySnapshot(rawJson)
+        runCatching {
+            p.edit().remove(KEY_PENDING_SNAPSHOT_JSON).commit()
+        }
+        pendingSnapshotCache = null
         if (snapshot != null) {
-            AudioEffectManager.restoreFromEverydaySnapshot(snapshot)
-            val restoredFocus = runCatching { AudioFocusMode.valueOf(snapshot.audioFocusModeName) }
-                .getOrDefault(AudioFocusMode.EXCLUSIVE)
-            onApplyAudioFocusModeCallback?.invoke(restoredFocus)
-                ?: PlaybackService.updateAudioFocusMode(restoredFocus)
+            runCatching {
+                AudioEffectManager.restoreFromEverydaySnapshot(snapshot)
+            }
+            val restoredFocus = runCatching {
+                AudioFocusMode.valueOf((snapshot.audioFocusModeName as String?).orEmpty())
+            }.getOrDefault(AudioFocusMode.EXCLUSIVE)
+            runCatching {
+                onApplyAudioFocusModeCallback?.invoke(restoredFocus)
+                    ?: PlaybackService.updateAudioFocusMode(restoredFocus)
+            }
         }
     }
 
@@ -850,9 +1001,16 @@ object CarSessionManager {
         deviceKey: String,
         displayName: String,
         macAddress: String = "",
-        classification: CarDeviceClassification
+        classification: CarDeviceClassification,
+        triggerAutoPlayIfEligible: Boolean = false
     ) {
         val normalizedKey = deviceKey.ifBlank { normalizeDeviceKey(macAddress, displayName) }
+        if (classification == CarDeviceClassification.CONFIRMED_CAR) {
+            temporarilyDismissedBluetoothKeys.remove(normalizedKey)
+            _state.value.currentBluetoothSinks
+                .filter { it.deviceKey == normalizedKey || (macAddress.isNotBlank() && it.macAddress.equals(macAddress, ignoreCase = true)) }
+                .forEach { temporarilyDismissedBluetoothKeys.remove(it.deviceKey) }
+        }
         val newRecord = CarBluetoothDeviceRecord(
             deviceKey = normalizedKey,
             displayName = displayName.trim().ifBlank { "车载蓝牙设备" },
@@ -872,12 +1030,13 @@ object CarSessionManager {
         saveKnownDevices(updatedList)
         evaluateAndApplyCarSession(
             context = context,
-            newlyAddedBluetooth = classification == CarDeviceClassification.CONFIRMED_CAR,
+            newlyAddedBluetooth = triggerAutoPlayIfEligible && classification == CarDeviceClassification.CONFIRMED_CAR,
             isInitialBoot = false
         )
     }
 
     fun removeKnownDevice(context: Context?, deviceKey: String) {
+        temporarilyDismissedBluetoothKeys.remove(deviceKey)
         val updated = _state.value.knownDevices.filterNot { it.deviceKey == deviceKey }
         _state.update { it.copy(knownDevices = updated) }
         saveKnownDevices(updated)
@@ -886,6 +1045,10 @@ object CarSessionManager {
 
     fun setFeatureEnabled(context: Context?, enabled: Boolean) {
         if (!isPhoneCarFeatureSupported()) return
+        if (enabled) {
+            temporarilyDismissedBluetoothKeys.clear()
+            temporarilyDismissedProjection = false
+        }
         prefs?.edit()?.putBoolean(KEY_FEATURE_ENABLED, enabled)?.apply()
         _state.update { it.copy(featureEnabled = enabled) }
         evaluateAndApplyCarSession(context, newlyAddedBluetooth = false, isInitialBoot = false)
@@ -897,27 +1060,34 @@ object CarSessionManager {
         evaluateAndApplyCarSession(context, newlyAddedBluetooth = false, isInitialBoot = false)
     }
 
+    /**
+     * 临时退出本次车载会话并立即还原手机日常音效与音频焦点：
+     * - 手动预览：关闭预览；
+     * - 已认证车机蓝牙：仅记录本次连接会话临时跳过，绝不篡改或移除「我的车机」白名单，断开重连后自动恢复感知；
+     * - 车联投屏 / 系统车机模式：标记本次投屏会话临时退出，断开投屏重连后自动恢复。
+     */
+    @Synchronized
     fun disconnectCurrentCarSessionTemporarily(context: Context?) {
         val cur = _state.value
         if (cur.manualPreviewActive) {
-            setManualPreviewActive(context, false)
-            return
+            _state.update { it.copy(manualPreviewActive = false) }
         }
-        // 若当前通过已认证蓝牙连接，支持一键从车机白名单切回普通蓝牙设备并立即还原日常状态
-        val activeSink = cur.currentBluetoothSinks.firstOrNull { sink ->
-            cur.knownDevices.any { rec ->
+        cur.currentBluetoothSinks.forEach { sink ->
+            val matchedRecord = cur.knownDevices.firstOrNull { rec ->
                 rec.classification == CarDeviceClassification.CONFIRMED_CAR && matchesDeviceRecord(rec, sink)
             }
+            if (matchedRecord != null) {
+                temporarilyDismissedBluetoothKeys.add(sink.deviceKey)
+                temporarilyDismissedBluetoothKeys.add(matchedRecord.deviceKey)
+            }
         }
-        if (activeSink != null) {
-            setDeviceClassification(
-                context = context,
-                deviceKey = activeSink.deviceKey,
-                displayName = activeSink.displayName,
-                macAddress = activeSink.macAddress,
-                classification = CarDeviceClassification.IGNORED_NON_CAR
-            )
+        val hasActiveProjection = synchronized(activeProjectionCounts) {
+            activeProjectionCounts.values.any { it > 0 }
         }
+        if (hasActiveProjection || isUiModeCar) {
+            temporarilyDismissedProjection = true
+        }
+        evaluateAndApplyCarSession(context, newlyAddedBluetooth = false, isInitialBoot = false)
     }
 
     fun setCabinAcousticMode(mode: CarCabinAcousticMode) {
@@ -936,8 +1106,9 @@ object CarSessionManager {
                 onApplyAudioFocusModeCallback?.invoke(AudioFocusMode.DUCK)
                     ?: PlaybackService.updateAudioFocusMode(AudioFocusMode.DUCK)
             } else {
-                onApplyAudioFocusModeCallback?.invoke(AudioFocusMode.EXCLUSIVE)
-                    ?: PlaybackService.updateAudioFocusMode(AudioFocusMode.EXCLUSIVE)
+                val restoredFocus = resolveEverydayFocusModeFallback()
+                onApplyAudioFocusModeCallback?.invoke(restoredFocus)
+                    ?: PlaybackService.updateAudioFocusMode(restoredFocus)
             }
             AudioEffectManager.dspConfigVersion.incrementAndGet()
         }
@@ -947,6 +1118,10 @@ object CarSessionManager {
         val clamped = gain.coerceIn(0.15f, 0.50f)
         prefs?.edit()?.putFloat(KEY_NAV_DUCK_GAIN, clamped)?.apply()
         _state.update { it.copy(navDuckingTargetGain = clamped) }
+        val cur = _state.value
+        if (cur.isCarModeActive && cur.smartNavDuckingEnabled && PlaybackService.audioFocusDuckGain < 0.99f) {
+            PlaybackService.audioFocusDuckGain = clamped
+        }
     }
 
     fun setNavSpectralDuckingEnabled(enabled: Boolean) {

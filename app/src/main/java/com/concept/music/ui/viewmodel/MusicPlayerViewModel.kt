@@ -687,7 +687,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         restorePersistedPlaybackState()
         com.concept.music.service.CarSessionManager.onApplyAudioFocusModeCallback = { mode ->
             viewModelScope.launch(Dispatchers.Main) {
-                setAudioFocusMode(mode)
+                applyTransientCarAudioFocusMode(mode)
             }
         }
         com.concept.music.service.CarSessionManager.init(context)
@@ -2439,6 +2439,18 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         persistPlaybackStateAsync()
     }
 
+    /**
+     * 车载会话期间临时切换音频焦点模式（不写盘覆盖用户日常 SharedPreferences 配置，下车无感还原）
+     */
+    private fun applyTransientCarAudioFocusMode(mode: AudioFocusMode) {
+        val allowMix = mode != AudioFocusMode.EXCLUSIVE
+        mutableState.value = mutableState.value.copy(
+            audioFocusMode = mode,
+            allowPlayWithOtherApps = allowMix
+        )
+        PlaybackService.updateAudioFocusMode(mode)
+    }
+
     fun setAllowPlayWithOtherApps(enabled: Boolean) {
         val targetMode = if (enabled) {
             val cur = mutableState.value.audioFocusMode
@@ -3501,6 +3513,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         PlaybackCoordinator.onExplicitPlayDelegate = null
         PlaybackCoordinator.onExplicitPauseDelegate = null
         PlaybackCoordinator.onResumePlayDelegate = null
+        PlaybackCoordinator.onExternalCarSongSelectedDelegate = null
+        com.concept.music.service.CarSessionManager.onApplyAudioFocusModeCallback = null
         PlaybackService.onBluetoothConnectionChanged = null
         PlaybackService.onSkipToNextIntercepted = null
         PlaybackService.onSkipToPreviousIntercepted = null

@@ -3,6 +3,14 @@
 -keep class com.concept.music.data.recommendation.** { *; }
 -keep class com.concept.music.data.repository.LocalListen* { *; }
 -keep class com.concept.music.data.repository.PersistedLocalMusicIndex { *; }
+-keep class com.concept.music.data.repository.LocalOnlyPlaylistRecord { *; }
+-keep class com.concept.music.data.repository.PersistedLocalPlaylistStore { *; }
+-keep class com.concept.music.service.CarBluetoothDeviceRecord { *; }
+-keep enum com.concept.music.service.CarDeviceClassification { *; }
+-keep class com.concept.music.service.PreCarEverydaySnapshot { *; }
+-keep enum com.concept.music.service.CarCabinAcousticMode { *; }
+-keep enum com.concept.music.service.CarInterludeStyle { *; }
+-keep enum com.concept.music.service.CarConnectionSource { *; }
 -keep class com.concept.music.data.kugou.SavedAccount { *; }
 -keep class com.concept.music.data.kugou.KugouSession { *; }
 -keep class com.concept.music.data.kugou.DeviceIdentity { *; }

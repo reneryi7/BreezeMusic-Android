@@ -408,7 +408,7 @@ fun CarModeQuickControlSheet(
                             CarSessionManager.disconnectCurrentCarSessionTemporarily(context)
                             onSyncLyricOffset()
                             onDismiss()
-                            Toast.makeText(context, "已退出车载模式并还原手机日常音效", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "已临时退出车载模式并还原手机日常音效", Toast.LENGTH_SHORT).show()
                         }
                     )
             ) {

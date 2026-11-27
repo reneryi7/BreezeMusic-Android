@@ -331,6 +331,28 @@ class CarInterconnectTest {
         processor.queueInput(releaseBuf)
         processor.output
         assertTrue("导航播报结束后包络应平滑回升至接近 1.0", processor.currentDuckEnvelopeForTest() > 0.90f)
+
+        // 验证不切歌关闭车载后再开启主驾皇帝位时，ITD 缓冲已清零，输入静音帧不得吐出残留旧声波
+        CarSessionManager.setManualPreviewActive(null, false)
+        val silenceFrames = 256
+        val silence1 = ByteBuffer.allocateDirect(silenceFrames * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until silenceFrames * 2) silence1.putShort(0)
+        silence1.flip()
+        processor.queueInput(silence1)
+        processor.output
+
+        CarSessionManager.setManualPreviewActive(null, true)
+        val silence2 = ByteBuffer.allocateDirect(silenceFrames * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until silenceFrames * 2) silence2.putShort(0)
+        silence2.flip()
+        processor.queueInput(silence2)
+        val silenceOut = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        var maxResidual = 0
+        for (i in 0 until silenceFrames * 2) {
+            val v = abs(silenceOut.short.toInt())
+            if (v > maxResidual) maxResidual = v
+        }
+        assertTrue("重新启用主驾皇帝位时 ITD 缓冲应无残留旧音频爆音 (maxResidual=$maxResidual)", maxResidual < 50)
     }
 
     @Test
@@ -453,5 +475,175 @@ class CarInterconnectTest {
         assertNotNull(lookup)
         assertEquals("稻香", lookup?.first?.title)
         assertEquals(2, lookup?.second?.size)
+    }
+
+    @Test
+    fun `R8泛型擦除Double列表与历史旧版混淆脏快照还原绝不崩溃验证`() {
+        val fakePrefs = InMemorySharedPreferences()
+        CarSessionManager.initWithSharedPreferencesForTest(fakePrefs)
+
+        // 1. 构造真实 R8 Full Mode 剥离 List<Int>/List<Float> 泛型后产生的“有毒”快照（内部列表实际装入 Double）
+        @Suppress("UNCHECKED_CAST")
+        val poisonedSnapshot = PreCarEverydaySnapshot(
+            effectEnabled = true,
+            presetName = EffectPreset.VIPER_3D.name,
+            bassBoost = 420,
+            bassPunch = 200,
+            bassCutoffHz = 65,
+            virt = 300,
+            depth = 180,
+            crossfeed = 90,
+            clarity = 240,
+            deEsser = 120,
+            air = 150,
+            warmth = 110,
+            transientAttack = 140,
+            rotSpeed = 12,
+            loudness = 260,
+            preampDb = -1.5f,
+            channelBalance = -0.25f,
+            antiClip = true,
+            eqLoudness = false,
+            volumeNormalization = false,
+            reverbName = ReverbMode.SMALL_ROOM.name,
+            reverbWet = 210,
+            reverbPreDelay = 18,
+            reverbDamp = 360,
+            bandLevels = listOf(100.0, 40.0, -20.0, 60.0, 80.0) as List<Int>,
+            tenBandLevels = listOf(100.0, 80.0, 40.0, 0.0, -20.0, 20.0, 60.0, 80.0, 100.0, 120.0) as List<Int>,
+            tenBandQFactors = List(10) { 1.35 } as List<Float>,
+            tenBandCenterHz = listOf(31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0) as List<Float>,
+            tenBandFilterTypeNames = List(10) { PeqFilterType.PEAK.name },
+            highPassCutoffHz = 25,
+            lowPassCutoffHz = 19000,
+            audioFocusModeName = AudioFocusMode.MIX.name
+        )
+
+        // 必须完整完成类型清洗并安全还原，不抛出 ClassCastException
+        AudioEffectManager.restoreFromEverydaySnapshot(poisonedSnapshot)
+        val restored = AudioEffectManager.state.value
+        assertTrue(restored.isEnabled)
+        assertEquals(EffectPreset.VIPER_3D, restored.currentPreset)
+        assertEquals(listOf(100, 40, -20, 60, 80), restored.bandLevels)
+        assertEquals(listOf(100, 80, 40, 0, -20, 20, 60, 80, 100, 120), restored.tenBandLevels)
+        assertEquals(1.35f, restored.tenBandQFactors[0], 0.001f)
+        assertEquals(16000f, restored.tenBandCenterHz[9], 0.1f)
+        assertEquals(-0.25f, restored.channelBalance, 0.001f)
+
+        // 2. 模拟旧版混淆包遗留的损坏快照 JSON（字段为 a..F）与损坏白名单记录，冷启动自愈必须安全忽略且不污染日常音效
+        fakePrefs.edit()
+            .putString("car_pending_everyday_snapshot_json", """{"a":false,"b":"OFF"}""")
+            .putString("car_known_devices_json", """[{"a":"MAC|11:22:33:44:55:66","b":"OLD"},{"deviceKey":"MAC|AA:BB:CC:DD:EE:FF","displayName":"BYD DiLink","macAddress":"AA:BB:CC:DD:EE:FF","classification":"CONFIRMED_CAR","updatedAtMs":1000}]""")
+            .commit()
+
+        CarSessionManager.initWithSharedPreferencesForTest(fakePrefs)
+        assertFalse("损坏的旧版混淆快照应被安全清理", fakePrefs.contains("car_pending_everyday_snapshot_json"))
+        assertEquals("损坏旧快照绝不能覆写用户现有日常音效", EffectPreset.VIPER_3D, AudioEffectManager.state.value.currentPreset)
+        assertEquals("白名单应过滤旧版残缺项并保留有效车机记录", 1, CarSessionManager.state.value.knownDevices.size)
+        assertEquals("BYD DiLink", CarSessionManager.state.value.knownDevices.first().displayName)
+    }
+
+    @Test
+    fun `临时退出车载不破坏白名单且支持投屏多连接引用计数与原车直通和焦点还原验证`() {
+        val fakePrefs = InMemorySharedPreferences()
+        CarSessionManager.initWithSharedPreferencesForTest(fakePrefs)
+
+        // 设定用户日常状态：关闭响度均衡 + 混音同播 (MIX)
+        AudioEffectManager.setVolumeNormalizationEnabled(false)
+        PlaybackService.updateAudioFocusMode(AudioFocusMode.MIX)
+        CarSessionManager.setAutoPlayOnCarConnect(true)
+
+        var autoPlayCount = 0
+        CarSessionManager.onTriggerCarAutoPlayCallback = { autoPlayCount++ }
+
+        val carSink = ConnectedBluetoothAudioSink(
+            deviceKey = "MAC|10:20:30:40:50:60",
+            displayName = "Zeekr 001",
+            macAddress = "10:20:30:40:50:60",
+            isHardwareCarAudioClass = true
+        )
+        CarSessionManager.onBluetoothSinksUpdated(null, listOf(carSink), newlyAddedBluetooth = false)
+
+        // 1. 设置页手动设为车机默认不突兀触发自动续播
+        CarSessionManager.setDeviceClassification(
+            context = null,
+            deviceKey = carSink.deviceKey,
+            displayName = carSink.displayName,
+            macAddress = carSink.macAddress,
+            classification = CarDeviceClassification.CONFIRMED_CAR
+        )
+        assertTrue(CarSessionManager.state.value.isCarModeActive)
+        assertEquals("手动在设置页绑定车机不应触发意外自动续播", 0, autoPlayCount)
+        assertTrue("主驾皇帝位期间应临时开启响度均衡", AudioEffectManager.state.value.volumeNormalizationEnabled)
+        assertEquals(AudioFocusMode.DUCK, PlaybackService.currentAudioFocusMode)
+
+        // 2. 切至「原车音响直通」时应还原上车前的响度均衡原值 (false)
+        CarSessionManager.setCabinAcousticMode(CarCabinAcousticMode.DIRECT_BYPASS)
+        assertFalse("原车音响直通不应继续保留临时强制开启的响度均衡", AudioEffectManager.state.value.volumeNormalizationEnabled)
+
+        // 3. 车载期间关闭「智能导航闪避」应还原回日常 MIX 焦点而非硬编码 EXCLUSIVE
+        CarSessionManager.setSmartNavDuckingEnabled(false)
+        assertEquals(AudioFocusMode.MIX, PlaybackService.currentAudioFocusMode)
+        CarSessionManager.setSmartNavDuckingEnabled(true)
+        assertEquals(AudioFocusMode.DUCK, PlaybackService.currentAudioFocusMode)
+
+        // 4. 点击「临时退出车载模式」：立即退出并还原日常，且绝不把爱车篡改为 IGNORED_NON_CAR
+        CarSessionManager.disconnectCurrentCarSessionTemporarily(null)
+        assertFalse(CarSessionManager.state.value.isCarModeActive)
+        assertEquals(AudioFocusMode.MIX, PlaybackService.currentAudioFocusMode)
+        assertEquals(
+            "临时退出绝不能篡改已认证车机白名单",
+            CarDeviceClassification.CONFIRMED_CAR,
+            CarSessionManager.state.value.knownDevices.first().classification
+        )
+        assertNull("临时退出后的白名单车机绝不能误弹首次询问卡", CarSessionManager.state.value.pendingPromptCandidate)
+
+        // 断开蓝牙再重新连上 -> 自动恢复车载感知
+        CarSessionManager.onBluetoothSinksUpdated(null, emptyList(), newlyAddedBluetooth = false)
+        CarSessionManager.onBluetoothSinksUpdated(null, listOf(carSink), newlyAddedBluetooth = true)
+        assertTrue("蓝牙断开重连后应自动重新激活车载模式", CarSessionManager.state.value.isCarModeActive)
+        CarSessionManager.onBluetoothSinksUpdated(null, emptyList(), newlyAddedBluetooth = false)
+        assertFalse(CarSessionManager.state.value.isCarModeActive)
+
+        // 5. 多 Controller 投屏宿主引用计数与投屏临时退出验证
+        CarSessionManager.onProjectionControllerConnected(null, "com.huawei.hicar")
+        CarSessionManager.onProjectionControllerConnected(null, "com.huawei.hicar")
+        assertTrue(CarSessionManager.state.value.isCarModeActive)
+        assertEquals(CarConnectionSource.PROJECTION_HOST, CarSessionManager.state.value.activeConnectionSource)
+
+        // 断开其中一个连接（例如浏览树连接先断开）-> 另一个播控连接仍在，不应退出车载模式
+        CarSessionManager.onProjectionControllerDisconnected(null, "com.huawei.hicar")
+        assertTrue("同一车联宿主存在多个控制器连接时，单连接断开不应提前退出车载", CarSessionManager.state.value.isCarModeActive)
+
+        // 投屏状态下支持一键临时退出
+        CarSessionManager.disconnectCurrentCarSessionTemporarily(null)
+        assertFalse("投屏互联状态下点击临时退出必须生效", CarSessionManager.state.value.isCarModeActive)
+
+        // 彻底断开全部投屏连接再重新投屏 -> 自动恢复激活
+        CarSessionManager.onProjectionControllerDisconnected(null, "com.huawei.hicar")
+        CarSessionManager.onProjectionControllerConnected(null, "com.huawei.hicar")
+        assertTrue("投屏断开重连后应自动重新进入车载模式", CarSessionManager.state.value.isCarModeActive)
+        CarSessionManager.onProjectionControllerDisconnected(null, "com.huawei.hicar")
+        assertFalse(CarSessionManager.state.value.isCarModeActive)
+    }
+
+    @Test
+    fun `ProGuard混淆规则必须长期保留车载与纯本地歌单持久化模型`() {
+        val proguardCandidates = listOf(
+            java.io.File("proguard-rules.pro"),
+            java.io.File("app/proguard-rules.pro")
+        )
+        val proguardFile = proguardCandidates.firstOrNull { it.exists() }
+        assertNotNull("应能定位到 app/proguard-rules.pro", proguardFile)
+        val content = proguardFile!!.readText(Charsets.UTF_8)
+        listOf(
+            "com.concept.music.service.PreCarEverydaySnapshot",
+            "com.concept.music.service.CarBluetoothDeviceRecord",
+            "com.concept.music.service.CarDeviceClassification",
+            "com.concept.music.data.repository.LocalOnlyPlaylistRecord",
+            "com.concept.music.data.repository.PersistedLocalPlaylistStore"
+        ).forEach { cls ->
+            assertTrue("proguard-rules.pro 必须保留 $cls 防止 R8 Full Mode 剥离泛型与字段名", content.contains(cls))
+        }
     }
 }

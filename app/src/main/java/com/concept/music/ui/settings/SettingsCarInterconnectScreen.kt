@@ -144,13 +144,13 @@ internal fun SettingsCarInterconnectSection(
                     ) {
                         if (carState.isCarModeActive) {
                             ConceptTonalActionButton(
-                                text = if (carState.manualPreviewActive) "关闭手动车载预览" else "退出车载并还原日常音效",
+                                text = if (carState.manualPreviewActive) "关闭手动车载预览" else "临时退出车载模式",
                                 icon = Icons.Rounded.PowerSettingsNew,
                                 accentColor = ConceptCoralAccent,
                                 onClick = {
                                     CarSessionManager.disconnectCurrentCarSessionTemporarily(context)
                                     onSyncLyricOffset()
-                                    Toast.makeText(context, "已还原手机日常音效与音频焦点", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "已临时退出车载模式并还原手机日常音效", Toast.LENGTH_SHORT).show()
                                 }
                             )
                         } else {

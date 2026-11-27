@@ -1926,6 +1926,7 @@ private fun IsolatedNowPlayingHost(
         onClearQueue = { musicPlayerViewModel.clearQueue() },
         onOpenArtist = { onOpenArtist(currentSong) },
         onOpenAlbum = { onOpenAlbum(currentSong) },
+        onSyncCarLyricOffset = { musicPlayerViewModel.notifyCarLyricOffsetChanged() },
         motionOrientationPermissionEnabled = playerUiState.motionOrientationPermissionEnabled
     )
 }

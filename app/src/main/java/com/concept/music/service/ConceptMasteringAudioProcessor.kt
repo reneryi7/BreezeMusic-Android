@@ -491,8 +491,15 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             warmthBodyFilter.setBypass()
             warmthLowMidFilter.setBypass()
             carRoadBassFilter.setBypass()
+            carRoadBassFilter.resetState()
             carDoorAntiBoomFilter.setBypass()
+            carDoorAntiBoomFilter.resetState()
             carStageLiftFilter.setBypass()
+            carStageLiftFilter.resetState()
+            if (activeCarLeftItdDelaySamples != 0) {
+                carDriverItdBufferL.fill(0f)
+                carDriverItdWriteIdx = 0
+            }
             activeCarLeftItdDelaySamples = 0
             cachedCarRightLinearGain = 1.0f
             hasActiveCarCabinFilter = false
@@ -503,6 +510,12 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             cachedHaasCrossMix = 0f
             cachedCrossfeedMix = 0f
             cachedDepthMix = 0f
+            haasBufferL.fill(0f)
+            haasBufferR.fill(0f)
+            haasWriteIdx = 0
+            sideLowpass = 0f
+            crossfeedLpL = 0f
+            crossfeedLpR = 0f
             cachedReverbMode = ReverbMode.NONE
             cachedReverbWet = 0f
             hasActiveEqBands = false
@@ -636,8 +649,15 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             hasActiveCarCabinFilter = !carRoadBassFilter.isBypass || !carDoorAntiBoomFilter.isBypass || !carStageLiftFilter.isBypass
         } else {
             carRoadBassFilter.setBypass()
+            carRoadBassFilter.resetState()
             carDoorAntiBoomFilter.setBypass()
+            carDoorAntiBoomFilter.resetState()
             carStageLiftFilter.setBypass()
+            carStageLiftFilter.resetState()
+            if (activeCarLeftItdDelaySamples != 0) {
+                carDriverItdBufferL.fill(0f)
+                carDriverItdWriteIdx = 0
+            }
             activeCarLeftItdDelaySamples = 0
             cachedCarRightLinearGain = 1.0f
             hasActiveCarCabinFilter = false
@@ -920,7 +940,28 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
             currentDuckEnvelope = 1.0f
             if (!navSpectralDuckFilter.isBypass) {
                 navSpectralDuckFilter.setBypass()
+                navSpectralDuckFilter.resetState()
                 lastSpectralDuckCutDb = 0.0
+            }
+            if (hasActiveCarCabinFilter || activeCarLeftItdDelaySamples != 0) {
+                carRoadBassFilter.setBypass()
+                carRoadBassFilter.resetState()
+                carDoorAntiBoomFilter.setBypass()
+                carDoorAntiBoomFilter.resetState()
+                carStageLiftFilter.setBypass()
+                carStageLiftFilter.resetState()
+                carDriverItdBufferL.fill(0f)
+                carDriverItdWriteIdx = 0
+                haasBufferL.fill(0f)
+                haasBufferR.fill(0f)
+                haasWriteIdx = 0
+                sideLowpass = 0f
+                crossfeedLpL = 0f
+                crossfeedLpR = 0f
+                activeCarLeftItdDelaySamples = 0
+                cachedCarRightLinearGain = 1.0f
+                hasActiveCarCabinFilter = false
+                lastConfigVersion = -1L
             }
             AudioRhythmTelemetry.limiterGainReductionDb = 0f
             val out = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)

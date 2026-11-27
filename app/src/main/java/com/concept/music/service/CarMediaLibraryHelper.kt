@@ -14,6 +14,7 @@ import com.concept.music.data.model.LyricData
 import com.concept.music.data.model.LyricLine
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.Song
+import com.concept.music.data.repository.LocalPlaylistRepository
 import com.concept.music.data.vip.VipManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -267,6 +268,19 @@ object CarMediaLibraryHelper {
     private val queueLookupByParentId = ConcurrentHashMap<String, List<Song>>()
     private val playlistMetaById = ConcurrentHashMap<String, Playlist>()
 
+    @Volatile
+    private var lastLoadedAccountUid: String? = null
+
+    private fun clearLookupCachesIfAccountChanged(activeUid: String?) {
+        val normalized = activeUid?.trim()?.takeIf { it.isNotEmpty() } ?: "guest"
+        if (lastLoadedAccountUid != null && lastLoadedAccountUid != normalized) {
+            trackLookupById.clear()
+            queueLookupByParentId.clear()
+            playlistMetaById.clear()
+        }
+        lastLoadedAccountUid = normalized
+    }
+
     fun isKnownCarProjectionPackage(packageName: String): Boolean {
         val clean = packageName.trim()
         return clean in TRUSTED_CAR_HOST_PACKAGES
@@ -418,6 +432,7 @@ object CarMediaLibraryHelper {
     suspend fun loadChildrenForParent(context: Context, parentId: String): List<MediaItem> = withContext(Dispatchers.IO) {
         VipManager.initialize(context.applicationContext)
         val activeUid = runCatching { VipManager.accounts.state.value.currentId }.getOrNull()
+        clearLookupCachesIfAccountChanged(activeUid)
 
         when {
             parentId == ROOT_ID -> buildTopLevelBrowsableTabs()
@@ -459,15 +474,25 @@ object CarMediaLibraryHelper {
             }
 
             parentId == TAB_USER_PLAYLISTS -> {
+                val localOnlyPlaylists = runCatching { VipManager.localPlaylists.getLocalPlaylists() }.getOrDefault(emptyList())
                 val cachedPlaylists = VipManager.discoverCache.getUserPlaylists(activeUid)
-                val playlists = cachedPlaylists.ifEmpty {
+                val cloudPlaylists = cachedPlaylists.ifEmpty {
                     suspendRunCatching { VipManager.music.userPlaylists() }.getOrDefault(emptyList())
                         .also { if (it.isNotEmpty()) VipManager.discoverCache.saveUserPlaylists(activeUid, it) }
-                }.filterNot { it.isLiked }.take(40)
+                }.filterNot { it.isLiked }
 
-                playlists.map { pl ->
+                val mergedPlaylists = (localOnlyPlaylists + cloudPlaylists)
+                    .distinctBy { it.id }
+                    .take(40)
+
+                mergedPlaylists.map { pl ->
                     playlistMetaById[pl.id] = pl
-                    val subLabel = if (pl.trackCount > 0) "${pl.trackCount} 首" else if (pl.isCreatedByMe) "自建歌单" else "收藏歌单"
+                    val subLabel = when {
+                        pl.isPureLocalPlaylist -> if (pl.trackCount > 0) "本机歌单 · ${pl.trackCount} 首" else "本机歌单"
+                        pl.trackCount > 0 -> "${pl.trackCount} 首"
+                        pl.isCreatedByMe -> "自建歌单"
+                        else -> "收藏歌单"
+                    }
                     buildBrowsableFolderItem(
                         mediaId = "$PREFIX_PLAYLIST${pl.id}",
                         title = pl.title.ifBlank { "未命名歌单" },
@@ -480,17 +505,23 @@ object CarMediaLibraryHelper {
 
             parentId.startsWith(PREFIX_PLAYLIST) -> {
                 val plId = parentId.removePrefix(PREFIX_PLAYLIST)
-                val cachedSongs = VipManager.discoverCache.getPlaylistSongs(plId)
-                val songs = cachedSongs.ifEmpty {
-                    val plMeta = playlistMetaById[plId]
-                        ?: VipManager.discoverCache.getUserPlaylists(activeUid).firstOrNull { it.id == plId }
-                    if (plMeta != null) {
-                        suspendRunCatching { VipManager.music.playlistSongs(plMeta) }.getOrDefault(emptyList())
-                            .also { if (it.isNotEmpty()) VipManager.discoverCache.savePlaylistSongs(plId, it) }
-                    } else {
-                        suspendRunCatching { VipManager.music.fetchPlaylistSongsAll(plId) }.getOrDefault(emptyList())
-                    }
-                }.take(100)
+                val songs = if (LocalPlaylistRepository.isPureLocalPlaylistId(plId)) {
+                    runCatching {
+                        VipManager.localPlaylists.getLocalPlaylistTracks(plId, VipManager.localMusic)
+                    }.getOrDefault(emptyList()).take(100)
+                } else {
+                    val cachedSongs = VipManager.discoverCache.getPlaylistSongs(plId)
+                    cachedSongs.ifEmpty {
+                        val plMeta = playlistMetaById[plId]
+                            ?: VipManager.discoverCache.getUserPlaylists(activeUid).firstOrNull { it.id == plId }
+                        if (plMeta != null) {
+                            suspendRunCatching { VipManager.music.playlistSongs(plMeta) }.getOrDefault(emptyList())
+                                .also { if (it.isNotEmpty()) VipManager.discoverCache.savePlaylistSongs(plId, it) }
+                        } else {
+                            suspendRunCatching { VipManager.music.fetchPlaylistSongsAll(plId) }.getOrDefault(emptyList())
+                        }
+                    }.take(100)
+                }
                 queueLookupByParentId[parentId] = songs
                 songs.map { buildPlayableSongMediaItem(parentId, it) }
             }

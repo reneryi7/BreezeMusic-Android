@@ -1,6 +1,5 @@
 package com.concept.music.service
 
-import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -37,7 +36,6 @@ import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
-import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
@@ -283,6 +281,8 @@ class PlaybackService : MediaLibraryService() {
     private var initialDeviceEnumerationDone: Boolean = false
     private val connectedWiredIds = mutableSetOf<Int>()
     private val connectedBluetoothIds = mutableSetOf<Int>()
+    private val connectedCarBusIds = mutableSetOf<Int>()
+    private val verifiedCarControllers = CopyOnWriteArraySet<MediaSession.ControllerInfo>()
 
     private val duckAudioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         duckReleaseHoldRunnable?.let { mainHandler?.removeCallbacks(it) }
@@ -679,6 +679,10 @@ class PlaybackService : MediaLibraryService() {
             else -> false
         }
 
+        internal fun isCarBusAudioDeviceType(type: Int): Boolean {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && type == AudioDeviceInfo.TYPE_BUS
+        }
+
         fun updateHandleAudioBecomingNoisy(enabled: Boolean) {
             val effectiveEnabled = enabled && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
             val svc = activeServiceInstance ?: return
@@ -901,10 +905,12 @@ class PlaybackService : MediaLibraryService() {
             val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             connectedWiredIds.clear()
             connectedBluetoothIds.clear()
+            connectedCarBusIds.clear()
             for (dev in outputs) {
                 if (!dev.isSink) continue
                 if (isWiredHeadsetDeviceType(dev.type)) connectedWiredIds.add(dev.id)
                 if (isBluetoothAudioDeviceType(dev.type)) connectedBluetoothIds.add(dev.id)
+                if (isCarBusAudioDeviceType(dev.type)) connectedCarBusIds.add(dev.id)
             }
             val btConnected = connectedBluetoothIds.isNotEmpty()
             isBluetoothAudioOutputConnected = btConnected
@@ -916,6 +922,7 @@ class PlaybackService : MediaLibraryService() {
                 if (addedDevices == null) return
                 var newlyAddedWired = false
                 var newlyAddedBluetooth = false
+                var newlyAddedCarBus = false
                 for (dev in addedDevices) {
                     if (!dev.isSink) continue
                     if (isWiredHeadsetDeviceType(dev.type)) {
@@ -928,6 +935,11 @@ class PlaybackService : MediaLibraryService() {
                             newlyAddedBluetooth = true
                         }
                     }
+                    if (isCarBusAudioDeviceType(dev.type)) {
+                        if (connectedCarBusIds.add(dev.id) && initialDeviceEnumerationDone) {
+                            newlyAddedCarBus = true
+                        }
+                    }
                 }
                 initialDeviceEnumerationDone = true
                 val btConnectedNow = connectedBluetoothIds.isNotEmpty()
@@ -936,14 +948,15 @@ class PlaybackService : MediaLibraryService() {
                     onBluetoothConnectionChanged?.invoke(btConnectedNow)
                 }
 
+                val newlyAddedCarSink = newlyAddedBluetooth || newlyAddedCarBus
                 CarSessionManager.reevaluateActiveConnections(
                     context = applicationContext,
-                    newlyAddedBluetooth = newlyAddedBluetooth,
+                    newlyAddedBluetooth = newlyAddedCarSink,
                     isInitialBoot = false
                 )
 
-                // 若新增蓝牙设备已归属认证车机白名单，严格交由车载专属自动续播开关 (`autoPlayOnCarConnect`) 独立控制
-                val handledByCarPolicy = newlyAddedBluetooth &&
+                // 若新增蓝牙/车机总线设备已归属认证车机白名单，严格交由车载专属自动续播开关 (`autoPlayOnCarConnect`) 独立控制
+                val handledByCarPolicy = newlyAddedCarSink &&
                     CarSessionManager.state.value.activeConnectionSource == CarConnectionSource.CONFIRMED_BLUETOOTH
 
                 if (!handledByCarPolicy &&
@@ -963,6 +976,7 @@ class PlaybackService : MediaLibraryService() {
                 for (dev in removedDevices) {
                     connectedWiredIds.remove(dev.id)
                     connectedBluetoothIds.remove(dev.id)
+                    connectedCarBusIds.remove(dev.id)
                 }
                 val btConnectedNow = connectedBluetoothIds.isNotEmpty()
                 if (isBluetoothAudioOutputConnected != btConnectedNow) {
@@ -1235,52 +1249,33 @@ class PlaybackService : MediaLibraryService() {
         }
 
         runCatching {
-            val delegateProvider = DefaultMediaNotificationProvider.Builder(applicationContext)
-                .build()
-                .apply {
-                    setSmallIcon(R.drawable.ic_launcher_concept)
-                }
-            val stableNotificationProvider = object : MediaNotification.Provider {
-                override fun createNotification(
-                    mediaSession: MediaSession,
-                    customLayout: ImmutableList<CommandButton>,
-                    actionFactory: MediaNotification.ActionFactory,
-                    onNotificationChangedCallback: MediaNotification.Provider.Callback
-                ): MediaNotification {
-                    val mediaNotif = delegateProvider.createNotification(
-                        mediaSession,
-                        customLayout,
-                        actionFactory,
-                        onNotificationChangedCallback
-                    )
+            @Suppress("DEPRECATION")
+            val stableNotificationProvider = object : DefaultMediaNotificationProvider(applicationContext) {
+                override fun getNotificationContentTitle(metadata: MediaMetadata): CharSequence? {
                     if (isCarBluetoothLyricActive()) {
                         val rawItemMeta = player?.currentMediaItem?.mediaMetadata
-                        val stableTitle = rawItemMeta?.displayTitle?.toString()?.takeIf { it.isNotBlank() }
-                            ?: rawItemMeta?.title?.toString()?.takeIf { it.isNotBlank() }
-                            ?: SystemLyricBridge.currentSongSnapshot?.title
-                        val stableArtist = rawItemMeta?.subtitle?.toString()?.takeIf { it.isNotBlank() }
-                            ?: rawItemMeta?.artist?.toString()?.takeIf { it.isNotBlank() }
-                            ?: SystemLyricBridge.currentSongSnapshot?.artist
-                        runCatching {
-                            val extras = mediaNotif.notification.extras
-                            if (!stableTitle.isNullOrBlank()) {
-                                extras.putCharSequence(Notification.EXTRA_TITLE, stableTitle)
-                            }
-                            if (!stableArtist.isNullOrBlank()) {
-                                extras.putCharSequence(Notification.EXTRA_TEXT, stableArtist)
-                            }
-                        }
+                        val stableTitle = metadata.displayTitle?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.displayTitle?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.title?.takeIf { it.isNotBlank() }
+                            ?: SystemLyricBridge.currentSongSnapshot?.title?.takeIf { it.isNotBlank() }
+                        if (stableTitle != null) return stableTitle
                     }
-                    return mediaNotif
+                    return super.getNotificationContentTitle(metadata)
                 }
 
-                override fun handleCustomCommand(
-                    session: MediaSession,
-                    action: String,
-                    extras: Bundle
-                ): Boolean {
-                    return delegateProvider.handleCustomCommand(session, action, extras)
+                override fun getNotificationContentText(metadata: MediaMetadata): CharSequence? {
+                    if (isCarBluetoothLyricActive()) {
+                        val rawItemMeta = player?.currentMediaItem?.mediaMetadata
+                        val stableArtist = metadata.subtitle?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.subtitle?.takeIf { it.isNotBlank() }
+                            ?: rawItemMeta?.artist?.takeIf { it.isNotBlank() }
+                            ?: SystemLyricBridge.currentSongSnapshot?.artist?.takeIf { it.isNotBlank() }
+                        if (stableArtist != null) return stableArtist
+                    }
+                    return super.getNotificationContentText(metadata)
                 }
+            }.apply {
+                setSmallIcon(R.drawable.ic_launcher_concept)
             }
             setMediaNotificationProvider(stableNotificationProvider)
         }
@@ -1301,7 +1296,7 @@ class PlaybackService : MediaLibraryService() {
             ): MediaSession.ConnectionResult {
                 val isSelfOrSystem = isVerifiedSystemOrSelfController(controller)
                 val isCarHost = isVerifiedCarHostController(controller)
-                if (isCarHost) {
+                if (isCarHost && verifiedCarControllers.add(controller)) {
                     CarSessionManager.onProjectionControllerConnected(applicationContext, controller.packageName)
                 }
                 val customButtons = buildNotificationCustomLayout()
@@ -1342,7 +1337,7 @@ class PlaybackService : MediaLibraryService() {
                 session: MediaSession,
                 controller: MediaSession.ControllerInfo
             ) {
-                if (CarMediaLibraryHelper.isKnownCarProjectionPackage(controller.packageName)) {
+                if (verifiedCarControllers.remove(controller)) {
                     CarSessionManager.onProjectionControllerDisconnected(applicationContext, controller.packageName)
                 }
                 super.onDisconnected(session, controller)
@@ -1565,14 +1560,35 @@ class PlaybackService : MediaLibraryService() {
         private var lastPushedAvrArtist: String = ""
         private var lastPushElapsedMs: Long = 0L
 
+        private inner class CarLyricForwardingListener(
+            private val delegate: Player.Listener
+        ) : Player.Listener by delegate {
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                val effectiveMeta = if (isCarBluetoothLyricActive()) getMediaMetadata() else mediaMetadata
+                delegate.onMediaMetadataChanged(effectiveMeta)
+            }
+
+            override fun onEvents(player: Player, events: Player.Events) {
+                delegate.onEvents(this@CarLyricForwardingPlayer, events)
+            }
+
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (other !is CarLyricForwardingListener) return false
+                return delegate == other.delegate
+            }
+
+            override fun hashCode(): Int = delegate.hashCode()
+        }
+
         override fun addListener(listener: Player.Listener) {
             sessionListeners.add(listener)
-            super.addListener(listener)
+            super.addListener(CarLyricForwardingListener(listener))
         }
 
         override fun removeListener(listener: Player.Listener) {
             sessionListeners.remove(listener)
-            super.removeListener(listener)
+            super.removeListener(CarLyricForwardingListener(listener))
         }
 
         override fun getAvailableCommands(): Player.Commands {
@@ -2030,6 +2046,11 @@ class PlaybackService : MediaLibraryService() {
             screenStateReceiverRegistered = false
         }
         SystemLyricBridge.onDesktopLyricNotificationStateChanged = null
+        val staleCarControllers = verifiedCarControllers.toList()
+        verifiedCarControllers.clear()
+        staleCarControllers.forEach { ctrl ->
+            CarSessionManager.onProjectionControllerDisconnected(applicationContext, ctrl.packageName)
+        }
         CarSessionManager.onCarModeChangedCallback = null
         CarSessionManager.onTriggerCarAutoPlayCallback = null
         headsetButtonController.reset()

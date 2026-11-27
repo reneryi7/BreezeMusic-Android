@@ -343,6 +343,7 @@ fun NowPlayingSheet(
     onPlayQueueSong: (Song) -> Unit,
     onRemoveFromQueue: (Song) -> Unit,
     onClearQueue: () -> Unit,
+    onSyncCarLyricOffset: () -> Unit = {},
     positionProvider: () -> Long = { currentPositionMs }
 ) {
     if (song == null) return
@@ -1222,7 +1223,8 @@ fun NowPlayingSheet(
     // 车载座舱声学快捷控制面板（仅手机端车载激活时由顶部胶囊呼出）
     if (showCarQuickControlSheet && !com.concept.music.BuildConfig.IS_TABLET_FLAVOR) {
         CarModeQuickControlSheet(
-            onDismiss = { showCarQuickControlSheet = false }
+            onDismiss = { showCarQuickControlSheet = false },
+            onSyncLyricOffset = onSyncCarLyricOffset
         )
     }
 
