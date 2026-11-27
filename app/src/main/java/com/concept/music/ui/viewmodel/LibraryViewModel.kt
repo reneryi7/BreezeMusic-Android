@@ -28,9 +28,26 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 
-data class LoginUiState(val tab: Int = 0, val mobile: String = "", val code: String = "", val busy: Boolean = false,
-    val resendSeconds: Int = 0, val qr: KugouQrCode? = null, val qrStatus: String = "生成二维码后使用酷狗音乐 App 扫码",
-    val candidates: List<LoginCandidate> = emptyList(), val message: String? = null, val completed: Boolean = false)
+object LoginTabs {
+    const val PHONE = 0
+    const val KUGOU_QR = 1
+    const val QQ_QR = 2
+}
+
+data class LoginUiState(
+    val tab: Int = LoginTabs.PHONE,
+    val mobile: String = "",
+    val code: String = "",
+    val busy: Boolean = false,
+    val resendSeconds: Int = 0,
+    val qr: KugouQrCode? = null,
+    val qrStatus: String = "生成二维码后使用酷狗音乐 App 扫码",
+    val qqQrImageUrl: String? = null,
+    val qqQrStatus: String = "生成二维码后使用手机 QQ 扫码登录",
+    val candidates: List<LoginCandidate> = emptyList(),
+    val message: String? = null,
+    val completed: Boolean = false
+)
 
 class LibraryViewModel(
     private val accounts: AccountRepository = VipManager.accounts,
@@ -203,6 +220,7 @@ class LibraryViewModel(
     private var loginJob: Job? = null
     private var countdownJob: Job? = null
     private var qrJob: Job? = null
+    private var activeQqQrSession: QqQrSession? = null
     private var loginVisible = false
     private var foreground = false
     private var loginVersion = 0L
@@ -1493,12 +1511,14 @@ class LibraryViewModel(
         cancelAccountWork()
         loginVersion++
         loginVisible = true
+        activeQqQrSession = null
         loginMutable.value = LoginUiState()
     }
     fun closeLogin() {
         if (!loginVisible) return
         loginVersion++
         loginJob?.cancel(); qrJob?.cancel(); countdownJob?.cancel(); verification.cancel()
+        activeQqQrSession = null
         loginMutable.value = LoginUiState()
         loginVisible = false
         if (foreground) refreshAccount()
@@ -1507,8 +1527,18 @@ class LibraryViewModel(
     fun chooseTab(tab: Int) {
         if (login.value.busy) return
         qrJob?.cancel()
-        loginMutable.value = login.value.copy(tab = tab, qr = null, candidates = emptyList(), message = null)
-        if (tab == 1) createQr()
+        activeQqQrSession = null
+        loginMutable.value = login.value.copy(
+            tab = tab,
+            qr = null,
+            qqQrImageUrl = null,
+            candidates = emptyList(),
+            message = null
+        )
+        when (tab) {
+            LoginTabs.KUGOU_QR -> createQr()
+            LoginTabs.QQ_QR -> createQqQr()
+        }
     }
     fun setMobile(value: String) { if (!login.value.busy) loginMutable.value = login.value.copy(mobile = value.filter(Char::isDigit).take(11), candidates = emptyList()) }
     fun setCode(value: String) { if (!login.value.busy) loginMutable.value = login.value.copy(code = value.filter(Char::isDigit).take(8), candidates = emptyList()) }
@@ -1540,6 +1570,7 @@ class LibraryViewModel(
     private fun ensureLoginVisible() { if (!loginVisible) throw CancellationException("登录已关闭") }
     private fun finishLogin(result: LoginResult.Success) {
         ensureLoginVisible()
+        activeQqQrSession = null
         accounts.accept(result); vip.clear()
         loginMutable.value = login.value.copy(code = "", candidates = emptyList(), completed = true, message = "登录成功")
     }
@@ -1557,7 +1588,8 @@ class LibraryViewModel(
     fun createQr() {
         if (login.value.busy) return
         qrJob?.cancel()
-        loginMutable.value = login.value.copy(qr = null, qrStatus = "正在生成二维码")
+        activeQqQrSession = null
+        loginMutable.value = login.value.copy(qr = null, qqQrImageUrl = null, qrStatus = "正在生成二维码")
         loginAction {
             val qr = verification.execute(null, guard = ::ensureLoginVisible) { auth.createQr() }
             loginMutable.value = login.value.copy(qr = qr, qrStatus = "请使用酷狗音乐 App 扫码")
@@ -1593,6 +1625,103 @@ class LibraryViewModel(
                         consecutivePollErrors++
                         if (consecutivePollErrors >= 4) {
                             loginMutable.value = login.value.copy(busy = false, qrStatus = "检查失败：${e.message}")
+                            break
+                        }
+                    }
+                    delay(2_000)
+                }
+            }
+        }
+    }
+
+    fun createQqQr() {
+        if (login.value.busy) return
+        qrJob?.cancel()
+        activeQqQrSession = null
+        loginMutable.value = login.value.copy(qr = null, qqQrImageUrl = null, qqQrStatus = "正在生成 QQ 登录二维码", message = null)
+        loginAction {
+            val session = auth.createQqQr()
+            ensureLoginVisible()
+            activeQqQrSession = session
+            val sessionSig = session.qrsig
+            loginMutable.value = login.value.copy(
+                qqQrImageUrl = session.imageUrl,
+                qqQrStatus = "请使用手机 QQ 扫码"
+            )
+            qrJob = viewModelScope.launch {
+                var consecutivePollErrors = 0
+                while (isActive && loginVisible && activeQqQrSession?.qrsig == sessionSig) {
+                    val current = activeQqQrSession ?: break
+                    if (System.currentTimeMillis() >= current.expiresAt) {
+                        activeQqQrSession = null
+                        loginMutable.value = login.value.copy(qqQrImageUrl = null, qqQrStatus = "二维码已过期，请重新生成")
+                        break
+                    }
+                    if (!foreground) { delay(300); continue }
+                    val pollResult = try {
+                        val res = auth.pollQqQr(current)
+                        consecutivePollErrors = 0
+                        res
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        consecutivePollErrors++
+                        if (consecutivePollErrors >= 4) {
+                            loginMutable.value = login.value.copy(busy = false, qqQrStatus = "检查失败：${e.message}")
+                            break
+                        }
+                        delay(2_000)
+                        continue
+                    }
+
+                    when (pollResult) {
+                        is QqQrPollResult.Waiting -> {
+                            activeQqQrSession = current.copy(cookies = pollResult.updatedCookies)
+                            loginMutable.value = login.value.copy(qqQrStatus = "等待手机 QQ 扫码")
+                        }
+                        is QqQrPollResult.Scanned -> {
+                            activeQqQrSession = current.copy(cookies = pollResult.updatedCookies)
+                            loginMutable.value = login.value.copy(qqQrStatus = "已扫码，请在手机 QQ 上确认登录")
+                        }
+                        is QqQrPollResult.Expired -> {
+                            activeQqQrSession = null
+                            loginMutable.value = login.value.copy(qqQrImageUrl = null, qqQrStatus = pollResult.message)
+                            break
+                        }
+                        is QqQrPollResult.Refused -> {
+                            activeQqQrSession = null
+                            loginMutable.value = login.value.copy(qqQrImageUrl = null, qqQrStatus = pollResult.message)
+                            break
+                        }
+                        is QqQrPollResult.Failed -> {
+                            activeQqQrSession = null
+                            loginMutable.value = login.value.copy(qqQrImageUrl = null, qqQrStatus = pollResult.message)
+                            break
+                        }
+                        is QqQrPollResult.Authorized -> {
+                            loginMutable.value = login.value.copy(busy = true, qqQrStatus = "QQ 授权成功，正在登录酷狗账号", message = null)
+                            try {
+                                val initial = verification.execute(null, guard = ::ensureLoginVisible) {
+                                    auth.loginByQq(pollResult.credential.openId, pollResult.credential.accessToken)
+                                }
+                                val refreshed = runCatching {
+                                    verification.execute(initial.session, guard = ::ensureLoginVisible) { auth.refresh(initial.session) }
+                                }.getOrDefault(initial)
+                                finishLogin(refreshed.copy(profile = if (refreshed.profile.nickname == "酷狗用户") initial.profile else refreshed.profile))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                activeQqQrSession = null
+                                loginMutable.value = login.value.copy(
+                                    qqQrImageUrl = null,
+                                    qqQrStatus = "酷狗登录失败，请重新生成二维码",
+                                    message = e.message ?: "QQ 登录换取酷狗凭证失败"
+                                )
+                            } finally {
+                                if (loginVisible) {
+                                    loginMutable.value = login.value.copy(busy = false)
+                                }
+                            }
                             break
                         }
                     }

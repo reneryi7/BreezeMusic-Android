@@ -21,4 +21,19 @@ class LiveQrSmokeTest {
         val status = auth.checkQr(qr.key).data.number("status")
         assertTrue("Expected unauthenticated QR waiting state, got $status", status == 1)
     }
+
+    @Test fun createAndPollQqQrWithoutCredentials() = runBlocking {
+        assumeTrue(System.getenv("KUGOU_LIVE_SMOKE") == "1")
+        val store = MemoryStore()
+        val guid = KugouSigner.md5(UUID.randomUUID().toString())
+        val identity = DeviceIdentity(guid, KugouSigner.mid(guid), KugouSigner.random(10).uppercase())
+        val direct = DirectKugouTransport({ identity })
+        val auth = AuthRepository(direct, object : SessionStore by store { override fun device() = identity })
+        val qqQr = auth.createQqQr()
+        assertTrue(qqQr.qrsig.isNotBlank())
+        assertTrue(qqQr.ptLoginSig.isNotBlank())
+        assertTrue(qqQr.imageUrl.startsWith("data:image/png;base64,"))
+        val poll = auth.pollQqQr(qqQr)
+        assertTrue("Expected unauthenticated QQ QR waiting state, got $poll", poll is QqQrPollResult.Waiting)
+    }
 }

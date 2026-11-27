@@ -1017,4 +1017,75 @@ class SecurityHardeningTest {
         val gradleText = File(root, "app/build.gradle.kts").readText(Charsets.UTF_8)
         assertFalse("app/build.gradle.kts 不应再包含未使用的 logging-interceptor 依赖", gradleText.contains("logging-interceptor"))
     }
+
+    @Test
+    fun `qqQrAuthGateway enforces HTTPS QQ domain whitelist and blocks SSRF redirects and Kugou header leaks`() = kotlinx.coroutines.test.runTest {
+        val gateway = com.concept.music.data.kugou.DirectQqQrAuthGateway
+
+        // 1. 仅放行受信任的 QQ OAuth HTTPS 域名，拦截明文 HTTP、子串伪造、凭据注入、私网及无关子域
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://openmobile.qq.com/oauth2.0/m_authorize?client_id=101706348"))
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://xui.ptlogin2.qq.com/ssl/ptqrshow"))
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://ssl.ptlogin2.qq.com/check_sig"))
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://ssl.ptlogin2.graph.qq.com/check_sig"))
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://graph.qq.com/oauth2.0/authorize"))
+        assertTrue(gateway.isAllowedQqOAuthUrl("https://cgi.connect.qq.com/proxy.htm"))
+
+        assertFalse(gateway.isAllowedQqOAuthUrl("http://openmobile.qq.com/oauth2.0/m_authorize"))
+        assertFalse(gateway.isAllowedQqOAuthUrl("https://evil-qq.com/ssl/ptqrlogin"))
+        assertFalse(gateway.isAllowedQqOAuthUrl("https://openmobile.qq.com@evil.example/oauth2.0/m_authorize"))
+        assertFalse(gateway.isAllowedQqOAuthUrl("https://127.0.0.1/ssl/ptqrlogin"))
+        assertFalse(gateway.isAllowedQqOAuthUrl("https://169.254.169.254/latest/meta-data"))
+        assertFalse(gateway.isAllowedQqOAuthUrl("https://arbitrary-user.qq.com/phish"))
+
+        // 2. 双 MockWebServer 验证：check_sig 返回指向非授信外部主机的 302 时必须在建连前抛 SecurityException，且绝不泄露酷狗内部头
+        MockWebServer().use { qqServer ->
+            MockWebServer().use { attackerServer ->
+                attackerServer.enqueue(MockResponse().setResponseCode(200).setBody("STOLEN"))
+                val baseUrl = "http://127.0.0.1:${qqServer.port}"
+                qqServer.enqueue(
+                    MockResponse()
+                        .setResponseCode(200)
+                        .setBody("ptuiCB('0','0','$baseUrl/check_sig?s=1','0','登录成功','')")
+                )
+                qqServer.enqueue(
+                    MockResponse()
+                        .setResponseCode(302)
+                        .addHeader("Location", "https://attacker.example:${attackerServer.port}/capture")
+                )
+
+                val testGateway = com.concept.music.data.kugou.DirectQqQrAuthGateway(
+                    mAuthorizeBaseUrl = baseUrl,
+                    ptLoginBaseUrl = baseUrl,
+                    allowLoopbackForTest = true
+                )
+                val dummySession = com.concept.music.data.kugou.QqQrSession(
+                    imageUrl = "data:image/png;base64,AA==",
+                    expiresAt = System.currentTimeMillis() + 60_000L,
+                    qrsig = "sig",
+                    ptQrToken = KugouSigner.hash33("sig"),
+                    ptLoginSig = "login_sig",
+                    ptOpenLoginData = "appid=716027609",
+                    xloginUrl = "$baseUrl/cgi-bin/xlogin?appid=716027609",
+                    cookies = mapOf("qrsig" to "sig", "pt_login_sig" to "login_sig")
+                )
+
+                try {
+                    testGateway.pollQqQr(dummySession)
+                    fail("指向非授信域名的 QQ OAuth 302 重定向必须被阻断")
+                } catch (e: SecurityException) {
+                    assertTrue(
+                        "异常信息应明确指向恶意重定向目标: ${e.message}",
+                        e.message.orEmpty().contains("attacker.example")
+                    )
+                }
+
+                assertEquals("应先完成 ptqrlogin 与 check_sig 两跳后再拦截外部重定向", 2, qqServer.requestCount)
+                assertEquals("攻击者服务器绝不能收到任何 QQ 重定向请求", 0, attackerServer.requestCount)
+                val pollReq = requireNotNull(qqServer.takeRequest(3, java.util.concurrent.TimeUnit.SECONDS))
+                for (forbiddenHeader in listOf("dfid", "mid", "kg-rf", "kg-rc", "kg-thash", "x-router")) {
+                    assertNull("QQ OAuth 请求绝不能携带酷狗内部头 $forbiddenHeader", pollReq.getHeader(forbiddenHeader))
+                }
+            }
+        }
+    }
 }

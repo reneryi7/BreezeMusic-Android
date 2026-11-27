@@ -16,6 +16,7 @@ class AccountUiTest {
         compose.onNodeWithText("立即登录").performClick()
         compose.onNodeWithText("手机验证码").assertIsDisplayed()
         compose.onNodeWithText("酷狗扫码").assertIsDisplayed()
+        compose.onNodeWithText("QQ 扫码").assertIsDisplayed()
         compose.onNodeWithText("发送验证码").assertIsNotEnabled()
         compose.onNodeWithText("中国大陆手机号").performTextInput("13800000000")
         compose.onNodeWithText("发送验证码").assertIsEnabled()

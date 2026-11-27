@@ -5,8 +5,12 @@ import com.google.gson.JsonParser
 import java.time.Clock
 import java.util.Base64
 
-class AuthRepository(private val transport: KugouTransport, private val store: SessionStore,
-    private val clock: Clock = Clock.systemUTC()) {
+class AuthRepository(
+    private val transport: KugouTransport,
+    private val store: SessionStore,
+    private val clock: Clock = Clock.systemUTC(),
+    private val qqQrGateway: QqQrAuthGateway = DirectQqQrAuthGateway()
+) {
 
     /**
      * [PROTO-02] 概念版设备注册 (对齐 MakcRe/KuGouMusicApi register_dev.js)
@@ -315,6 +319,50 @@ class AuthRepository(private val transport: KugouTransport, private val store: S
     ).requireSuccess()
 
     fun qrSession(data: JsonObject): LoginResult.Success = decodeLogin(data, null)
+
+    /**
+     * 生成 QQ 扫码登录二维码（对齐 MakcRe/KuGouMusicApi module/login_qq_qr_create.js）
+     */
+    suspend fun createQqQr(): QqQrSession = qqQrGateway.createQqQr()
+
+    /**
+     * 轮询 QQ 扫码登录状态（对齐 MakcRe/KuGouMusicApi module/login_qq_qr_check.js）
+     */
+    suspend fun pollQqQr(session: QqQrSession): QqQrPollResult = qqQrGateway.pollQqQr(session)
+
+    /**
+     * 使用 QQ OAuth 返回的 openid 与 access_token 换取酷狗概念版登录态（对齐 module/login_qq.js -> /v6/login_by_openplat）
+     */
+    suspend fun loginByQq(openId: String, accessToken: String): LoginResult.Success {
+        require(openId.isNotBlank() && accessToken.isNotBlank()) { "缺少 QQ 授权凭证，请重新扫码" }
+        if (!store.isDfidRegistered()) {
+            suspendRunCatching { registerDevice(forceRefresh = false) }
+        }
+        val now = clock.millis()
+        val d = store.device()
+        val encrypted = KugouSigner.encrypt(KugouSigner.gson.toJson(json("access_token" to accessToken)))
+        val body = json(
+            "dev" to d.dev,
+            "force_login" to 1,
+            "partnerid" to 1,
+            "clienttime_ms" to now,
+            "t1" to t1(null, now),
+            "t2" to t2(d, now),
+            "t3" to "MCwwLDAsMCwwLDAsMCwwLDA=",
+            "third_appid" to DirectQqQrAuthGateway.QQ_LITE_APP_ID,
+            "openid" to openId,
+            "params" to encrypted.ciphertext,
+            "pk" to KugouSigner.rsa(KugouSigner.gson.toJson(json("clienttime_ms" to now, "key" to encrypted.key))).uppercase()
+        )
+        val response = transport.call(
+            "/v6/login_by_openplat",
+            host = "https://gateway.kugou.com",
+            method = "POST",
+            body = body,
+            headers = mapOf("x-router" to "login.user.kugou.com")
+        ).requireSuccess()
+        return decodeLogin(response.data, encrypted.key)
+    }
 
     suspend fun refresh(session: KugouSession): LoginResult.Success {
         val now = clock.millis()

@@ -63,6 +63,7 @@ import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import com.concept.music.ui.theme.conceptFloatingCardColor
 import com.concept.music.ui.theme.softClickable
 import com.concept.music.ui.viewmodel.LibraryViewModel
+import com.concept.music.ui.viewmodel.LoginTabs
 import com.concept.music.util.SecurityGuards
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -86,49 +87,82 @@ fun LoginScreen(viewModel: LibraryViewModel, onBack: () -> Unit) {
         item { TextButton(onClick = onBack) { Text("返回") }; Text("登录酷狗账号", style = MaterialTheme.typography.headlineMedium) }
         item {
             TabRow(state.tab) {
-                listOf("手机验证码", "酷狗扫码").forEachIndexed { index, label ->
-                    Tab(state.tab == index, onClick = { viewModel.chooseTab(index) }, enabled = !state.busy, text = { Text(label) })
+                listOf("手机验证码", "酷狗扫码", "QQ 扫码").forEachIndexed { index, label ->
+                    Tab(
+                        selected = state.tab == index,
+                        onClick = { viewModel.chooseTab(index) },
+                        enabled = !state.busy,
+                        text = {
+                            Text(
+                                text = label,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    )
                 }
             }
         }
-        if (state.tab == 0) {
-            item {
-                OutlinedTextField(state.mobile, viewModel::setMobile, Modifier.fillMaxWidth(), enabled = !state.busy,
-                    singleLine = true, label = { Text("中国大陆手机号") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
-            }
-            item {
-                OutlinedTextField(state.code, viewModel::setCode, Modifier.fillMaxWidth(), enabled = !state.busy,
-                    singleLine = true, label = { Text("短信验证码") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
-            }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = viewModel::sendCode, enabled = !state.busy && state.resendSeconds == 0 && state.mobile.length == 11) {
-                        Text(if (state.resendSeconds > 0) "${state.resendSeconds} 秒后重发" else "发送验证码")
-                    }
-                    Button(onClick = { viewModel.phoneLogin() }, enabled = !state.busy && state.mobile.length == 11 && state.code.length >= 4) { Text("登录") }
+        when (state.tab) {
+            LoginTabs.PHONE -> {
+                item {
+                    OutlinedTextField(state.mobile, viewModel::setMobile, Modifier.fillMaxWidth(), enabled = !state.busy,
+                        singleLine = true, label = { Text("中国大陆手机号") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
                 }
-                Text("请使用已有酷狗账号；如未注册，请先在官方 App 注册。", style = MaterialTheme.typography.bodySmall)
-            }
-            items(state.candidates, key = { it.userId }) { candidate ->
-                OutlinedCard(onClick = { if (!state.busy) viewModel.phoneLogin(candidate.userId) }, modifier = Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (candidate.avatarUrl.isNotEmpty()) AsyncImage(candidate.avatarUrl, "头像", Modifier.size(40.dp))
-                        Column { Text(candidate.nickname); Text("酷狗 ID：${candidate.userId}") }
+                item {
+                    OutlinedTextField(state.code, viewModel::setCode, Modifier.fillMaxWidth(), enabled = !state.busy,
+                        singleLine = true, label = { Text("短信验证码") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+                }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(onClick = viewModel::sendCode, enabled = !state.busy && state.resendSeconds == 0 && state.mobile.length == 11) {
+                            Text(if (state.resendSeconds > 0) "${state.resendSeconds} 秒后重发" else "发送验证码")
+                        }
+                        Button(onClick = { viewModel.phoneLogin() }, enabled = !state.busy && state.mobile.length == 11 && state.code.length >= 4) { Text("登录") }
+                    }
+                    Text("请使用已有酷狗账号；如未注册，请先在官方 App 注册。", style = MaterialTheme.typography.bodySmall)
+                }
+                items(state.candidates, key = { it.userId }) { candidate ->
+                    OutlinedCard(onClick = { if (!state.busy) viewModel.phoneLogin(candidate.userId) }, modifier = Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (candidate.avatarUrl.isNotEmpty()) AsyncImage(candidate.avatarUrl, "头像", Modifier.size(40.dp))
+                            Column { Text(candidate.nickname); Text("酷狗 ID：${candidate.userId}") }
+                        }
                     }
                 }
             }
-        } else {
-            item {
-                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    val bitmap = remember(state.qr?.imageUrl) { decodeQr(state.qr?.imageUrl) }
-                    if (bitmap != null) Image(bitmap.asImageBitmap(), "酷狗登录二维码", Modifier.size(240.dp))
-                    else if (state.qr != null) Text("二维码图片无法识别，请重新生成")
-                    Text(state.qrStatus)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = viewModel::createQr, enabled = !state.busy) { Text("重新生成") }
-                        if (bitmap != null) SaveQrButton(bitmap)
+            LoginTabs.KUGOU_QR -> {
+                item {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        val bitmap = remember(state.qr?.imageUrl) { decodeQr(state.qr?.imageUrl) }
+                        if (bitmap != null) Image(bitmap.asImageBitmap(), "酷狗登录二维码", Modifier.size(240.dp))
+                        else if (state.qr != null) Text("二维码图片无法识别，请重新生成")
+                        Text(state.qrStatus)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = viewModel::createQr, enabled = !state.busy) { Text("重新生成") }
+                            if (bitmap != null) SaveQrButton(bitmap, filePrefix = "酷狗登录")
+                        }
+                        Text("可保存二维码，在酷狗音乐 App 扫一扫中从相册识别；确认后返回本应用。", style = MaterialTheme.typography.bodyMedium)
                     }
-                    Text("可保存二维码，在酷狗音乐 App 扫一扫中从相册识别；确认后返回本应用。", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            else -> {
+                item {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        val bitmap = remember(state.qqQrImageUrl) { decodeQr(state.qqQrImageUrl) }
+                        if (bitmap != null) Image(bitmap.asImageBitmap(), "QQ 登录二维码", Modifier.size(240.dp))
+                        else if (state.qqQrImageUrl != null) Text("二维码图片无法识别，请重新生成")
+                        Text(state.qqQrStatus)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = viewModel::createQqQr, enabled = !state.busy) { Text("重新生成") }
+                            if (bitmap != null) SaveQrButton(bitmap, filePrefix = "QQ登录")
+                        }
+                        Text(
+                            "支持用另一台设备的手机 QQ 扫一扫；单机使用时可点击「保存二维码」，在手机 QQ 扫一扫中从相册识别，确认授权后返回本应用。",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
             }
         }
@@ -158,7 +192,7 @@ internal fun decodeQr(data: String?): Bitmap? = runCatching {
 }.getOrNull()
 
 @Composable
-private fun SaveQrButton(bitmap: Bitmap) {
+private fun SaveQrButton(bitmap: Bitmap, filePrefix: String = "酷狗登录") {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var message by remember { mutableStateOf<String?>(null) }
@@ -166,7 +200,7 @@ private fun SaveQrButton(bitmap: Bitmap) {
     val save = {
         scope.launch {
             busy = true
-            try { withContext(Dispatchers.IO) { saveQr(context, bitmap) }; message = "二维码已保存到相册" }
+            try { withContext(Dispatchers.IO) { saveQr(context, bitmap, filePrefix) }; message = "二维码已保存到相册" }
             catch (e: Exception) { message = "保存失败：${e.message}" }
             finally { busy = false }
         }
@@ -189,10 +223,10 @@ private fun SaveQrButton(bitmap: Bitmap) {
     }
 }
 
-private fun saveQr(context: Context, bitmap: Bitmap) {
+private fun saveQr(context: Context, bitmap: Bitmap, filePrefix: String) {
     val resolver = context.contentResolver
     val values = ContentValues().apply {
-        put(MediaStore.Images.Media.DISPLAY_NAME, "酷狗登录_${System.currentTimeMillis()}.png")
+        put(MediaStore.Images.Media.DISPLAY_NAME, "${filePrefix}_${System.currentTimeMillis()}.png")
         put(MediaStore.Images.Media.MIME_TYPE, "image/png")
         if (Build.VERSION.SDK_INT >= 29) {
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ConceptMusic")

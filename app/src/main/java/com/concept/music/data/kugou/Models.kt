@@ -42,6 +42,32 @@ data class SavedAccount(val userId: String, val nickname: String = "酷狗用户
     val autoClaim: Boolean = false, val completedDay: String? = null, val needsLogin: Boolean = false)
 data class AccountContext(val session: KugouSession, val generation: Long)
 data class KugouQrCode(val key: String, val imageUrl: String, val expiresAt: Long)
+data class QqQrSession(
+    val imageUrl: String,
+    val expiresAt: Long,
+    val qrsig: String,
+    val ptQrToken: Int,
+    val ptLoginSig: String,
+    val ptOpenLoginData: String,
+    val xloginUrl: String,
+    val cookies: Map<String, String>
+) {
+    override fun toString(): String = "QqQrSession(expiresAt=$expiresAt, ptQrToken=$ptQrToken)"
+}
+data class QqOAuthCredential(
+    val openId: String,
+    val accessToken: String
+) {
+    override fun toString(): String = "QqOAuthCredential(openId=${openId.take(4)}***)"
+}
+sealed interface QqQrPollResult {
+    data class Waiting(val updatedCookies: Map<String, String>) : QqQrPollResult
+    data class Scanned(val updatedCookies: Map<String, String>, val message: String) : QqQrPollResult
+    data class Expired(val message: String) : QqQrPollResult
+    data class Refused(val message: String) : QqQrPollResult
+    data class Authorized(val credential: QqOAuthCredential) : QqQrPollResult
+    data class Failed(val code: String, val message: String) : QqQrPollResult
+}
 data class LoginCandidate(val userId: String, val nickname: String, val avatarUrl: String)
 sealed interface LoginResult {
     data class Success(val session: KugouSession, val profile: AccountProfile) : LoginResult

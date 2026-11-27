@@ -318,4 +318,202 @@ class KugouProtocolTest {
         assertEquals("0", capturedUserId)
         assertEquals("https://fs.android.kugou.com/guest_track.mp3", res.url)
     }
+
+    @Test fun qqHash33MatchesUpstreamReference() {
+        assertEquals(0, KugouSigner.hash33(""))
+        assertEquals(108966, KugouSigner.hash33("abc"))
+        // 含高位溢出字符的长 qrsig 必须严格落在非负 31 位整数区间内并与逐位乘 33 同余
+        val sample = "mK9xPq2L7vN4wR8sT1uY5zA3bC6dE0fG-hI_jJ"
+        val expected = sample.fold(0) { acc, ch -> acc + (acc shl 5) + ch.code } and 0x7FFFFFFF
+        val actual = KugouSigner.hash33(sample)
+        assertEquals(expected, actual)
+        assertTrue(actual >= 0)
+    }
+
+    @Test fun qqQrFlowCreatesPollsFollowsRedirectsAndExchangesKugouSession() = kotlinx.coroutines.test.runTest {
+        fun minimalValidPng(width: Int = 240, height: Int = 240): ByteArray {
+            val buf = java.nio.ByteBuffer.allocate(32).order(java.nio.ByteOrder.BIG_ENDIAN)
+            buf.put(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+            buf.putInt(13)
+            buf.put("IHDR".toByteArray(Charsets.US_ASCII))
+            buf.putInt(width)
+            buf.putInt(height)
+            buf.put(byteArrayOf(8, 6, 0, 0, 0))
+            return buf.array()
+        }
+
+        okhttp3.mockwebserver.MockWebServer().use { qqServer ->
+            val baseUrl = "http://127.0.0.1:${qqServer.port}"
+            val xloginEscaped = "$baseUrl/cgi-bin/xlogin?appid=716027609\\x26h5sig=test_h5_sig\\x26daid=381"
+            // 1. m_authorize 返回包含 xlogin src 的 HTML
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""<script>var src = "$xloginEscaped";</script>""")
+            )
+            // 2. xlogin 返回 pt_login_sig Cookie
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Set-Cookie", "pt_login_sig=sig_login_fixture_123; Path=/; Secure")
+                    .setBody("ok")
+            )
+            // 3. ptqrshow 返回 PNG 与 qrsig Cookie
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Content-Type", "image/png")
+                    .addHeader("Set-Cookie", "qrsig=qrsig_fixture_token_999; Path=/; Secure")
+                    .setBody(okio.Buffer().write(minimalValidPng()))
+            )
+            // 4. ptqrlogin 首次轮询：66 等待扫码
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("ptuiCB('66','0','','0','二维码未失效。','')")
+            )
+            // 5. ptqrlogin 第二次轮询：67 已扫码待确认
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("ptuiCB('67','0','','0','二维码认证中。','')")
+            )
+            // 6. ptqrlogin 第三次轮询：0 成功，返回 check_sig 跳转链接
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("ptuiCB('0','0','$baseUrl/check_sig?ptsigx=abc','0','登录成功！','微风测试')")
+            )
+            // 7. check_sig 第一跳：下发会话 Cookie 并 302 跳转到 login_jump
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(302)
+                    .addHeader("Set-Cookie", "p_skey=pskey_hop1_ok; Path=/")
+                    .addHeader("Location", "$baseUrl/oauth2.0/login_jump")
+            )
+            // 8. login_jump 第二跳：302 跳转至 auth://tauth.qq.com/#access_token=...&openid=...
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(302)
+                    .addHeader("Location", "auth://tauth.qq.com/#access_token=QQ_ACCESS_TOKEN_XYZ&expires_in=7776000&openid=QQ_OPENID_123456")
+            )
+
+            val fixedClock = Clock.fixed(Instant.parse("2026-11-28T00:00:00Z"), ZoneOffset.UTC)
+            val qqGateway = DirectQqQrAuthGateway(
+                clock = fixedClock,
+                mAuthorizeBaseUrl = baseUrl,
+                ptLoginBaseUrl = baseUrl,
+                allowLoopbackForTest = true
+            )
+
+            var capturedPath: String? = null
+            var capturedRouter: String? = null
+            var capturedBody: JsonObject? = null
+            val kugouTransport = object : KugouTransport {
+                override suspend fun call(
+                    path: String, session: KugouSession?, query: Map<String, String>, body: JsonObject?,
+                    host: String, method: String, web: Boolean, headers: Map<String, String>, device: DeviceIdentity?
+                ): ApiResponse {
+                    capturedPath = path
+                    capturedRouter = headers["x-router"]
+                    capturedBody = body
+                    assertEquals("POST", method)
+                    assertEquals("https://gateway.kugou.com", host)
+                    assertEquals(1, body?.number("partnerid"))
+                    assertEquals(DirectQqQrAuthGateway.QQ_LITE_APP_ID, body?.text("third_appid"))
+                    assertEquals("QQ_OPENID_123456", body?.text("openid"))
+                    assertFalse(body?.text("params").isNullOrBlank())
+                    assertFalse(body?.text("pk").isNullOrBlank())
+                    return ApiResponse(
+                        com.google.gson.JsonParser.parseString(
+                            """{"status":1,"error_code":0,"data":{"userid":"99887766","token":"kugou_qq_token_ok","t1":"kugou_t1_qq","vip_token":"kugou_vip_tok","nickname":"QQ微风用户","pic":"https://imge.kugou.com/avatar.jpg"}}"""
+                        ).asJsonObject
+                    )
+                }
+            }
+
+            val store = MemoryStore()
+            val auth = AuthRepository(kugouTransport, store, clock = fixedClock, qqQrGateway = qqGateway)
+
+            // 创建 QQ 二维码并验证参数
+            val qrSession = auth.createQqQr()
+            assertTrue(qrSession.imageUrl.startsWith("data:image/png;base64,"))
+            assertEquals("qrsig_fixture_token_999", qrSession.qrsig)
+            assertEquals(KugouSigner.hash33("qrsig_fixture_token_999"), qrSession.ptQrToken)
+            assertEquals("sig_login_fixture_123", qrSession.ptLoginSig)
+
+            // 轮询 66 -> 67 -> 0
+            val waitRes = auth.pollQqQr(qrSession)
+            assertTrue(waitRes is QqQrPollResult.Waiting)
+            val scannedRes = auth.pollQqQr(qrSession)
+            assertTrue(scannedRes is QqQrPollResult.Scanned)
+            val authRes = auth.pollQqQr(qrSession)
+            assertTrue(authRes is QqQrPollResult.Authorized)
+            val cred = (authRes as QqQrPollResult.Authorized).credential
+            assertEquals("QQ_OPENID_123456", cred.openId)
+            assertEquals("QQ_ACCESS_TOKEN_XYZ", cred.accessToken)
+
+            // 验证多跳重定向中第 2 跳携带了第 1 跳下发的 p_skey Cookie
+            assertEquals(8, qqServer.requestCount)
+            val recordedRequests = buildList {
+                repeat(8) {
+                    add(requireNotNull(qqServer.takeRequest(3, java.util.concurrent.TimeUnit.SECONDS)))
+                }
+            }
+            val loginJumpReq = recordedRequests.last()
+            assertTrue(
+                "check_sig 下发的 Cookie 必须传递至后续重定向跳",
+                loginJumpReq.getHeader("Cookie").orEmpty().contains("p_skey=pskey_hop1_ok")
+            )
+
+            // 使用 QQ 凭证换取酷狗概念版会话
+            val loginSuccess = auth.loginByQq(cred.openId, cred.accessToken)
+            assertEquals("/v6/login_by_openplat", capturedPath)
+            assertEquals("login.user.kugou.com", capturedRouter)
+            assertNotNull(capturedBody)
+            assertEquals("99887766", loginSuccess.session.userId)
+            assertEquals("kugou_qq_token_ok", loginSuccess.session.token)
+            assertEquals("kugou_t1_qq", loginSuccess.session.t1)
+            assertEquals("kugou_vip_tok", loginSuccess.session.vipToken)
+            assertEquals("QQ微风用户", loginSuccess.profile.nickname)
+        }
+    }
+
+    @Test fun qqQrPollHandlesExpiredAndRefusedStates() = kotlinx.coroutines.test.runTest {
+        okhttp3.mockwebserver.MockWebServer().use { qqServer ->
+            val baseUrl = "http://127.0.0.1:${qqServer.port}"
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("ptuiCB('65','0','','0','二维码已失效。','')")
+            )
+            qqServer.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody("ptuiCB('68','0','','0','本次登录已被拒绝','')")
+            )
+
+            val gateway = DirectQqQrAuthGateway(
+                mAuthorizeBaseUrl = baseUrl,
+                ptLoginBaseUrl = baseUrl,
+                allowLoopbackForTest = true
+            )
+            val dummySession = QqQrSession(
+                imageUrl = "data:image/png;base64,AA==",
+                expiresAt = System.currentTimeMillis() + 60_000L,
+                qrsig = "sig",
+                ptQrToken = KugouSigner.hash33("sig"),
+                ptLoginSig = "login_sig",
+                ptOpenLoginData = "appid=716027609",
+                xloginUrl = "$baseUrl/cgi-bin/xlogin?appid=716027609",
+                cookies = mapOf("qrsig" to "sig", "pt_login_sig" to "login_sig")
+            )
+
+            val expired = gateway.pollQqQr(dummySession)
+            assertTrue(expired is QqQrPollResult.Expired)
+            val refused = gateway.pollQqQr(dummySession)
+            assertTrue(refused is QqQrPollResult.Refused)
+            assertEquals("本次登录已被拒绝", (refused as QqQrPollResult.Refused).message)
+        }
+    }
 }

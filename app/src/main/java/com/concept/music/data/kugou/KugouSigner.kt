@@ -245,5 +245,14 @@ object KugouSigner {
         return SimulatedSidEdt(sid = sidBase64, edt = edtBase64)
     }
 
+    /** QQ ptlogin 扫码登录 qrsig -> ptqrtoken 哈希算法（对齐 MakcRe/KuGouMusicApi login_qq_qr_create.js） */
+    fun hash33(input: String): Int {
+        var hash = 0
+        for (ch in input) {
+            hash += (hash shl 5) + ch.code
+        }
+        return hash and 0x7FFFFFFF
+    }
+
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
 }
