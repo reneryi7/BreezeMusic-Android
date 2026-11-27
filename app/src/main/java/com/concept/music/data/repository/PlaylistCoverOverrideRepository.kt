@@ -61,6 +61,18 @@ class PlaylistCoverOverrideRepository(context: Context?) {
         return null
     }
 
+    fun hasOverrideCover(
+        userId: String?,
+        playlist: Playlist?,
+        fallbackPlaylistId: String = "",
+        snapshot: Map<String, String> = _overrides.value
+    ): Boolean = !resolveOverrideCoverUri(
+        userId = userId,
+        playlist = playlist,
+        fallbackPlaylistId = fallbackPlaylistId,
+        snapshot = snapshot
+    ).isNullOrBlank()
+
     @Synchronized
     fun saveOverrideCover(
         userId: String?,

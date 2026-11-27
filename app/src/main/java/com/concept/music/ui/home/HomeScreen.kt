@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
@@ -56,19 +57,28 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import com.concept.music.data.kugou.AuthState
+import com.concept.music.data.kugou.extractIsoDateFromText
+import com.concept.music.data.kugou.formatChineseHistoryDisplayTitle
 import com.concept.music.data.model.DailyHistoryEntry
 import com.concept.music.data.model.FmChannel
 import com.concept.music.data.model.RankItem
@@ -2760,7 +2770,9 @@ fun DailyRecommendScreen(
     }
     val monthStr = activeDateParts.first
     val dayStr = activeDateParts.second
-    var showHistoryMenu by remember { mutableStateOf(false) }
+    val activeDateDisplayLabel = remember(selectedDailyHistory, today) {
+        parseDailyHistoryOptionLabels(selectedDailyHistory, today).third
+    }
 
     ConceptStageBackground(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -2781,77 +2793,12 @@ fun DailyRecommendScreen(
                     },
                     actions = {
                         if (dailyHistoryEntries.isNotEmpty()) {
-                            Box {
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = ConceptCoralAccent.copy(alpha = 0.14f),
-                                    modifier = Modifier
-                                        .padding(end = 4.dp)
-                                        .softCardClickable(shape = RoundedCornerShape(16.dp)) {
-                                            showHistoryMenu = true
-                                        }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.History,
-                                            contentDescription = "历史每日推荐",
-                                            tint = ConceptCoralAccent,
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(5.dp))
-                                        Text(
-                                            text = selectedDailyHistory?.displayTitle ?: "今日",
-                                            color = ConceptCoralAccent,
-                                            fontSize = 12.5.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Icon(
-                                            imageVector = Icons.Rounded.ArrowDropDown,
-                                            contentDescription = null,
-                                            tint = ConceptCoralAccent,
-                                            modifier = Modifier.size(17.dp)
-                                        )
-                                    }
-                                }
-                                DropdownMenu(
-                                    expanded = showHistoryMenu,
-                                    onDismissRequest = { showHistoryMenu = false },
-                                    modifier = Modifier.background(conceptSheetContainerColor(), RoundedCornerShape(16.dp))
-                                ) {
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                text = "今日推荐",
-                                                fontWeight = if (selectedDailyHistory == null) FontWeight.ExtraBold else FontWeight.Normal,
-                                                color = if (selectedDailyHistory == null) ConceptCoralAccent else MaterialTheme.colorScheme.onSurface
-                                            )
-                                        },
-                                        onClick = {
-                                            showHistoryMenu = false
-                                            viewModel.selectDailyHistory(null)
-                                        }
-                                    )
-                                    dailyHistoryEntries.forEach { entry ->
-                                        val isChosen = selectedDailyHistory?.historyName == entry.historyName
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    text = entry.displayTitle,
-                                                    fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.Normal,
-                                                    color = if (isChosen) ConceptCoralAccent else MaterialTheme.colorScheme.onSurface
-                                                )
-                                            },
-                                            onClick = {
-                                                showHistoryMenu = false
-                                                viewModel.selectDailyHistory(entry)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
+                            DailyHistoryDateSelectorButton(
+                                today = today,
+                                dailyHistoryEntries = dailyHistoryEntries,
+                                selectedDailyHistory = selectedDailyHistory,
+                                onSelectDailyHistory = { entry -> viewModel.selectDailyHistory(entry) }
+                            )
                         }
 
                         var dailyRefreshSpin by remember { mutableIntStateOf(0) }
@@ -2960,8 +2907,11 @@ fun DailyRecommendScreen(
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = selectedDailyHistory?.let { "历史推荐回顾 · ${it.displayTitle}" }
-                                    ?: "循着你的听歌轨迹 · 每日 0:00 更新",
+                                text = if (selectedDailyHistory != null) {
+                                    "历史日推 · $activeDateDisplayLabel"
+                                } else {
+                                    "循着你的听歌轨迹 · 每日 0:00 更新"
+                                },
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -3073,8 +3023,11 @@ fun DailyRecommendScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = selectedDailyHistory?.let { "历史推荐回顾 · ${it.displayTitle}" }
-                                    ?: "循着你的听歌轨迹 · 每日 0:00 更新",
+                                text = if (selectedDailyHistory != null) {
+                                    "历史日推 · $activeDateDisplayLabel"
+                                } else {
+                                    "循着你的听歌轨迹 · 每日 0:00 更新"
+                                },
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -3242,6 +3195,333 @@ fun DailyRecommendScreen(
                     }
                 }
             }
+            }
+        }
+    }
+}
+
+private data class DailyDatePickerOption(
+    val entry: DailyHistoryEntry?,
+    val dateText: String,
+    val tagText: String,
+    val buttonLabel: String
+)
+
+/**
+ * 统一规范化每日推荐日期选项文案：
+ * - 返回 `(dateText, tagText, buttonLabel)`，例如 `("11-28", "今天", "11-28 今天")`、`("11-27", "昨天", "11-27 昨天")`、`("11-25", "周三", "11-25 周三")`；
+ * - 全部 7 天（含今日 + 过去 6 天）保持完全一致的视觉宽度与两列对齐结构，杜绝切换日期时按钮与弹窗晃动。
+ */
+internal fun parseDailyHistoryOptionLabels(
+    entry: DailyHistoryEntry?,
+    today: LocalDate
+): Triple<String, String, String> {
+    if (entry == null) {
+        val mmDd = String.format(java.util.Locale.US, "%02d-%02d", today.monthValue, today.dayOfMonth)
+        return Triple(mmDd, "今天", "$mmDd 今天")
+    }
+    val parsedDate = extractIsoDateFromText(entry.dateLabel, today.year, today)
+        ?: extractIsoDateFromText(entry.compactDate, today.year, today)
+        ?: extractIsoDateFromText(entry.historyName, today.year, today)
+    if (parsedDate != null) {
+        val formatted = formatChineseHistoryDisplayTitle(parsedDate, today)
+        val parts = formatted.split(" ", limit = 2)
+        val datePart = parts.getOrNull(0).orEmpty()
+        val tagPart = parts.getOrNull(1).orEmpty()
+        return Triple(datePart, tagPart, formatted)
+    }
+    val cleaned = entry.displayTitle.replace("·", " ").replace(Regex("\\s+"), " ").trim()
+    val parts = cleaned.split(" ", limit = 2)
+    return if (parts.size == 2) {
+        Triple(parts[0], parts[1], cleaned)
+    } else {
+        Triple(cleaned.ifBlank { entry.dateLabel }, "", cleaned.ifBlank { entry.dateLabel })
+    }
+}
+
+/**
+ * 每日推荐右上角「固定锚点」历史日期切换胶囊与弹性悬浮菜单：
+ * - 按钮采用固定宽度 (`120.dp`) 与 `Alignment.CenterEnd` 右对齐容器，切换任意日期时按钮与弹窗均 0px 位移；
+ * - 弹窗采用 `Popup(alignment = Alignment.TopEnd)` 严格锁死右上角锚点与固定宽度 (`164.dp`)，
+ *   配合弹性展开动效与珊瑚色滑动选中胶囊，支持查看含今日在内完整 7 天日推。
+ */
+@Composable
+private fun DailyHistoryDateSelectorButton(
+    today: LocalDate,
+    dailyHistoryEntries: List<DailyHistoryEntry>,
+    selectedDailyHistory: DailyHistoryEntry?,
+    onSelectDailyHistory: (DailyHistoryEntry?) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+
+    val options = remember(today, dailyHistoryEntries) {
+        val todayTriple = parseDailyHistoryOptionLabels(null, today)
+        val todayOpt = DailyDatePickerOption(
+            entry = null,
+            dateText = todayTriple.first,
+            tagText = todayTriple.second,
+            buttonLabel = todayTriple.third
+        )
+        val pastOpts = dailyHistoryEntries.take(6).map { entry ->
+            val triple = parseDailyHistoryOptionLabels(entry, today)
+            DailyDatePickerOption(
+                entry = entry,
+                dateText = triple.first,
+                tagText = triple.second,
+                buttonLabel = triple.third
+            )
+        }
+        listOf(todayOpt) + pastOpts
+    }
+
+    val activeKey = selectedDailyHistory?.historyName
+    val activeOption = remember(options, activeKey) {
+        options.firstOrNull { it.entry?.historyName == activeKey } ?: options.first()
+    }
+
+    var showPopup by remember { mutableStateOf(false) }
+    var isClosing by remember { mutableStateOf(false) }
+    var isSelectingTransition by remember { mutableStateOf(false) }
+    var displaySelectedKey by remember { mutableStateOf(activeKey) }
+    val popupProgress = remember { Animatable(0f) }
+
+    LaunchedEffect(activeKey, showPopup) {
+        if (!showPopup) {
+            displaySelectedKey = activeKey
+        }
+    }
+
+    val closePopupAnimated: () -> Unit = remember(scope) {
+        {
+            if (showPopup && !isClosing) {
+                isClosing = true
+                scope.launch {
+                    popupProgress.animateTo(
+                        targetValue = 0f,
+                        animationSpec = tween(
+                            durationMillis = 175,
+                            easing = ConceptMotion.GentleSpatialExitEasing
+                        )
+                    )
+                    showPopup = false
+                    isClosing = false
+                    isSelectingTransition = false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(showPopup) {
+        if (showPopup) {
+            isClosing = false
+            isSelectingTransition = false
+            displaySelectedKey = activeKey
+            popupProgress.snapTo(0f)
+            popupProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = ConceptMotion.floatingPopupSpring()
+            )
+        }
+    }
+
+    val isExpanded = showPopup && !isClosing
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = ConceptMotion.expressiveSpring(),
+        label = "dailyHistoryArrowRotate"
+    )
+    val buttonBgColor by animateColorAsState(
+        targetValue = ConceptCoralAccent.copy(alpha = if (isExpanded || selectedDailyHistory != null) 0.17f else 0.12f),
+        animationSpec = tween(200),
+        label = "dailyHistoryBtnBg"
+    )
+
+    Box(contentAlignment = Alignment.CenterEnd) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = buttonBgColor,
+            shadowElevation = 0.dp,
+            modifier = Modifier
+                .padding(end = 4.dp)
+                .width(120.dp)
+                .height(34.dp)
+                .softCardClickable(shape = RoundedCornerShape(14.dp)) {
+                    if (showPopup) {
+                        closePopupAnimated()
+                    } else {
+                        showPopup = true
+                    }
+                }
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.History,
+                    contentDescription = "切换日推日期",
+                    tint = ConceptCoralAccent,
+                    modifier = Modifier.size(14.5.dp)
+                )
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AnimatedContent(
+                        targetState = activeOption.buttonLabel,
+                        transitionSpec = {
+                            (fadeIn(tween(180)) + slideInVertically(tween(200)) { it / 3 }) togetherWith
+                                (fadeOut(tween(130)) + slideOutVertically(tween(160)) { -it / 3 })
+                        },
+                        label = "dailyHistoryBtnLabel"
+                    ) { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFeatureSettings = "tnum"
+                            ),
+                            color = ConceptCoralAccent,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = ConceptCoralAccent,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer { rotationZ = arrowRotation }
+                )
+            }
+        }
+
+        if (showPopup) {
+            val popupOffsetYPx = with(density) { 40.dp.roundToPx() }
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, popupOffsetYPx),
+                onDismissRequest = { closePopupAnimated() },
+                properties = PopupProperties(focusable = true)
+            ) {
+                val rowHeight = 38.dp
+                val selectedIdx = options.indexOfFirst { it.entry?.historyName == displaySelectedKey }.coerceAtLeast(0)
+                val highlightOffsetY by animateDpAsState(
+                    targetValue = rowHeight * selectedIdx,
+                    animationSpec = ConceptMotion.expressiveSpring(),
+                    label = "dailyHistoryHighlightSlide"
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = conceptSheetContainerColor().copy(alpha = 0.98f),
+                    shadowElevation = 18.dp,
+                    modifier = Modifier
+                        .padding(end = 4.dp)
+                        .width(164.dp)
+                        .graphicsLayer {
+                            val rawP = popupProgress.value
+                            val clampedP = rawP.coerceIn(0f, 1f)
+                            val s = (0.84f + 0.16f * rawP).coerceIn(0.76f, 1.04f)
+                            scaleX = s
+                            scaleY = s
+                            translationY = (1f - rawP) * -10.dp.toPx()
+                            alpha = (clampedP * 1.12f).coerceIn(0f, 1f)
+                            transformOrigin = TransformOrigin(0.92f, 0f)
+                        }
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .offset(y = highlightOffsetY)
+                                    .fillMaxWidth()
+                                    .height(rowHeight)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(ConceptCoralAccent.copy(alpha = 0.14f))
+                            )
+
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                options.forEach { option ->
+                                    val optKey = option.entry?.historyName
+                                    val isSelected = optKey == displaySelectedKey
+                                    val primaryColor by animateColorAsState(
+                                        targetValue = if (isSelected) ConceptCoralAccent else MaterialTheme.colorScheme.onSurface,
+                                        animationSpec = tween(180),
+                                        label = "dailyHistDateColor_${optKey ?: "today"}"
+                                    )
+                                    val tagColor by animateColorAsState(
+                                        targetValue = if (isSelected) ConceptCoralAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        animationSpec = tween(180),
+                                        label = "dailyHistTagColor_${optKey ?: "today"}"
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(rowHeight)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .softClickable(
+                                                enabled = !isClosing && !isSelectingTransition,
+                                                pressScale = 0.97f
+                                            ) {
+                                                if (isSelectingTransition || isClosing) return@softClickable
+                                                isSelectingTransition = true
+                                                val changed = optKey != displaySelectedKey
+                                                if (changed) {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    displaySelectedKey = optKey
+                                                    onSelectDailyHistory(option.entry)
+                                                }
+                                                scope.launch {
+                                                    delay(if (changed) 195L else 80L)
+                                                    closePopupAnimated()
+                                                }
+                                            }
+                                            .padding(horizontal = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = option.dateText,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                fontSize = 13.sp,
+                                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                                fontFeatureSettings = "tnum"
+                                            ),
+                                            color = primaryColor,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (option.tagText.isNotEmpty()) {
+                                            Text(
+                                                text = option.tagText,
+                                                style = MaterialTheme.typography.labelMedium.copy(
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                                ),
+                                                color = tagColor,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

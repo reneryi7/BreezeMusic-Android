@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -323,8 +324,10 @@ fun HdArtworkPreviewDialog(
     iconOnlySaveButton: Boolean = false,
     accentColor: Color = ConceptPrimary,
     canChangeCover: Boolean = false,
+    hasCustomCover: Boolean = false,
     isUpdatingCover: Boolean = false,
     onChangeCoverClick: (() -> Unit)? = null,
+    onResetCustomCoverClick: (() -> Unit)? = null,
     placeholderIcon: ImageVector? = null,
     placeholderGradientColors: List<Color>? = null,
     onDismiss: () -> Unit
@@ -599,29 +602,103 @@ fun HdArtworkPreviewDialog(
                     }
                 }
             } else if (canChangeCover && onChangeCoverClick != null) {
-                // 「我喜欢」与自建歌单封面预览：底部居中提供「下载封面」与「更改封面」双无边框纯色胶囊操作
-                Row(
+                // 「我喜欢」与自建歌单封面预览：底部居中提供「下载封面」与「更改封面」，已自定义时附带「恢复默认封面」轻量胶囊
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 28.dp, start = 20.dp, end = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(bottom = 26.dp, start = 20.dp, end = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (hasVisualCover) {
+                    if (hasCustomCover && onResetCustomCoverClick != null) {
                         Surface(
-                            onClick = triggerSaveAction,
-                            enabled = !isSaving && !isUpdatingCover,
+                            onClick = { if (!isUpdatingCover) onResetCustomCoverClick() },
+                            enabled = !isUpdatingCover && !isSaving,
                             shape = RoundedCornerShape(999.dp),
-                            color = Color.White.copy(alpha = 0.14f),
-                            shadowElevation = 8.dp,
+                            color = Color.White.copy(alpha = 0.11f),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.RestartAlt,
+                                    contentDescription = "恢复默认封面",
+                                    tint = Color.White.copy(alpha = 0.86f),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "恢复默认封面（自动同步最新歌曲）",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.5.sp
+                                    ),
+                                    color = Color.White.copy(alpha = 0.88f)
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (hasVisualCover) {
+                            Surface(
+                                onClick = triggerSaveAction,
+                                enabled = !isSaving && !isUpdatingCover,
+                                shape = RoundedCornerShape(999.dp),
+                                color = Color.White.copy(alpha = 0.14f),
+                                shadowElevation = 8.dp,
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 20.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                ) {
+                                    if (isSaving) {
+                                        CircularProgressIndicator(
+                                            color = Color.White,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Download,
+                                            contentDescription = "下载${category.label}",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(19.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = if (isSaving) "保存中..." else "下载封面",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 14.sp
+                                        ),
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        }
+
+                        Surface(
+                            onClick = { if (!isUpdatingCover) onChangeCoverClick() },
+                            enabled = !isUpdatingCover,
+                            shape = RoundedCornerShape(999.dp),
+                            color = accentColor.copy(alpha = 0.92f),
+                            shadowElevation = 12.dp,
                             modifier = Modifier.height(48.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 20.dp),
+                                modifier = Modifier.padding(horizontal = 22.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(7.dp)
                             ) {
-                                if (isSaving) {
+                                if (isUpdatingCover) {
                                     CircularProgressIndicator(
                                         color = Color.White,
                                         strokeWidth = 2.dp,
@@ -629,59 +706,21 @@ fun HdArtworkPreviewDialog(
                                     )
                                 } else {
                                     Icon(
-                                        imageVector = Icons.Rounded.Download,
-                                        contentDescription = "下载${category.label}",
+                                        imageVector = Icons.Rounded.PhotoCamera,
+                                        contentDescription = "更改${category.label}",
                                         tint = Color.White,
                                         modifier = Modifier.size(19.dp)
                                     )
                                 }
                                 Text(
-                                    text = if (isSaving) "保存中..." else "下载封面",
+                                    text = if (isUpdatingCover) "正在同步..." else "更改封面",
                                     style = MaterialTheme.typography.labelLarge.copy(
-                                        fontWeight = FontWeight.SemiBold,
+                                        fontWeight = FontWeight.Bold,
                                         fontSize = 14.sp
                                     ),
                                     color = Color.White
                                 )
                             }
-                        }
-                    }
-
-                    Surface(
-                        onClick = { if (!isUpdatingCover) onChangeCoverClick() },
-                        enabled = !isUpdatingCover,
-                        shape = RoundedCornerShape(999.dp),
-                        color = accentColor.copy(alpha = 0.92f),
-                        shadowElevation = 12.dp,
-                        modifier = Modifier.height(48.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 22.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
-                            if (isUpdatingCover) {
-                                CircularProgressIndicator(
-                                    color = Color.White,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.PhotoCamera,
-                                    contentDescription = "更改${category.label}",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(19.dp)
-                                )
-                            }
-                            Text(
-                                text = if (isUpdatingCover) "正在同步..." else "更改封面",
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp
-                                ),
-                                color = Color.White
-                            )
                         }
                     }
                 }

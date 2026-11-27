@@ -1006,6 +1006,120 @@ suspend fun MusicApiRepository.updatePlaylistCoverOnCloud(
     return updated to fileName
 }
 
+/**
+ * 将酷狗歌曲封面 URL 或相对路径归一化为 `/v1/modify_list_pic` 要求的 `stdmusic/<FileName>` 相对路径：
+ * - 严格对齐 MakcRe/KuGouMusicApi `module/playlist_pic.js`；
+ * - 仅接受酷狗标准曲库封面 (`stdmusic/...` 或 `imge.kugou.com/stdmusic/...`)；
+ * - 显式拒绝本机 `file://` / `content://` 路径、歌手头像 (`singerimg`)、自定义图床 (`custom/`) 及异常路径。
+ */
+internal fun normalizeKugouStdMusicPicPath(rawCoverUrl: String?): String? {
+    val trimmed = rawCoverUrl?.trim().orEmpty()
+    if (trimmed.isEmpty()) return null
+    val withoutQuery = trimmed.substringBefore('?').substringBefore('#').trim()
+    if (withoutQuery.isEmpty()) return null
+    val lower = withoutQuery.lowercase(Locale.ROOT)
+    if (lower.startsWith("file:") || lower.startsWith("content:") ||
+        lower.contains("singerimg") || lower.contains("/custom/") || lower.startsWith("custom/") ||
+        lower.contains("..")
+    ) {
+        return null
+    }
+    val isStdMusic = lower.startsWith("stdmusic/") ||
+        ((lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("//")) &&
+            (lower.contains("kugou.com/") || lower.contains("kgimg.com/")) &&
+            lower.contains("/stdmusic/"))
+    if (!isStdMusic) return null
+    val fileName = withoutQuery.substringAfterLast('/').trim()
+    if (fileName.isEmpty() || !fileName.contains('.')) return null
+    val ext = fileName.substringAfterLast('.').lowercase(Locale.ROOT)
+    if (ext !in setOf("jpg", "jpeg", "png", "webp")) return null
+    return "stdmusic/$fileName"
+}
+
+/**
+ * 从待添加/当前歌单云端曲目列表中解析最适合作为「歌单默认封面」的标准曲库封面 URL：
+ * - 严禁处理本地歌曲（零云同步隔离）；
+ * - 优先零网络直接取前排已携带有效 `stdmusic` 封面的歌曲；
+ * - 若前排歌曲缺少封面 URL，再为最多 3 首候选曲目通过 `enrichSongsPrivilegeLite` 轻量补齐封面。
+ */
+suspend fun MusicApiRepository.resolveLatestCloudSongCoverForPlaylistSync(
+    songs: List<Song>
+): String? {
+    val cloudCandidates = songs.filterNot { it.isLocalSong }
+    if (cloudCandidates.isEmpty()) return null
+
+    for (song in cloudCandidates) {
+        if (normalizeKugouStdMusicPicPath(song.coverUrl) != null) {
+            return imageUrl(song.coverUrl)
+        }
+    }
+
+    val toEnrich = cloudCandidates
+        .filter { s ->
+            listOf(s.hash, s.hash128, s.hash320, s.hashFlac, s.hashHiRes).any { it.trim().length == 32 }
+        }
+        .take(3)
+    if (toEnrich.isEmpty()) return null
+
+    val enriched = suspendRunCatching { enrichSongsPrivilegeLite(toEnrich) }.getOrDefault(emptyList())
+    for (song in enriched) {
+        if (normalizeKugouStdMusicPicPath(song.coverUrl) != null) {
+            return imageUrl(song.coverUrl)
+        }
+    }
+    return null
+}
+
+/**
+ * 将最新歌曲的系统标准封面 (`stdmusic/<FileName>`) 同步为云端歌单封面：
+ * - 严格对齐 MakcRe/KuGouMusicApi `module/playlist_pic.js` (`/v1/modify_list_pic`)；
+ * - 纯本地歌单、非 `stdmusic` 封面或无效 `listId` 直接返回 false（严格维持零云同步隔离）；
+ * - 若因 `total_ver` 过期导致首次同步失败，自动回退 `total_ver=0` 并按需拉取最新云端 `total_ver` 重试。
+ */
+suspend fun MusicApiRepository.syncPlaylistSongCoverOnCloud(
+    playlist: Playlist,
+    songCoverUrl: String
+): Boolean {
+    if (playlist.isPureLocalPlaylist) return false
+    val listId = playlist.resolveEffectiveListId().takeIf { it > 0L } ?: return false
+    val picPath = normalizeKugouStdMusicPicPath(songCoverUrl) ?: return false
+    val playlistType = if (playlist.isCreatedByMe || playlist.isLiked) 0 else 1
+    val cachedMeta = peekCollectedPlaylistMeta(playlist)
+    val initialTotalVer = playlist.totalVersion.takeIf { it > 0L } ?: cachedMeta?.totalVersion ?: 0L
+
+    suspend fun attemptSync(totalVer: Long): Boolean {
+        val resourceArr = JsonArray().apply {
+            add(JsonObject().apply {
+                addProperty("listid", listId)
+                addProperty("type", playlistType)
+                addProperty("pic", picPath)
+            })
+        }
+        val payload = JsonObject().apply {
+            addProperty("total_ver", totalVer)
+            add("data", resourceArr)
+        }
+        val resp = callCloudListEncrypted("/v1/modify_list_pic", payload)
+        val errCode = resp?.number("err_code") ?: resp?.number("error_code") ?: resp?.number("errcode") ?: 0
+        return resp != null && resp.number("status") == 1 && errCode == 0
+    }
+
+    val triedVersions = HashSet<Long>(3)
+    if (triedVersions.add(initialTotalVer) && attemptSync(initialTotalVer)) {
+        return true
+    }
+    if (triedVersions.add(0L) && attemptSync(0L)) {
+        return true
+    }
+    val latestRemoteVer = suspendRunCatching {
+        userPlaylists().firstOrNull { it.resolveEffectiveListId() == listId }?.totalVersion ?: 0L
+    }.getOrDefault(0L)
+    if (latestRemoteVer > 0L && triedVersions.add(latestRemoteVer) && attemptSync(latestRemoteVer)) {
+        return true
+    }
+    return false
+}
+
 suspend fun MusicApiRepository.sortPlaylistTracks(
     playlist: Playlist,
     orderedSongs: List<Song>,
@@ -1404,42 +1518,70 @@ internal suspend fun MusicApiRepository.fuseLyricSearchIntoSongs(
 // =========================================================================
 // 历史每日推荐回溯（过去 6 天 + 今日 = 最近完整 7 天一周）— everyday_history.js
 // =========================================================================
-private fun formatChineseHistoryDisplayTitle(date: LocalDate, todayDate: LocalDate): String {
+internal const val MAX_PAST_DAILY_HISTORY_DAYS = 6
+
+internal fun formatChineseHistoryDisplayTitle(date: LocalDate, todayDate: LocalDate): String {
     val diffDays = java.time.temporal.ChronoUnit.DAYS.between(date, todayDate)
     val mmDd = String.format(Locale.US, "%02d-%02d", date.monthValue, date.dayOfMonth)
-    val weekLabel = when (date.dayOfWeek) {
-        DayOfWeek.MONDAY -> "周一"
-        DayOfWeek.TUESDAY -> "周二"
-        DayOfWeek.WEDNESDAY -> "周三"
-        DayOfWeek.THURSDAY -> "周四"
-        DayOfWeek.FRIDAY -> "周五"
-        DayOfWeek.SATURDAY -> "周六"
-        DayOfWeek.SUNDAY -> "周日"
-        else -> ""
+    val tag = when (diffDays) {
+        0L -> "今天"
+        1L -> "昨天"
+        2L -> "前天"
+        else -> when (date.dayOfWeek) {
+            DayOfWeek.MONDAY -> "周一"
+            DayOfWeek.TUESDAY -> "周二"
+            DayOfWeek.WEDNESDAY -> "周三"
+            DayOfWeek.THURSDAY -> "周四"
+            DayOfWeek.FRIDAY -> "周五"
+            DayOfWeek.SATURDAY -> "周六"
+            DayOfWeek.SUNDAY -> "周日"
+            else -> ""
+        }
     }
-    return when (diffDays) {
-        1L -> "昨天 · $mmDd"
-        2L -> "前天 · $mmDd"
-        else -> "$mmDd $weekLabel"
-    }
+    return if (tag.isNotEmpty()) "$mmDd $tag" else mmDd
 }
 
-private fun extractIsoDateFromText(raw: String, fallbackYear: Int): LocalDate? {
+internal fun extractIsoDateFromText(
+    raw: String,
+    fallbackYear: Int,
+    todayDate: LocalDate = LocalDate.now(CHINA_ZONE)
+): LocalDate? {
     val clean = raw.trim()
-    Regex("(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})").find(clean)?.let { m ->
-        return runCatching {
+    if (clean.isEmpty()) return null
+    Regex("(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2})").findAll(clean).toList().asReversed().forEach { m ->
+        val parsed = runCatching {
             LocalDate.of(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
         }.getOrNull()
+        if (parsed != null) return parsed
     }
-    Regex("(\\d{4})(\\d{2})(\\d{2})").find(clean)?.let { m ->
-        return runCatching {
+    // 逆序匹配独立 8 位紧凑日期，避免 RT_<32位MD5>_20261122 哈希中的连续数字提前误截断真实后缀日期
+    Regex("(?:^|[^0-9])(20\\d{2})(\\d{2})(\\d{2})(?:$|[^0-9])").findAll(clean).toList().asReversed().forEach { m ->
+        val parsed = runCatching {
             LocalDate.of(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
         }.getOrNull()
+        if (parsed != null) return parsed
     }
-    Regex("(\\d{1,2})[-/.月](\\d{1,2})").find(clean)?.let { m ->
-        return runCatching {
+    Regex("(\\d{1,2})[-/.月](\\d{1,2})").findAll(clean).toList().asReversed().forEach { m ->
+        val candidate = runCatching {
             LocalDate.of(fallbackYear, m.groupValues[1].toInt(), m.groupValues[2].toInt())
         }.getOrNull()
+        if (candidate != null) {
+            return if (candidate.isAfter(todayDate)) {
+                runCatching { LocalDate.of(fallbackYear - 1, candidate.monthValue, candidate.dayOfMonth) }.getOrNull()
+            } else {
+                candidate
+            }
+        }
+    }
+    return null
+}
+
+internal fun extractDailyHistoryNamePrefix(entries: List<DailyHistoryEntry>): String? {
+    val prefixRegex = Regex("^(.+_)(20\\d{6})$")
+    for (entry in entries) {
+        val m = prefixRegex.matchEntire(entry.historyName.trim()) ?: continue
+        val prefix = m.groupValues[1]
+        if (prefix.isNotBlank()) return prefix
     }
     return null
 }
@@ -1543,18 +1685,27 @@ suspend fun MusicApiRepository.fetchDailyRecommendHistoryList(): List<DailyHisto
             val attempts = listOf("ios" to false, "android" to false, "ios" to true, "android" to true)
             var sawInvalidSession = false
             var lastInvalidMsg = ""
+            fun distinctPastDateCount(): Int = serverEntries.mapNotNull { e ->
+                (extractIsoDateFromText(e.dateLabel, todayDate.year, todayDate)
+                    ?: extractIsoDateFromText(e.historyName, todayDate.year, todayDate))
+                    ?.takeIf { it.isBefore(todayDate) }
+            }.distinct().size
+
             for ((plat, withBody) in attempts) {
+                // 若无 body 通道已拿到数据，不再重复请求带空 body 的兜底通道
+                if (withBody && serverEntries.isNotEmpty()) break
                 val resp = requestList(plat, withBody) ?: continue
                 if (resp.code == 20010) {
                     sawInvalidSession = true
                     lastInvalidMsg = resp.errorMsg()
                     continue
                 }
+                val beforeSize = serverEntries.size
                 collectDailyHistoryEntriesRecursive(resp.data, serverEntries)
-                if (serverEntries.isEmpty()) {
+                if (serverEntries.size == beforeSize) {
                     collectDailyHistoryEntriesRecursive(resp.body, serverEntries)
                 }
-                if (serverEntries.isNotEmpty()) break
+                if (distinctPastDateCount() >= MAX_PAST_DAILY_HISTORY_DAYS) break
             }
             if (serverEntries.isEmpty() && sawInvalidSession) {
                 throw ApiFailure(20010, lastInvalidMsg.ifBlank { "登录态需刷新" })
@@ -1566,8 +1717,8 @@ suspend fun MusicApiRepository.fetchDailyRecommendHistoryList(): List<DailyHisto
     val byIsoDate = LinkedHashMap<LocalDate, DailyHistoryEntry>()
     val unmatchedServerEntries = mutableListOf<DailyHistoryEntry>()
     for (entry in serverEntries) {
-        val parsedDate = extractIsoDateFromText(entry.dateLabel, todayDate.year)
-            ?: extractIsoDateFromText(entry.historyName, todayDate.year)
+        val parsedDate = extractIsoDateFromText(entry.dateLabel, todayDate.year, todayDate)
+            ?: extractIsoDateFromText(entry.historyName, todayDate.year, todayDate)
         if (parsedDate != null) {
             if (parsedDate.isBefore(todayDate)) {
                 val compact = formatCompactDate(parsedDate)
@@ -1592,7 +1743,7 @@ suspend fun MusicApiRepository.fetchDailyRecommendHistoryList(): List<DailyHisto
     }.getOrDefault(emptyList())
     for (cDate in localDates) {
         if (cDate == todayCompact || cDate.length != 8) continue
-        val parsed = extractIsoDateFromText(cDate, todayDate.year) ?: continue
+        val parsed = extractIsoDateFromText(cDate, todayDate.year, todayDate) ?: continue
         if (!parsed.isBefore(todayDate)) continue
         if (!byIsoDate.containsKey(parsed)) {
             val cachedSongs = runCatching {
@@ -1609,13 +1760,83 @@ suspend fun MusicApiRepository.fetchDailyRecommendHistoryList(): List<DailyHisto
         }
     }
 
+    // 若服务端 mode=list 仅返回了不足 6 天历史（常见仅返回今日+前5天导致总计仅6天），
+    // 利用服务端真实 history_name 前缀对近 6 天窗口内缺失的日期（如第 7 天 d-6）发起真实曲目探测：
+    // 仅当服务端 mode=song 确实返回非空真实歌曲时才纳入历史列表并顺手落盘快照，绝不伪造无数据空日期！
+    if (byIsoDate.size < MAX_PAST_DAILY_HISTORY_DAYS && serverEntries.isNotEmpty()) {
+        val historyPrefix = extractDailyHistoryNamePrefix(serverEntries)
+        val missingPastDates = (1L..MAX_PAST_DAILY_HISTORY_DAYS.toLong())
+            .map { todayDate.minusDays(it) }
+            .filter { it !in byIsoDate }
+        if (missingPastDates.isNotEmpty()) {
+            val probedEntries = suspendRunCatching {
+                auth { ctx ->
+                    val session = ctx.session
+                    coroutineScope {
+                        missingPastDates.map { candidateDate ->
+                            async {
+                                val compact = formatCompactDate(candidateDate)
+                                val probeHistoryName = if (!historyPrefix.isNullOrBlank()) "${historyPrefix}$compact" else ""
+                                suspend fun probePlatform(platform: String): List<Song> {
+                                    val query = linkedMapOf(
+                                        "mode" to "song",
+                                        "platform" to platform,
+                                        "date" to compact
+                                    )
+                                    if (probeHistoryName.isNotBlank()) {
+                                        query["history_name"] = probeHistoryName
+                                    }
+                                    val resp = suspendRunCatching {
+                                        transport.call(
+                                            path = "/everyday/api/v1/get_history",
+                                            session = session,
+                                            method = "POST",
+                                            query = query,
+                                            headers = mapOf("x-router" to "everydayrec.service.kugou.com")
+                                        )
+                                    }.getOrNull() ?: return emptyList()
+                                    if (resp.code == 20010) return emptyList()
+                                    val fromData = parseSongs(resp.data)
+                                    return if (fromData.isNotEmpty()) fromData else parseSongs(resp.body)
+                                }
+
+                                val rawSongs = probePlatform("ios").ifEmpty { probePlatform("android") }
+                                if (rawSongs.isNotEmpty()) {
+                                    val enriched = suspendRunCatching { enrichSongsPrivilegeLite(rawSongs) }.getOrDefault(rawSongs)
+                                    runCatching {
+                                        com.concept.music.data.vip.VipManager.discoverCache.saveDailyRecommendHistorySnapshot(
+                                            activeUid,
+                                            compact,
+                                            enriched
+                                        )
+                                    }
+                                    candidateDate to DailyHistoryEntry(
+                                        historyName = probeHistoryName.ifBlank { compact },
+                                        dateLabel = candidateDate.toString(),
+                                        displayTitle = formatChineseHistoryDisplayTitle(candidateDate, todayDate),
+                                        compactDate = compact
+                                    )
+                                } else {
+                                    null
+                                }
+                            }
+                        }.awaitAll().filterNotNull()
+                    }
+                }
+            }.getOrDefault(emptyList())
+            for ((date, entry) in probedEntries) {
+                byIsoDate.putIfAbsent(date, entry)
+            }
+        }
+    }
+
     if (byIsoDate.isEmpty() && unmatchedServerEntries.isNotEmpty()) {
-        return unmatchedServerEntries.distinctBy { it.historyName }.take(7)
+        return unmatchedServerEntries.distinctBy { it.historyName }.take(MAX_PAST_DAILY_HISTORY_DAYS)
     }
 
     return byIsoDate.entries
         .sortedByDescending { it.key }
-        .take(7)
+        .take(MAX_PAST_DAILY_HISTORY_DAYS)
         .map { it.value }
 }
 

@@ -567,10 +567,18 @@ class MusicApiRepository(
             } else {
                 (item.text("global_collection_id") ?: "").ifBlank { listCreateGid }
             }
+            val rawPic = item.text("pic") ?: item.text("cover")
+            val resolvedCoverUrl = imageUrl(rawPic)
+            val isExplicitCustomCover = !rawPic.isNullOrBlank() && (
+                item.number("is_custom_pic") == 1 ||
+                    item.number("custom_pic") == 1 ||
+                    Playlist.isCustomPlaylistCoverUrl(rawPic) ||
+                    Playlist.isCustomPlaylistCoverUrl(resolvedCoverUrl)
+                )
             val basePl = Playlist(
                 id = global.ifBlank { listCreateListid.ifBlank { listId.toString() } },
                 title = name,
-                coverUrl = imageUrl(item.text("pic") ?: item.text("cover")),
+                coverUrl = resolvedCoverUrl,
                 trackCount = item.number("count") ?: 0,
                 isCreatedByMe = !isFav,
                 isFavorite = isFav,
@@ -580,7 +588,8 @@ class MusicApiRepository(
                 totalVersion = item.text("total_ver")?.toLongOrNull()?.takeIf { it > 0L } ?: topTotalVer,
                 listCreateUserid = listCreateUserid,
                 listCreateListid = listCreateListid,
-                listCreateGid = listCreateGid
+                listCreateGid = listCreateGid,
+                hasCustomCover = isExplicitCustomCover
             )
             if (!isFav) {
                 basePl
@@ -7558,14 +7567,24 @@ class MusicApiRepository(
         val batchCount = runCatching {
             addSongsToPlaylistBatch(targetPlaylist.listId, songs)
         }.getOrDefault(0)
-        if (batchCount > 0) return@auth batchCount
-
-        var importedCount = 0
-        for (song in songs) {
-            val added = runCatching { addSongToPlaylist(targetPlaylist.listId, song) }.getOrDefault(false)
-            if (added) importedCount++
+        val finalCount = if (batchCount > 0) {
+            batchCount
+        } else {
+            var importedCount = 0
+            for (song in songs) {
+                val added = runCatching { addSongToPlaylist(targetPlaylist.listId, song) }.getOrDefault(false)
+                if (added) importedCount++
+            }
+            importedCount
         }
-        importedCount
+        if (finalCount > 0) {
+            suspendRunCatching {
+                resolveLatestCloudSongCoverForPlaylistSync(songs)?.let { coverUrl ->
+                    syncPlaylistSongCoverOnCloud(targetPlaylist, coverUrl)
+                }
+            }
+        }
+        finalCount
     }
 
     // 外部歌单文本批量匹配导入
@@ -7579,17 +7598,24 @@ class MusicApiRepository(
             userPlaylists().firstOrNull { it.isCreatedByMe && it.title == cleanName }
         }.getOrNull() ?: return@auth 0
 
-        var importedCount = 0
+        val importedSongs = mutableListOf<Song>()
         for (line in cleanLines) {
             val matchedSong = runCatching {
                 searchSongs(line, page = 1, pageSize = 3).songs.firstOrNull()
             }.getOrNull()
             if (matchedSong != null) {
                 val added = runCatching { addSongToPlaylist(targetPlaylist.listId, matchedSong) }.getOrDefault(false)
-                if (added) importedCount++
+                if (added) importedSongs.add(matchedSong)
             }
         }
-        importedCount
+        if (importedSongs.isNotEmpty()) {
+            suspendRunCatching {
+                resolveLatestCloudSongCoverForPlaylistSync(importedSongs.asReversed())?.let { coverUrl ->
+                    syncPlaylistSongCoverOnCloud(targetPlaylist, coverUrl)
+                }
+            }
+        }
+        importedSongs.size
     }
 
     @Volatile

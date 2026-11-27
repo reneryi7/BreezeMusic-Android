@@ -34,6 +34,7 @@ import java.nio.ByteOrder
 class ExtendedFeaturesAndAuditRegressionTest {
 
     private fun loggedInRepo(
+        userId: String = "10086",
         handler: (path: String, query: Map<String, String>, body: JsonObject?, host: String, method: String) -> ApiResponse = { _, _, _, _, _ ->
             ApiResponse(JsonObject())
         },
@@ -43,8 +44,8 @@ class ExtendedFeaturesAndAuditRegressionTest {
     ): Pair<MusicApiRepository, MutableList<String>> {
         val calledPaths = mutableListOf<String>()
         val store = MemoryStore()
-        val session = KugouSession(userId = "10086", token = "mock_token_xyz_123", t1 = "mock_t1")
-        val profile = AccountProfile(userId = "10086", nickname = "微风测试号")
+        val session = KugouSession(userId = userId, token = "mock_token_xyz_123", t1 = "mock_t1")
+        val profile = AccountProfile(userId = userId, nickname = "微风测试号")
         store.saveAccounts(listOf(SavedAccount(userId = session.userId, nickname = profile.nickname)))
         store.saveSession(session)
         store.setActive(session.userId)
@@ -1299,5 +1300,107 @@ class ExtendedFeaturesAndAuditRegressionTest {
         runCatching { repoC.fetchContentBlacklist("song") }
         assertEquals("当权威 /v5/login_by_token 自身报 20010 时应正确进入 NEEDS_LOGIN", AuthState.NEEDS_LOGIN, accountsC.state.value.auth)
         assertTrue(accountsC.state.value.current?.needsLogin == true)
+    }
+
+    @Test
+    fun testDailyRecommendSevenDayHistoryProbeUniformLabelsAndFixedPopupGuard() = runTest {
+        val todayDate = java.time.LocalDate.now(CHINA_ZONE)
+        val fmtCompact: (java.time.LocalDate) -> String = { d ->
+            String.format(java.util.Locale.US, "%04d%02d%02d", d.year, d.monthValue, d.dayOfMonth)
+        }
+        val prefix = "RT_54365348a1b2c3d4e5f60718293a4b5c_"
+        val d0 = fmtCompact(todayDate)
+        val d1 = fmtCompact(todayDate.minusDays(1))
+        val d2 = fmtCompact(todayDate.minusDays(2))
+        val d3 = fmtCompact(todayDate.minusDays(3))
+        val d4 = fmtCompact(todayDate.minusDays(4))
+        val d5 = fmtCompact(todayDate.minusDays(5))
+        val d6 = fmtCompact(todayDate.minusDays(6))
+
+        var probedDay6 = false
+        val (repo, _) = loggedInRepo(
+            userId = "70077",
+            handler = { path, query, _, _, _ ->
+                if (path == "/everyday/api/v1/get_history") {
+                    if (query["mode"] == "list") {
+                        // 模拟服务端 mode=list 仅下发 6 条含今日（导致历史仅有 5 天、含今日总共仅 6 天）的真实场景
+                        ApiResponse(
+                            JsonParser.parseString(
+                                """
+                                {
+                                  "status": 1,
+                                  "data": {
+                                    "lists": [
+                                      {"history_name": "${prefix}$d0", "date": "$d0"},
+                                      {"history_name": "${prefix}$d1", "date": "$d1"},
+                                      {"history_name": "${prefix}$d2", "date": "$d2"},
+                                      {"history_name": "${prefix}$d3", "date": "$d3"},
+                                      {"history_name": "${prefix}$d4", "date": "$d4"},
+                                      {"history_name": "${prefix}$d5", "date": "$d5"}
+                                    ]
+                                  }
+                                }
+                                """.trimIndent()
+                            ).asJsonObject
+                        )
+                    } else if (query["mode"] == "song" && query["date"] == d6 && query["history_name"] == "${prefix}$d6") {
+                        probedDay6 = true
+                        ApiResponse(
+                            JsonParser.parseString(
+                                """{"status":1,"data":{"song_list":[{"hash":"dddd6666dddd6666dddd6666dddd6666","songname":"晴天","author_name":"周杰伦","time_length":269}]}}"""
+                            ).asJsonObject
+                        )
+                    } else {
+                        ApiResponse(JsonParser.parseString("""{"status":1,"data":{"song_list":[]}}""").asJsonObject)
+                    }
+                } else {
+                    ApiResponse(JsonParser.parseString("""{"status":1,"data":{}}""").asJsonObject)
+                }
+            }
+        )
+
+        // 1. 当服务端 mode=list 仅返回今日+前5天时，自动探测第 6 天历史 (d-6) 并补全为完整 6 天历史（含今日共 7 天）
+        val entries = repo.fetchDailyRecommendHistoryList()
+        assertTrue("应使用真实前缀向服务端探测第 7 天 (d-6) 曲目", probedDay6)
+        assertEquals("含今日一共 7 天时，历史条目应恰好为过去 6 天", 6, entries.size)
+        assertEquals(listOf(d1, d2, d3, d4, d5, d6), entries.map { it.compactDate })
+        assertEquals("${prefix}$d6", entries.last().historyName)
+
+        // 2. 验证 MD5 含 8 位连续数字时仍能准确解析末尾真实日期，且支持跨年回溯
+        assertEquals(
+            java.time.LocalDate.of(2026, 11, 22),
+            extractIsoDateFromText("${prefix}20261122", 2026, java.time.LocalDate.of(2026, 11, 28))
+        )
+        assertEquals(
+            java.time.LocalDate.of(2025, 12, 28),
+            extractIsoDateFromText("12-28", 2026, java.time.LocalDate.of(2026, 1, 2))
+        )
+
+        // 3. 验证全部 7 天文案统一规范（MM-dd 今天/昨天/前天/周X，无多余中点）
+        val fixedToday = java.time.LocalDate.of(2026, 11, 28)
+        val todayTriple = com.concept.music.ui.home.parseDailyHistoryOptionLabels(null, fixedToday)
+        assertEquals(Triple("11-28", "今天", "11-28 今天"), todayTriple)
+
+        val yesterdayEntry = DailyHistoryEntry(historyName = "${prefix}20261127", dateLabel = "2026-11-27", compactDate = "20261127")
+        val dayBeforeEntry = DailyHistoryEntry(historyName = "${prefix}20261126", dateLabel = "2026-11-26", compactDate = "20261126")
+        val sixDaysAgoEntry = DailyHistoryEntry(historyName = "${prefix}20261122", dateLabel = "2026-11-22", compactDate = "20261122")
+        assertEquals(Triple("11-27", "昨天", "11-27 昨天"), com.concept.music.ui.home.parseDailyHistoryOptionLabels(yesterdayEntry, fixedToday))
+        assertEquals(Triple("11-26", "前天", "11-26 前天"), com.concept.music.ui.home.parseDailyHistoryOptionLabels(dayBeforeEntry, fixedToday))
+        assertEquals(Triple("11-22", "周日", "11-22 周日"), com.concept.music.ui.home.parseDailyHistoryOptionLabels(sixDaysAgoEntry, fixedToday))
+
+        // 4. 源码回归守卫：确认每日推荐右上角历史按钮采用固定宽度与 TopEnd 固定锚点 Popup（不再使用易漂移的 DropdownMenu）
+        val homeScreenFile = listOf(
+            java.io.File("src/main/java/com/concept/music/ui/home/HomeScreen.kt"),
+            java.io.File("app/src/main/java/com/concept/music/ui/home/HomeScreen.kt")
+        ).firstOrNull { it.exists() }
+        assertNotNull("应能定位 HomeScreen.kt", homeScreenFile)
+        val src = homeScreenFile!!.readText()
+        val selectorIdx = src.indexOf("private fun DailyHistoryDateSelectorButton")
+        assertTrue("HomeScreen 应包含 DailyHistoryDateSelectorButton", selectorIdx > 0)
+        val selectorBody = src.substring(selectorIdx, (selectorIdx + 7500).coerceAtMost(src.length))
+        assertTrue("历史日期按钮必须使用固定宽度防止切换日期位移", selectorBody.contains(".width(120.dp)"))
+        assertTrue("历史日期弹窗必须锁死 TopEnd 右上角锚点", selectorBody.contains("alignment = Alignment.TopEnd"))
+        assertTrue("历史日期弹窗必须使用固定宽度", selectorBody.contains(".width(164.dp)"))
+        assertFalse("历史日期切换不应再使用会随宽度偏移的 DropdownMenu", selectorBody.contains("DropdownMenu("))
     }
 }

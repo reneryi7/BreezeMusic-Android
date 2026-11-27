@@ -21,7 +21,8 @@ data class Playlist(
     val listCreateListid: String = "",
     val listCreateGid: String = "",
     val specialId: String = "",
-    val isLocalOnly: Boolean = false
+    val isLocalOnly: Boolean = false,
+    val hasCustomCover: Boolean = false
 ) {
     val songCount: Int get() = trackCount
 
@@ -32,6 +33,13 @@ data class Playlist(
     /** 是否为酷狗系统遗留的「默认收藏」歌单（is_def = 1） */
     val isDefaultCollect: Boolean
         get() = title.trim() == "默认收藏"
+
+    /**
+     * 当前歌单是否已显式设置自定义封面（云端 custom 图床或本机受管自定义覆盖）；
+     * 空白封面与歌曲自动同步封面 (`stdmusic/...`) 均返回 false，允许添加新歌时自动同步最新歌曲封面。
+     */
+    val isCustomCoverApplied: Boolean
+        get() = hasCustomCover || isCustomPlaylistCoverUrl(coverUrl)
 
     /**
      * 解析酷狗云端歌单的数字 listid（支持从 listId、listCreateListid 及 collection_3_{uid}_{listid}_0 中提取）
@@ -117,24 +125,47 @@ data class Playlist(
     }
 
     @Suppress("USELESS_ELVIS")
-    fun sanitizeFromJson(): Playlist = Playlist(
-        id = (id as String?) ?: "",
-        title = (title as String?) ?: "",
-        coverUrl = (coverUrl as String?) ?: "",
-        trackCount = trackCount,
-        playCount = (playCount as String?) ?: "",
-        description = (description as String?) ?: "",
-        creatorName = (creatorName as String?) ?: "",
-        isCreatedByMe = isCreatedByMe,
-        isFavorite = isFavorite,
-        isLiked = isLiked,
-        listId = listId,
-        globalCollectionId = (globalCollectionId as String?) ?: "",
-        totalVersion = totalVersion,
-        listCreateUserid = (listCreateUserid as String?) ?: "",
-        listCreateListid = (listCreateListid as String?) ?: "",
-        listCreateGid = (listCreateGid as String?) ?: "",
-        specialId = (specialId as String?) ?: "",
-        isLocalOnly = isLocalOnly || ((id as String?)?.startsWith("local_pl_") == true)
-    )
+    fun sanitizeFromJson(): Playlist {
+        val safeCoverUrl = (coverUrl as String?) ?: ""
+        return Playlist(
+            id = (id as String?) ?: "",
+            title = (title as String?) ?: "",
+            coverUrl = safeCoverUrl,
+            trackCount = trackCount,
+            playCount = (playCount as String?) ?: "",
+            description = (description as String?) ?: "",
+            creatorName = (creatorName as String?) ?: "",
+            isCreatedByMe = isCreatedByMe,
+            isFavorite = isFavorite,
+            isLiked = isLiked,
+            listId = listId,
+            globalCollectionId = (globalCollectionId as String?) ?: "",
+            totalVersion = totalVersion,
+            listCreateUserid = (listCreateUserid as String?) ?: "",
+            listCreateListid = (listCreateListid as String?) ?: "",
+            listCreateGid = (listCreateGid as String?) ?: "",
+            specialId = (specialId as String?) ?: "",
+            isLocalOnly = isLocalOnly || ((id as String?)?.startsWith("local_pl_") == true),
+            hasCustomCover = hasCustomCover || isCustomPlaylistCoverUrl(safeCoverUrl)
+        )
+    }
+
+    companion object {
+        /**
+         * 判断封面 URL / 云端相对路径是否属于「用户自定义歌单封面」：
+         * - 命中酷狗自定义图床路径 (`custom/...` / `.../custom/...` / `.../userpic/...` / `.../ugc/...`)
+         *   或本机自定义覆盖目录 (`/custom_playlist_covers/`) 返回 true；
+         * - 空白串、歌曲封面 (`stdmusic/...`)、本地音频内嵌封面等均返回 false。
+         */
+        fun isCustomPlaylistCoverUrl(rawUrl: String?): Boolean {
+            val clean = rawUrl?.trim().orEmpty()
+            if (clean.isEmpty()) return false
+            val lower = clean.lowercase()
+            if (lower.contains("/custom_playlist_covers/")) return true
+            if (lower.startsWith("custom/") || lower.contains("/custom/")) return true
+            if (lower.startsWith("userpic/") || lower.contains("/userpic/")) return true
+            if (lower.startsWith("ugc/") || lower.contains("/ugc/")) return true
+            return false
+        }
+    }
 }

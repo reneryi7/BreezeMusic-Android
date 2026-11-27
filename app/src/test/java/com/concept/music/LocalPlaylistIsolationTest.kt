@@ -163,10 +163,21 @@ class LocalPlaylistIsolationTest {
             assertEquals(2, created.trackCount)
             assertEquals(l1.coverUrl, created.coverUrl)
 
-            // 增歌去重
+            // 增歌去重，且封面应自动同步为最新加入歌曲的封面
             val added = repo.addSongsToLocalPlaylist(created.id, listOf(l2, l3))
             assertEquals(1, added)
             assertEquals(listOf(l3.id, l1.id, l2.id), repo.getLocalPlaylistTracks(created.id).map { it.id })
+            assertEquals(
+                "纯本地歌单添加新歌后封面应自动更新为最新歌曲封面",
+                l3.coverUrl,
+                repo.getLocalPlaylist(created.id)?.coverUrl
+            )
+
+            // 新增无封面的本地歌曲时，应回退保留前排已有封面而不置空
+            val noCoverSong = sampleLocalSong(99, title = "无封面无损").copy(coverUrl = "")
+            assertEquals(1, repo.addSongsToLocalPlaylist(created.id, listOf(noCoverSong)))
+            assertEquals(l3.coverUrl, repo.getLocalPlaylist(created.id)?.coverUrl)
+            assertEquals(1, repo.removeSongsFromLocalPlaylist(created.id, listOf(noCoverSong)))
 
             // 重命名、修改简介与排序
             assertTrue(repo.updateLocalPlaylistMeta(created.id, "Hi-Res 私藏", "仅本机保存"))

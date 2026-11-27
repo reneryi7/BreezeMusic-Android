@@ -4,10 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.kugou.LocalBlacklistFilter
+import com.concept.music.data.kugou.MAX_PAST_DAILY_HISTORY_DAYS
 import com.concept.music.data.kugou.fetchDailyRecommendHistoryList
 import com.concept.music.data.kugou.fetchDailyRecommendHistorySongs
 import com.concept.music.data.kugou.sendPersonalFmFeedback
 import com.concept.music.data.kugou.suspendRunCatching
+import com.concept.music.data.kugou.today
 import com.concept.music.data.model.BlacklistEntry
 import com.concept.music.data.model.DailyHistoryEntry
 import com.concept.music.data.model.FmChannel
@@ -772,17 +774,22 @@ class HomeViewModel : ViewModel() {
         }
     }
 
+    private var loadedDailyHistoryDay: String? = null
+
     /**
-     * 加载真实历史每日推荐日期列表（仅返回服务端真实批次与本机已存档的过去日推，绝不伪造无数据日期）
+     * 加载真实历史每日推荐日期列表（过去最多 6 天 + 今日 = 完整 7 天，仅返回服务端真实批次与本机已存档的过去日推，绝不伪造无数据日期）
      */
     fun loadDailyHistoryList(force: Boolean = false) {
-        if (!force && _dailyHistoryEntries.value.isNotEmpty()) return
+        val todayKey = today()
+        val dayRolledOver = loadedDailyHistoryDay != null && loadedDailyHistoryDay != todayKey
+        if (!force && !dayRolledOver && _dailyHistoryEntries.value.isNotEmpty()) return
         if (accountState.value.auth != AuthState.READY) return
         val uid = accountState.value.currentId
         viewModelScope.launch(Dispatchers.IO) {
             val entries = suspendRunCatching { VipManager.music.fetchDailyRecommendHistoryList() }.getOrDefault(emptyList())
             if (accountState.value.currentId == uid) {
-                _dailyHistoryEntries.value = entries.take(7)
+                loadedDailyHistoryDay = todayKey
+                _dailyHistoryEntries.value = entries.take(MAX_PAST_DAILY_HISTORY_DAYS)
             }
         }
     }

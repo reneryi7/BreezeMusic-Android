@@ -338,7 +338,7 @@ class DiscoverLocalCache(context: Context? = null) {
         saveSongList("daily_rec_${userId ?: "guest"}", songs)
 
     /**
-     * 按账号 + 8位日期 (yyyyMMdd) 归档当日真实日推曲目快照（最多保留最近 7 天，用于历史回溯真实兜底）
+     * 按账号 + 8位日期 (yyyyMMdd) 归档当日真实日推曲目快照（最多保留最近 10 天，保证含今日在内完整 7 天回溯不断档）
      */
     fun saveDailyRecommendHistorySnapshot(userId: String?, compactDate: String, songs: List<Song>) {
         val cleanDate = compactDate.filter { it.isDigit() }
@@ -352,8 +352,8 @@ class DiscoverLocalCache(context: Context? = null) {
         existing.remove(cleanDate)
         existing.add(0, cleanDate)
         val sorted = existing.distinct().sortedDescending()
-        val kept = sorted.take(7)
-        val dropped = sorted.drop(7)
+        val kept = sorted.take(10)
+        val dropped = sorted.drop(10)
         memoryDailyHistoryIndex[idxKey] = kept
         cacheIoScope.launch {
             runCatching {

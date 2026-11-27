@@ -358,8 +358,9 @@ fun PlaylistDetailScreen(
                 } else null
                 val chosen = directMatch ?: fallbackMatch
                 if (chosen != null && lastKnownPlaylist != null) {
+                    val hasAnyTracks = chosen.trackCount > 0 || songs.isNotEmpty()
                     chosen.copy(
-                        coverUrl = chosen.coverUrl.ifBlank { lastKnownPlaylist!!.coverUrl },
+                        coverUrl = chosen.coverUrl.ifBlank { if (hasAnyTracks) lastKnownPlaylist!!.coverUrl else "" },
                         description = chosen.description.ifBlank { lastKnownPlaylist!!.description },
                         creatorName = chosen.creatorName.ifBlank { lastKnownPlaylist!!.creatorName },
                         trackCount = if (chosen.trackCount > 0) chosen.trackCount else lastKnownPlaylist!!.trackCount
@@ -370,7 +371,7 @@ fun PlaylistDetailScreen(
             }
         }
         if (matched != null && matched.coverUrl.isBlank() && songs.isNotEmpty()) {
-            matched.copy(coverUrl = songs.firstOrNull()?.coverUrl.orEmpty())
+            matched.copy(coverUrl = songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty())
         } else {
             matched
         }
@@ -412,6 +413,14 @@ fun PlaylistDetailScreen(
             playlist = currentPlaylist,
             fallbackPlaylistId = playlistId,
             fallbackSongCover = songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty(),
+            overrides = customCoverOverrides
+        )
+    }
+
+    val hasCustomPlaylistCover = remember(currentPlaylist, playlistId, customCoverOverrides) {
+        viewModel.hasCustomPlaylistCover(
+            playlist = currentPlaylist,
+            fallbackPlaylistId = playlistId,
             overrides = customCoverOverrides
         )
     }
@@ -1168,8 +1177,22 @@ fun PlaylistDetailScreen(
                     iconOnlySaveButton = false,
                     accentColor = previewAccent,
                     canChangeCover = canEditCover,
+                    hasCustomCover = hasCustomPlaylistCover,
                     isUpdatingCover = isUpdatingPlaylistCover,
                     onChangeCoverClick = launchCoverPicker,
+                    onResetCustomCoverClick = {
+                        if (!isUpdatingPlaylistCover) {
+                            isUpdatingPlaylistCover = true
+                            viewModel.resetPlaylistCustomCover(
+                                playlist = currentPlaylist,
+                                fallbackPlaylistId = playlistId,
+                                fallbackSongs = songs
+                            ) { _, msg ->
+                                isUpdatingPlaylistCover = false
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
                     placeholderIcon = if (isLikedPlaylist) Icons.Rounded.Favorite else Icons.Rounded.MusicNote,
                     placeholderGradientColors = previewGradient,
                     onDismiss = { if (!isUpdatingPlaylistCover) showPlaylistCoverPreview = false }

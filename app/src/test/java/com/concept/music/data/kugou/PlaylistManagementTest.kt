@@ -513,4 +513,191 @@ class PlaylistManagementTest {
         )
         assertEquals(listOf("1", "3"), filtered.map { it.id })
     }
+
+    @Test
+    fun normalizeStdMusicPicPathAndCustomCoverDetection() {
+        // 标准歌曲封面 URL 与相对路径均归一化为 stdmusic/<FileName>
+        assertEquals(
+            "stdmusic/20250217144212257577.jpg",
+            normalizeKugouStdMusicPicPath("https://imge.kugou.com/stdmusic/400/20250217/20250217144212257577.jpg")
+        )
+        assertEquals(
+            "stdmusic/20210111184454391203.jpg",
+            normalizeKugouStdMusicPicPath("http://imge.kugou.com/stdmusic/{size}/20210111/20210111184454391203.jpg?t=1")
+        )
+        assertEquals(
+            "stdmusic/20210111184454391203.jpg",
+            normalizeKugouStdMusicPicPath("stdmusic/20210111/20210111184454391203.jpg")
+        )
+        assertEquals(
+            "stdmusic/20210111184454391203.jpg",
+            normalizeKugouStdMusicPicPath("stdmusic/20210111184454391203.jpg")
+        )
+
+        // 拒绝本地路径、歌手头像、自定义图床及非酷狗域名
+        assertNull(normalizeKugouStdMusicPicPath(""))
+        assertNull(normalizeKugouStdMusicPicPath("file:///cache/local_cover_1.jpg"))
+        assertNull(normalizeKugouStdMusicPicPath("content://media/external/audio/albumart/12"))
+        assertNull(normalizeKugouStdMusicPicPath("https://imge.kugou.com/custom/400/202611270088.jpg"))
+        assertNull(normalizeKugouStdMusicPicPath("https://imge.kugou.com/singerimg/400/20250101/artist.jpg"))
+        assertNull(normalizeKugouStdMusicPicPath("https://example.com/stdmusic/400/fake.jpg"))
+
+        // 自定义封面识别：仅 custom / 本机 custom_playlist_covers / hasCustomCover 为 true，空白与 stdmusic 均为 false
+        assertFalse(Playlist(id = "1", title = "新建无封面", coverUrl = "").isCustomCoverApplied)
+        assertFalse(
+            Playlist(
+                id = "2",
+                title = "歌曲封面同步歌单",
+                coverUrl = "https://imge.kugou.com/stdmusic/400/20250217/20250217144212257577.jpg"
+            ).isCustomCoverApplied
+        )
+        assertFalse(
+            Playlist(
+                id = "3",
+                title = "本地歌单自动封面",
+                coverUrl = "file:///data/user/0/com.concept.music/cache/local_music_covers/t1.jpg",
+                isLocalOnly = true
+            ).isCustomCoverApplied
+        )
+        assertTrue(
+            Playlist(
+                id = "4",
+                title = "云端自定义封面",
+                coverUrl = "https://imge.kugou.com/custom/400/202611270088.jpg"
+            ).isCustomCoverApplied
+        )
+        assertTrue(
+            Playlist(
+                id = "5",
+                title = "本机覆盖自定义封面",
+                coverUrl = "file:///data/user/0/com.concept.music/files/custom_playlist_covers/cover_1.jpg"
+            ).isCustomCoverApplied
+        )
+    }
+
+    @Test
+    fun syncPlaylistSongCoverOnCloudUsesModifyListPicWithTotalVerFallbackAndRespectsLocalGuard() = runTest {
+        val capturedPaths = mutableListOf<String>()
+        val capturedRouters = mutableListOf<String>()
+        var modifyPicAttempts = 0
+
+        val transport = object : KugouTransport {
+            override suspend fun call(
+                path: String,
+                session: KugouSession?,
+                query: Map<String, String>,
+                body: JsonObject?,
+                host: String,
+                method: String,
+                web: Boolean,
+                headers: Map<String, String>,
+                device: DeviceIdentity?
+            ): ApiResponse {
+                capturedPaths.add(path)
+                return when (path) {
+                    "/v7/get_all_list" -> ApiResponse(
+                        JsonParser.parseString(
+                            """
+                            {
+                              "status": 1,
+                              "data": {
+                                "total_ver": 888,
+                                "info": [
+                                  {"listid": 1001, "name": "无封面歌单", "pic": "", "count": 1, "type": 0},
+                                  {"listid": 1002, "name": "歌曲封面歌单", "pic": "stdmusic/20250101000001.jpg", "count": 2, "type": 0},
+                                  {"listid": 1003, "name": "自定义封面歌单", "pic": "custom/202611270088.jpg", "count": 3, "type": 0}
+                                ]
+                              }
+                            }
+                            """.trimIndent()
+                        ).asJsonObject
+                    )
+                    "/cloudlist.service/v5/add_list", "/cloudlist.service/v6/add_song" ->
+                        ApiResponse(JsonParser.parseString("""{"status":1,"data":{"listid":1001}}""").asJsonObject)
+                    else -> ApiResponse(JsonObject())
+                }
+            }
+
+            override suspend fun requestBinaryBytes(
+                path: String,
+                session: KugouSession?,
+                query: Map<String, String>,
+                rawBodyBytes: ByteArray?,
+                host: String,
+                method: String,
+                headers: Map<String, String>,
+                sign: Boolean,
+                includeDefaultParams: Boolean,
+                device: DeviceIdentity?
+            ): ByteArray {
+                capturedPaths.add(path)
+                capturedRouters.add(headers["x-router"].orEmpty())
+                if (path == "/v1/modify_list_pic") {
+                    modifyPicAttempts++
+                    assertFalse("加密请求应包含 RSA 参数 p", query["p"].isNullOrBlank())
+                    assertTrue("加密请求体不应为空", (rawBodyBytes?.size ?: 0) > 0)
+                    // 模拟首次 total_ver 过期失败，第二次 total_ver=0 兜底成功
+                    return if (modifyPicAttempts == 1) {
+                        """{"status":0,"err_code":1002}""".toByteArray(Charsets.UTF_8)
+                    } else {
+                        """{"status":1,"err_code":0}""".toByteArray(Charsets.UTF_8)
+                    }
+                }
+                return """{"status":1,"err_code":0}""".toByteArray(Charsets.UTF_8)
+            }
+        }
+
+        val store = MemoryStore()
+        val auth = AuthRepository(transport, store)
+        val accounts = AccountRepository(store, auth, transport)
+        val repo = MusicApiRepository(transport, accounts)
+        store.saveSession(KugouSession("123", "mock-token"))
+
+        // 1. 验证 userPlaylists 准确识别自定义封面与非自定义封面
+        val playlists = repo.userPlaylists()
+        val emptyCoverPl = playlists.first { it.listId == 1001L }
+        val stdCoverPl = playlists.first { it.listId == 1002L }
+        val customCoverPl = playlists.first { it.listId == 1003L }
+        assertFalse(emptyCoverPl.isCustomCoverApplied)
+        assertFalse(stdCoverPl.isCustomCoverApplied)
+        assertTrue(customCoverPl.isCustomCoverApplied)
+
+        // 2. 验证同步歌曲封面到云端：走 /v1/modify_list_pic + cloudlist 路由 + 自动重试兜底
+        val synced = repo.syncPlaylistSongCoverOnCloud(
+            playlist = emptyCoverPl,
+            songCoverUrl = "https://imge.kugou.com/stdmusic/400/20250217/20250217144212257577.jpg"
+        )
+        assertTrue("云端歌单歌曲封面同步应在兜底重试后成功", synced)
+        assertEquals(2, modifyPicAttempts)
+        assertTrue(capturedRouters.all { it == "cloudlist.service.kugou.com" })
+
+        // 3. 验证纯本地歌单与本地封面绝不触发任何云端请求
+        val beforeCalls = capturedPaths.size
+        val localPl = Playlist(id = "local_pl_99", title = "本地歌单", isLocalOnly = true, listId = 1001L)
+        assertFalse(
+            repo.syncPlaylistSongCoverOnCloud(
+                playlist = localPl,
+                songCoverUrl = "https://imge.kugou.com/stdmusic/400/20250217/20250217144212257577.jpg"
+            )
+        )
+        assertFalse(
+            repo.syncPlaylistSongCoverOnCloud(
+                playlist = emptyCoverPl,
+                songCoverUrl = "file:///cache/local_track_cover.jpg"
+            )
+        )
+        assertEquals("纯本地歌单或本地图片路径严禁触发云端请求", beforeCalls, capturedPaths.size)
+
+        // 4. 验证导入歌单时自动将歌曲封面同步至云端
+        val songWithCover = Song(
+            id = "s_imp_1",
+            hash = "E7B82245C4B40B5DB3884D7759086111",
+            title = "晴天",
+            artist = "周杰伦",
+            coverUrl = "https://imge.kugou.com/stdmusic/400/20250217/20250217144212257577.jpg"
+        )
+        val imported = repo.importPlaylistSongsDirect("无封面歌单", listOf(songWithCover))
+        assertEquals(1, imported)
+        assertTrue("导入歌单后应自动触发 /v1/modify_list_pic 同步封面", modifyPicAttempts >= 3)
+    }
 }

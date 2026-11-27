@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.Song
+import com.concept.music.data.vip.VipManager
 import com.concept.music.ui.theme.ConceptAnimatedOverlaySheet
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.conceptCyanAccentColor
@@ -44,9 +45,23 @@ fun AddToPlaylistDialog(
     headerSubtitleOverride: String? = null,
     createPlaylistHint: String? = null
 ) {
-    // 仅保留用户自建的歌单（排除“我喜欢”和历史，排除收藏的他人歌单）
-    val customPlaylists = remember(playlists) {
+    // 仅保留用户自建的歌单（排除“我喜欢”和历史，排除收藏的他人歌单），并实时叠加本机自定义封面覆盖
+    val coverOverrides by VipManager.playlistCoverOverrides.overrides.collectAsState()
+    val currentUserId = runCatching { VipManager.accounts.state.value.currentId }.getOrNull()
+    val customPlaylists = remember(playlists, coverOverrides, currentUserId) {
         playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isDefaultCollect && it.id != "like" && it.id != "history" }
+            .map { pl ->
+                val overrideCover = VipManager.playlistCoverOverrides.resolveOverrideCoverUri(
+                    userId = currentUserId,
+                    playlist = pl,
+                    snapshot = coverOverrides
+                )
+                if (!overrideCover.isNullOrBlank() && overrideCover != pl.coverUrl) {
+                    pl.copy(coverUrl = overrideCover)
+                } else {
+                    pl
+                }
+            }
     }
     var selectedPendingPlaylist by remember { mutableStateOf<Playlist?>(null) }
 
@@ -264,9 +279,14 @@ fun AddToPlaylistDialog(
                                         .background(MaterialTheme.colorScheme.surfaceVariant),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    if (pl.coverUrl.isNotEmpty()) {
+                                    val plCoverModel = rememberOptimizedAsyncImageModel(
+                                        rawUrl = pl.coverUrl,
+                                        sizePx = 128,
+                                        targetCdnSize = "150"
+                                    )
+                                    if (plCoverModel != null) {
                                         AsyncImage(
-                                            model = pl.coverUrl,
+                                            model = plCoverModel,
                                             contentDescription = pl.title,
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier.fillMaxSize()

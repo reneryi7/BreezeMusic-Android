@@ -240,14 +240,32 @@ class LocalPlaylistRepository(
         val merged = toAdd + current.songs
         val updated = current.copy(
             songs = merged,
-            coverUrl = current.coverUrl.ifBlank {
-                merged.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
-            },
+            coverUrl = merged.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty(),
             updatedAtMs = System.currentTimeMillis()
         )
         localPlaylists[idx] = updated
         persistToDiskLocked()
         toAdd.size
+    }
+
+    fun refreshLocalPlaylistAutoCover(
+        playlistId: String,
+        localMusicRepo: LocalMusicRepository? = null
+    ): String = synchronized(lock) {
+        val idx = localPlaylists.indexOfFirst { it.id == playlistId }
+        if (idx < 0) return ""
+        val current = localPlaylists[idx]
+        val refreshedSongs = current.songs.map { refreshLocalSongMetadata(it, localMusicRepo) }
+        val resolvedCover = refreshedSongs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+        if (resolvedCover != current.coverUrl || refreshedSongs != current.songs) {
+            localPlaylists[idx] = current.copy(
+                songs = refreshedSongs,
+                coverUrl = resolvedCover,
+                updatedAtMs = System.currentTimeMillis()
+            )
+            persistToDiskLocked()
+        }
+        resolvedCover
     }
 
     fun removeSongsFromLocalPlaylist(playlistId: String, songsToRemove: List<Song>): Int = synchronized(lock) {
@@ -506,9 +524,9 @@ class LocalPlaylistRepository(
             }
         val pureLocal = localPlaylists.map { rec ->
             val refreshedSongs = rec.songs.map { refreshLocalSongMetadata(it, localMusicRepo) }
-            val cover = rec.coverUrl.ifBlank {
-                refreshedSongs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
-            }
+            val cover = refreshedSongs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl
+                ?.ifBlank { rec.coverUrl }
+                ?: rec.coverUrl
             rec.copy(songs = refreshedSongs, coverUrl = cover).toPlaylist()
         }
         val liked = enrichedCloud.filter { it.isLiked }

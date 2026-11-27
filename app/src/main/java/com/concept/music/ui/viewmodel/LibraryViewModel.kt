@@ -587,9 +587,11 @@ class LibraryViewModel(
                             localMusicRepo = VipManager.localMusic
                         )
                         _librarySongs.value = mergedTracks
+                        val firstTrackCover = finalCloudTracks.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+                        val cloudCoverWasBlank = selected.coverUrl.isBlank() && extInfo?.coverUrl.isNullOrBlank()
                         val enriched = selected.copy(
                             description = selected.description.ifBlank { extInfo?.description.orEmpty() },
-                            coverUrl = selected.coverUrl.ifBlank { extInfo?.coverUrl?.ifBlank { finalCloudTracks.firstOrNull()?.coverUrl.orEmpty() } ?: finalCloudTracks.firstOrNull()?.coverUrl.orEmpty() },
+                            coverUrl = selected.coverUrl.ifBlank { extInfo?.coverUrl?.ifBlank { firstTrackCover } ?: firstTrackCover },
                             creatorName = selected.creatorName.ifBlank { extInfo?.creatorName.orEmpty() },
                             trackCount = if (finalCloudTracks.isNotEmpty()) finalCloudTracks.size else if (selected.trackCount > 0) selected.trackCount else (extInfo?.trackCount ?: 0),
                             specialId = selected.specialId.ifBlank { extInfo?.specialId.orEmpty() }
@@ -597,6 +599,14 @@ class LibraryViewModel(
                         VipManager.music.cacheCollectedPlaylistMeta(enriched)
                         val updatedCloud = latestCloudPlaylists.map { if (it.isSamePlaylistAs(selected)) enriched else it }
                         publishCloudPlaylists(userId, updatedCloud, persistToCache = true)
+                        if (cloudCoverWasBlank && selected.isCreatedByMe && !selected.isPureLocalPlaylist && finalCloudTracks.isNotEmpty()) {
+                            syncCloudPlaylistAutoCoverIfNeeded(
+                                uid = userId,
+                                targetPlaylist = selected,
+                                candidateSongs = finalCloudTracks,
+                                onlyWhenBlank = false
+                            )
+                        }
                     } else {
                         val extPlaylist = extInfoDef.await()
                         val trackList = runCatching {
@@ -1018,15 +1028,25 @@ class LibraryViewModel(
                             )
                             _librarySongs.value = mergedTracks
                             val extInfo = extInfoDef?.await()
+                            val firstTrackCover = finalCloudTracks.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+                            val cloudCoverWasBlank = selected.coverUrl.isBlank() && extInfo?.coverUrl.isNullOrBlank()
                             val enriched = selected.copy(
                                 description = selected.description.ifBlank { extInfo?.description.orEmpty() },
-                                coverUrl = selected.coverUrl.ifBlank { extInfo?.coverUrl?.ifBlank { finalCloudTracks.firstOrNull()?.coverUrl.orEmpty() } ?: finalCloudTracks.firstOrNull()?.coverUrl.orEmpty() },
+                                coverUrl = selected.coverUrl.ifBlank { extInfo?.coverUrl?.ifBlank { firstTrackCover } ?: firstTrackCover },
                                 creatorName = selected.creatorName.ifBlank { extInfo?.creatorName.orEmpty() },
                                 trackCount = if (finalCloudTracks.isNotEmpty()) finalCloudTracks.size else if (selected.trackCount > 0) selected.trackCount else (extInfo?.trackCount ?: 0)
                             )
                             VipManager.music.cacheCollectedPlaylistMeta(enriched)
                             val updatedCloud = latestCloudPlaylists.map { if (it.isSamePlaylistAs(selected)) enriched else it }
                             publishCloudPlaylists(userId, updatedCloud, persistToCache = true)
+                            if (cloudCoverWasBlank && selected.isCreatedByMe && !selected.isPureLocalPlaylist && finalCloudTracks.isNotEmpty()) {
+                                syncCloudPlaylistAutoCoverIfNeeded(
+                                    uid = userId,
+                                    targetPlaylist = selected,
+                                    candidateSongs = finalCloudTracks,
+                                    onlyWhenBlank = false
+                                )
+                            }
                         } else if (targetPlaylistId != null) {
                             val extPlaylist = extInfoDef?.await()
                             val trackList = extSongsDef?.await().orEmpty()
@@ -1124,13 +1144,21 @@ class LibraryViewModel(
             }
             delay(260L)
 
-            // 5. 逐个静默预热用户前排自建/收藏歌单曲目
+            // 5. 逐个静默预热用户前排自建/收藏歌单曲目，并为历史无封面的非自定义自建歌单自动回填并同步云端封面
             for (pl in playlists.filter { !it.isLiked }.take(6)) {
                 if (accounts.state.value.currentId != userId) break
                 runCatching {
                     val tracks = VipManager.music.playlistSongs(pl)
                     if (tracks.isNotEmpty() && accounts.state.value.currentId == userId) {
                         VipManager.discoverCache.savePlaylistSongs(pl.id, tracks, allowEmpty = false)
+                        if (pl.isCreatedByMe && !pl.isPureLocalPlaylist && pl.coverUrl.isBlank()) {
+                            syncCloudPlaylistAutoCoverIfNeeded(
+                                uid = userId,
+                                targetPlaylist = pl,
+                                candidateSongs = tracks,
+                                onlyWhenBlank = true
+                            )
+                        }
                     }
                 }
                 delay(240L)
@@ -1405,12 +1433,19 @@ class LibraryViewModel(
                 }
                 val success = runCatching { VipManager.music.removeSongFromPlaylist(likedPl.listId, matchedInLiked) }.getOrDefault(false)
                 if (success) {
+                    val uid = accountState.value.currentId
                     val updatedCloud = latestCloudPlaylists.map {
                         if (it.isLiked) it.copy(trackCount = (it.trackCount - 1).coerceAtLeast(0)) else it
                     }
-                    publishCloudPlaylists(accountState.value.currentId, updatedCloud, persistToCache = true)
-                    VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, _likedSongs.value)
-                    val inFmPool = VipManager.discoverCache.getPersonalFm(accountState.value.currentId).any { isSameSong(it, song) }
+                    publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                    VipManager.discoverCache.saveLikedSongs(uid, _likedSongs.value)
+                    syncCloudPlaylistCoverAfterTrackRemoval(
+                        uid = uid,
+                        targetPlaylist = likedPl,
+                        removedCloudSongs = listOf(matchedInLiked),
+                        remainingCloudTracks = _likedSongs.value
+                    )
+                    val inFmPool = VipManager.discoverCache.getPersonalFm(uid).any { isSameSong(it, song) }
                     com.concept.music.data.recommendation.PersonalFmFeedbackBridge.onFavoriteToggled(
                         song = song,
                         isLikedNow = false,
@@ -1432,12 +1467,19 @@ class LibraryViewModel(
                 }
                 val success = runCatching { VipManager.music.addSongToPlaylist(likedPl.listId, song) }.getOrDefault(false)
                 if (success) {
+                    val uid = accountState.value.currentId
                     val updatedCloud = latestCloudPlaylists.map {
                         if (it.isLiked) it.copy(trackCount = it.trackCount + 1) else it
                     }
-                    publishCloudPlaylists(accountState.value.currentId, updatedCloud, persistToCache = true)
-                    VipManager.discoverCache.saveLikedSongs(accountState.value.currentId, _likedSongs.value)
-                    val inFmPool = VipManager.discoverCache.getPersonalFm(accountState.value.currentId).any { isSameSong(it, song) }
+                    publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                    VipManager.discoverCache.saveLikedSongs(uid, _likedSongs.value)
+                    syncCloudPlaylistAutoCoverIfNeeded(
+                        uid = uid,
+                        targetPlaylist = likedPl,
+                        candidateSongs = listOf(addedSong),
+                        onlyWhenBlank = false
+                    )
+                    val inFmPool = VipManager.discoverCache.getPersonalFm(uid).any { isSameSong(it, song) }
                     com.concept.music.data.recommendation.PersonalFmFeedbackBridge.onFavoriteToggled(
                         song = addedSong,
                         isLikedNow = true,
@@ -1553,6 +1595,12 @@ class LibraryViewModel(
                         VipManager.discoverCache.savePlaylistSongs(targetPlaylist.id, newOnes + cached)
                     }
                 }
+                syncCloudPlaylistAutoCoverIfNeeded(
+                    uid = uid,
+                    targetPlaylist = targetPlaylist,
+                    candidateSongs = cloudSongs,
+                    onlyWhenBlank = false
+                )
             } else if (localAdded > 0) {
                 refreshMergedPlaylistsFromLocalStore(uid)
             }
@@ -1612,10 +1660,19 @@ class LibraryViewModel(
         viewModelScope.launch {
             val success = runCatching { VipManager.music.addSongToPlaylist(playlistId, song) }.getOrDefault(false)
             if (success) {
+                val uid = accountState.value.currentId
                 val updatedCloud = latestCloudPlaylists.map {
                     if (it.listId == playlistId) it.copy(trackCount = it.trackCount + 1) else it
                 }
-                publishCloudPlaylists(accountState.value.currentId, updatedCloud, persistToCache = true)
+                publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                val fallbackPl = updatedCloud.firstOrNull { it.listId == playlistId }
+                    ?: Playlist(id = playlistId.toString(), title = playlistName, listId = playlistId, isCreatedByMe = true)
+                syncCloudPlaylistAutoCoverIfNeeded(
+                    uid = uid,
+                    targetPlaylist = fallbackPl,
+                    candidateSongs = listOf(song),
+                    onlyWhenBlank = false
+                )
                 val tip = if (playlistName.isNotBlank()) "已成功添加到「$playlistName」" else "已成功添加到歌单"
                 onResult(true, tip)
             } else {
@@ -1644,10 +1701,19 @@ class LibraryViewModel(
         viewModelScope.launch {
             val addedCount = runCatching { VipManager.music.addSongsToPlaylistBatch(playlistId, cloudOnly) }.getOrDefault(0)
             if (addedCount > 0) {
+                val uid = accountState.value.currentId
                 val updatedCloud = latestCloudPlaylists.map {
                     if (it.listId == playlistId) it.copy(trackCount = it.trackCount + addedCount) else it
                 }
-                publishCloudPlaylists(accountState.value.currentId, updatedCloud, persistToCache = true)
+                publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                val fallbackPl = updatedCloud.firstOrNull { it.listId == playlistId }
+                    ?: Playlist(id = playlistId.toString(), title = playlistName, listId = playlistId, isCreatedByMe = true)
+                syncCloudPlaylistAutoCoverIfNeeded(
+                    uid = uid,
+                    targetPlaylist = fallbackPl,
+                    candidateSongs = cloudOnly,
+                    onlyWhenBlank = false
+                )
                 val tip = if (playlistName.isNotBlank()) {
                     "已将 $addedCount 首歌曲加入「$playlistName」"
                 } else {
@@ -1743,12 +1809,25 @@ class LibraryViewModel(
                     }
                     publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
                     val cached = VipManager.discoverCache.getPlaylistSongs(targetPlaylist.id)
-                    if (cached.isNotEmpty()) {
-                        VipManager.discoverCache.savePlaylistSongs(
-                            targetPlaylist.id,
-                            cached.filterNot { c -> cloudSongs.any { isSameSong(it, c) } }
-                        )
+                    val remainingCached = if (cached.isNotEmpty()) {
+                        cached.filterNot { c -> cloudSongs.any { isSameSong(it, c) } }.also {
+                            VipManager.discoverCache.savePlaylistSongs(targetPlaylist.id, it, allowEmpty = true)
+                        }
+                    } else emptyList()
+                    val isViewingTarget = (_librarySection.value == "我喜欢" && targetPlaylist.isLiked) ||
+                        (_librarySection.value.startsWith("歌单:") &&
+                            targetPlaylist.matchesIdentifier(_librarySection.value.removePrefix("歌单:")))
+                    val remainingCloudTracks = when {
+                        targetPlaylist.isLiked -> _likedSongs.value.filterNot { it.isLocalSong }
+                        isViewingTarget -> _librarySongs.value.filterNot { it.isLocalSong }
+                        else -> remainingCached
                     }
+                    syncCloudPlaylistCoverAfterTrackRemoval(
+                        uid = uid,
+                        targetPlaylist = targetPlaylist,
+                        removedCloudSongs = cloudSongs,
+                        remainingCloudTracks = remainingCloudTracks
+                    )
                 } else {
                     refreshMergedPlaylistsFromLocalStore(uid)
                 }
@@ -2167,6 +2246,140 @@ class LibraryViewModel(
         }
     }
 
+    fun hasCustomPlaylistCover(
+        playlist: Playlist?,
+        fallbackPlaylistId: String = "",
+        overrides: Map<String, String> = customCoverOverrides.value
+    ): Boolean {
+        if (VipManager.playlistCoverOverrides.hasOverrideCover(
+                userId = accountState.value.currentId,
+                playlist = playlist,
+                fallbackPlaylistId = fallbackPlaylistId,
+                snapshot = overrides
+            )
+        ) {
+            return true
+        }
+        val authoritative = playlist?.let { pl ->
+            latestCloudPlaylists.firstOrNull { it.isSamePlaylistAs(pl) }
+        } ?: playlist
+        return authoritative?.isCustomCoverApplied == true
+    }
+
+    /**
+     * 当自建云端歌单（含「我喜欢」）未设置自定义封面时，自动将最新歌曲的标准封面同步至本地状态、磁盘缓存与酷狗云端 (`/v1/modify_list_pic`)：
+     * - 已设置本机或云端自定义封面时严格保护、绝不覆盖；
+     * - 纯本地歌单或无登录态时绝不发起云端请求；
+     * - 候选歌曲已带有效封面时 0ms 即时刷新本地状态，并异步完成封面补全与云端同步。
+     */
+    private fun syncCloudPlaylistAutoCoverIfNeeded(
+        uid: String?,
+        targetPlaylist: Playlist,
+        candidateSongs: List<Song>,
+        onlyWhenBlank: Boolean = false
+    ) {
+        if (targetPlaylist.isPureLocalPlaylist) return
+        if (!targetPlaylist.isCreatedByMe && !targetPlaylist.isLiked) return
+        val authoritative = latestCloudPlaylists.firstOrNull { it.isSamePlaylistAs(targetPlaylist) } ?: targetPlaylist
+        val fallbackId = if (authoritative.isLiked) "like" else authoritative.id
+        if (hasCustomPlaylistCover(authoritative, fallbackPlaylistId = fallbackId)) return
+        if (onlyWhenBlank && authoritative.coverUrl.isNotBlank()) return
+
+        val cloudCandidates = candidateSongs.filterNot { it.isLocalSong }
+        if (cloudCandidates.isEmpty()) return
+
+        val immediateCover = cloudCandidates.firstNotNullOfOrNull { song ->
+            normalizeKugouStdMusicPicPath(song.coverUrl)?.let { imageUrl(song.coverUrl) }
+        }
+        if (!immediateCover.isNullOrBlank() && !immediateCover.equals(authoritative.coverUrl, ignoreCase = true)) {
+            val updatedCloud = latestCloudPlaylists.map { pl ->
+                if (pl.isSamePlaylistAs(authoritative) && !pl.isCustomCoverApplied) {
+                    pl.copy(coverUrl = immediateCover, hasCustomCover = false)
+                } else pl
+            }
+            if (updatedCloud != latestCloudPlaylists) {
+                publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+            }
+        }
+
+        if (uid == null || accountState.value.auth != AuthState.READY) return
+        if (authoritative.resolveEffectiveListId() <= 0L) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolvedCover = immediateCover
+                ?: suspendRunCatching {
+                    VipManager.music.resolveLatestCloudSongCoverForPlaylistSync(cloudCandidates)
+                }.getOrNull()
+                ?: return@launch
+
+            if (accounts.state.value.currentId != uid) return@launch
+            val latestTarget = latestCloudPlaylists.firstOrNull { it.isSamePlaylistAs(authoritative) } ?: authoritative
+            if (hasCustomPlaylistCover(latestTarget, fallbackPlaylistId = fallbackId)) return@launch
+            if (onlyWhenBlank && latestTarget.coverUrl.isNotBlank() &&
+                !latestTarget.coverUrl.equals(resolvedCover, ignoreCase = true)
+            ) {
+                return@launch
+            }
+
+            if (!resolvedCover.equals(latestTarget.coverUrl, ignoreCase = true)) {
+                val updatedCloud = latestCloudPlaylists.map { pl ->
+                    if (pl.isSamePlaylistAs(latestTarget) && !pl.isCustomCoverApplied) {
+                        pl.copy(coverUrl = resolvedCover, hasCustomCover = false)
+                    } else pl
+                }
+                if (accounts.state.value.currentId == uid) {
+                    publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                }
+            }
+
+            suspendRunCatching {
+                VipManager.music.syncPlaylistSongCoverOnCloud(latestTarget, resolvedCover)
+            }
+        }
+    }
+
+    /**
+     * 当非自定义封面的云端自建歌单移出曲目后，若被移出的是当前封面对应的顶部歌曲或歌单清空，
+     * 自动同步为剩余最新歌曲封面（清空时同步置空本地封面）。
+     */
+    private fun syncCloudPlaylistCoverAfterTrackRemoval(
+        uid: String?,
+        targetPlaylist: Playlist,
+        removedCloudSongs: List<Song>,
+        remainingCloudTracks: List<Song>
+    ) {
+        if (targetPlaylist.isPureLocalPlaylist) return
+        if (!targetPlaylist.isCreatedByMe && !targetPlaylist.isLiked) return
+        val authoritative = latestCloudPlaylists.firstOrNull { it.isSamePlaylistAs(targetPlaylist) } ?: targetPlaylist
+        val fallbackId = if (authoritative.isLiked) "like" else authoritative.id
+        if (hasCustomPlaylistCover(authoritative, fallbackPlaylistId = fallbackId)) return
+
+        if (remainingCloudTracks.isEmpty()) {
+            if (authoritative.trackCount <= 0 && authoritative.coverUrl.isNotBlank()) {
+                val updatedCloud = latestCloudPlaylists.map { pl ->
+                    if (pl.isSamePlaylistAs(authoritative) && !pl.isCustomCoverApplied) {
+                        pl.copy(coverUrl = "", hasCustomCover = false)
+                    } else pl
+                }
+                publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+            }
+            return
+        }
+
+        val currentPicKey = normalizeKugouStdMusicPicPath(authoritative.coverUrl)
+        val removedMatchesCurrentCover = currentPicKey == null || removedCloudSongs.any { removed ->
+            normalizeKugouStdMusicPicPath(removed.coverUrl).equals(currentPicKey, ignoreCase = true)
+        }
+        if (removedMatchesCurrentCover) {
+            syncCloudPlaylistAutoCoverIfNeeded(
+                uid = uid,
+                targetPlaylist = authoritative,
+                candidateSongs = remainingCloudTracks,
+                onlyWhenBlank = false
+            )
+        }
+    }
+
     fun resolveEffectivePlaylistCover(
         playlist: Playlist?,
         fallbackPlaylistId: String = "",
@@ -2183,6 +2396,87 @@ class LibraryViewModel(
         return playlist?.coverUrl?.takeIf { it.isNotBlank() }
             ?: fallbackSongCover.takeIf { it.isNotBlank() }
             ?: ""
+    }
+
+    fun resetPlaylistCustomCover(
+        playlist: Playlist?,
+        fallbackPlaylistId: String = "",
+        fallbackSongs: List<Song> = emptyList(),
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        val uid = accountState.value.currentId
+        val isLikedTarget = playlist?.isLiked == true || fallbackPlaylistId == "like"
+        viewModelScope.launch(Dispatchers.IO) {
+            var resolvedPlaylist = playlist
+            if (isLikedTarget && (resolvedPlaylist == null || resolvedPlaylist.resolveEffectiveListId() <= 0L)) {
+                resolvedPlaylist = latestCloudPlaylists.firstOrNull { it.isLiked } ?: resolvedPlaylist
+            } else if (resolvedPlaylist != null && !resolvedPlaylist.isPureLocalPlaylist) {
+                resolvedPlaylist = latestCloudPlaylists.firstOrNull { it.isSamePlaylistAs(resolvedPlaylist) } ?: resolvedPlaylist
+            }
+
+            VipManager.playlistCoverOverrides.clearOverrideCover(
+                userId = uid,
+                playlist = resolvedPlaylist,
+                fallbackPlaylistId = fallbackPlaylistId
+            )
+
+            if (resolvedPlaylist?.isPureLocalPlaylist == true ||
+                LocalPlaylistRepository.isPureLocalPlaylistId(fallbackPlaylistId)
+            ) {
+                val targetId = resolvedPlaylist?.id?.ifBlank { fallbackPlaylistId } ?: fallbackPlaylistId
+                VipManager.localPlaylists.refreshLocalPlaylistAutoCover(targetId, VipManager.localMusic)
+                refreshMergedPlaylistsFromLocalStore(uid)
+                withContext(Dispatchers.Main) {
+                    onResult(true, "已恢复默认封面，将自动同步最新歌曲封面")
+                }
+                return@launch
+            }
+
+            val targetPlaylist = resolvedPlaylist
+            val candidateSongs = fallbackSongs.filterNot { it.isLocalSong }.ifEmpty {
+                if (targetPlaylist != null && accountState.value.auth == AuthState.READY) {
+                    suspendRunCatching { VipManager.music.playlistSongs(targetPlaylist) }.getOrDefault(emptyList())
+                } else emptyList()
+            }
+            val latestSongCover = suspendRunCatching {
+                VipManager.music.resolveLatestCloudSongCoverForPlaylistSync(candidateSongs)
+            }.getOrNull()
+
+            if (targetPlaylist != null && !latestSongCover.isNullOrBlank()) {
+                val cloudSynced = if (accountState.value.auth == AuthState.READY && targetPlaylist.resolveEffectiveListId() > 0L) {
+                    suspendRunCatching {
+                        VipManager.music.syncPlaylistSongCoverOnCloud(targetPlaylist, latestSongCover)
+                    }.getOrDefault(false)
+                } else false
+
+                if (accounts.state.value.currentId == uid) {
+                    val updatedCloud = latestCloudPlaylists.map { pl ->
+                        if ((isLikedTarget && pl.isLiked) || pl.isSamePlaylistAs(targetPlaylist)) {
+                            pl.copy(coverUrl = latestSongCover, hasCustomCover = false)
+                        } else pl
+                    }
+                    publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                }
+                val tip = if (cloudSynced) {
+                    "已恢复默认封面并同步云端"
+                } else {
+                    "已清除自定义封面，本机已同步最新歌曲封面"
+                }
+                withContext(Dispatchers.Main) { onResult(true, tip) }
+            } else {
+                if (targetPlaylist != null && accounts.state.value.currentId == uid) {
+                    val updatedCloud = latestCloudPlaylists.map { pl ->
+                        if ((isLikedTarget && pl.isLiked) || pl.isSamePlaylistAs(targetPlaylist)) {
+                            pl.copy(coverUrl = "", hasCustomCover = false)
+                        } else pl
+                    }
+                    publishCloudPlaylists(uid, updatedCloud, persistToCache = true)
+                }
+                withContext(Dispatchers.Main) {
+                    onResult(true, "已清除自定义封面，添加新歌后将自动同步歌曲封面")
+                }
+            }
+        }
     }
 
     fun updatePlaylistCover(
@@ -2239,7 +2533,7 @@ class LibraryViewModel(
             }
 
             val oldCloudCover = targetPlaylist.coverUrl
-            val (cloudOk, _) = suspendRunCatching {
+            val (cloudOk, uploadedFileName) = suspendRunCatching {
                 VipManager.music.updatePlaylistCoverOnCloud(targetPlaylist, croppedJpegBytes)
             }.getOrDefault(false to null)
 
@@ -2248,12 +2542,25 @@ class LibraryViewModel(
                 val matchedFresh = refreshedLists.firstOrNull {
                     (isLikedTarget && it.isLiked) || it.isSamePlaylistAs(targetPlaylist)
                 }
-                if (refreshedLists.isNotEmpty() && accounts.state.value.currentId == uid) {
-                    publishCloudPlaylists(uid, refreshedLists, persistToCache = true)
-                }
                 val cloudCoverRefreshed = matchedFresh != null &&
                     matchedFresh.coverUrl.isNotBlank() &&
-                    !matchedFresh.coverUrl.equals(oldCloudCover, ignoreCase = true)
+                    (!matchedFresh.coverUrl.equals(oldCloudCover, ignoreCase = true) || matchedFresh.isCustomCoverApplied)
+                val markedLists = refreshedLists.map { item ->
+                    if ((isLikedTarget && item.isLiked) || item.isSamePlaylistAs(targetPlaylist)) {
+                        val customUrl = if (cloudCoverRefreshed) {
+                            item.coverUrl
+                        } else {
+                            uploadedFileName?.let { fn ->
+                                val path = if (fn.startsWith("custom/", ignoreCase = true)) fn else "custom/$fn"
+                                imageUrl(path)
+                            } ?: item.coverUrl
+                        }
+                        item.copy(coverUrl = customUrl, hasCustomCover = true)
+                    } else item
+                }
+                if (markedLists.isNotEmpty() && accounts.state.value.currentId == uid) {
+                    publishCloudPlaylists(uid, markedLists, persistToCache = true)
+                }
                 if (cloudCoverRefreshed) {
                     // 云端已立即回显新封面地址，清掉本机兜底覆盖以直接展示云端同步图
                     VipManager.playlistCoverOverrides.clearOverrideCover(
