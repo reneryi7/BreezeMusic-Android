@@ -10,6 +10,40 @@
 
 ---
 
+## [1.5.0] - 2026-11-28
+
+### 新增 (Added)
+- **手机端车载互联与 64-bit 座舱声学矩阵**：
+  - 将 `PlaybackService` 升级为 AndroidX Media3 `MediaLibraryService`，内置经 UID 校验的车联媒体浏览树（`CarMediaLibraryHelper`，兼容 Android Auto、华为 HiCar、小米 CarWith、OPPO/vivo Carlink、百度 CarLife，并支持纯本地歌单浏览）。
+  - 新增 `CarSessionManager`：双轨车载蓝牙特征词与耳机排除词分类、首次连接车机一键白名单确认、默认关闭上车自动续播、上下车日常音效快照原子自愈还原（即使进程被杀重启亦可恢复日常音效）。
+  - 扩展 `ConceptMasteringAudioProcessor` 64-bit 座舱声学引擎，内置「主驾皇帝位（左声道 `2.25ms` ITD 先导微延迟 + 右侧声压补偿 + 仪表台声像抬升 + 胎噪低频补偿）」「全车均衡环绕」「车载重低音炮」「原车音响直通」4 大模式，配合智能导航平滑闪避（非对称闪避包络 + `1.85kHz` 人声频段谱闪避）、`CarLyricForwardingPlayer` 去鸣谢 AVRCP 呼吸歌词（与本机通知栏标题/内容双轨隔离）及方向盘按键 `0ms` 零延迟直通。
+  - 新增手机端专属「车载互联与座舱声学」设置页（`SettingsCarInterconnectScreen`）与播放页车载快捷控制胶囊（`CarModeOverlays`），平板构建变体（`tablet`）严格静默旁路隔离。
+- **「本地/云盘」双页音乐中心与零云同步本地歌单体系**：
+  - 新增无边框「本地/云盘」双页中心（`LocalAndCloudMusicScreen` & `LocalMusicTabContent`），支持自选默认进入页（初始默认本地音乐）且未登录即可离线扫描、筛选与播放，集成系统 SAF 音乐目录选择、独立 `.lrc`/`.krc` 歌词目录导入及在线歌词回退开关。
+  - 自研零外部重型依赖的流式本地音频解析引擎（`LocalAudioMetadataParser`），防大文件 OOM，精准解析 FLAC / WAV / MP3（ID3v2 含 UTF-8 / UTF-16 / GB18030 防乱码）/ M4A（区分 ALAC 无损与 AAC 有损）/ OGG / Opus / APE / DSD 的物理音质层级（Hi-Res / 无损 / 有损）、采样率、位深、码率、内嵌封面与内嵌歌词。
+  - 新增 `LocalPlaylistRepository` 本地持久化仓库：支持纯本地歌单完整增删改排及将本地音频挂载至现有云端自建歌单自动无损合并展示，严格维持 **100% 零云端上传隔离** 且不受清除缓存影响；本地曲目支持条件多选建单。
+  - 「我的」页搜索按钮旁新增带动画状态的下载队列快捷徽章及独立 `download_queue` 管理页面。
+- **QQ 扫码直接登录（独立安全 OAuth 网关）**：新增 `DirectQqQrAuthGateway`，纯 Kotlin 端侧直连、零后端且零硬编码密钥实现酷狗概念版 QQ 二维码生成、状态轮询与安全换票登录。
+- **自建歌单 1:1 封面裁剪上传、自动歌曲封面同步与权限管控批量下载**：
+  - 新增沉浸式 1:1 拖动缩放裁剪弹窗（`CoverSquareCropDialog`，支持双指 1x–4x 缩放、双击复位、三分构图线、EXIF 自动校正与防解压炸弹），支持「我喜欢」与自建歌单自定义封面云端上传与本机兜底覆盖（`PlaylistCoverOverrideRepository`）。
+  - 未自定义封面时，新增/批量导入/移出歌曲及静默预热自动将最新标准歌曲封面（`stdmusic/...`）同步为歌单封面（云端 `/v1/modify_list_pic` 含 `total_ver` 回退重试 + 本地歌单同步），已自定义封面严格保护不覆盖，并在高清封面预览页提供「恢复默认封面（自动同步最新歌曲）」快捷操作。
+  - 接入受「设置 → 权限管理 → 音乐下载与歌词保存」严格管控的单曲/批量多音质去重下载（`SongDownloadDialog`）。
+
+### 优化 (Changed)
+- **每日推荐 7 天真实历史回溯与固定锚点弹性日期菜单**：优化历史日推日期解析（逆序匹配独立 8 位紧凑日期防止 MD5 哈希误截断），当服务端列表不足 6 天时利用真实 `history_name` 前缀并发探测缺失日期真实曲目（结合近 10 天本地快照留存与跨零点刷新，绝不伪造空日期）；右上角历史按钮重构为 `0px` 位移固定宽度胶囊 + 右对齐弹性展开悬浮菜单（含珊瑚色滑动高亮条与统一 `MM-dd 今天/昨天/周X` 两列对齐）。
+- **歌单与本地音乐统一无边框精修**：自动剥离曲目标题中的常见音频文件扩展名（不误伤正常英文句点）；对齐云端歌单默认排序与 6 种排序模式，收窄并统一歌单与本地音乐的弹性排序/音质悬浮窗（默认本地排序统一显示「默认」）；移除本地音乐中心行内边框与冗余目录快筛栏；「添加到歌单」弹窗实时叠加显示自定义封面覆盖。
+- **分类切换虚化范围与二级页动效优化**：将一级 Tab 运动虚化精准限定在曲目/内容列表区域，修复 `ConceptSlidingCategoryTabs` 首项标签左边缘裁切问题，并为二级下钻视图补齐空间感 `AnimatedContent` 过渡动画。
+
+### 修复 (Fixed)
+- **根治 Release 模式下退出车载模式崩溃与车载生命周期边界问题**：修复 R8 full-mode 泛型擦除导致退出车载模式还原音效快照时发生 `ClassCastException` 的崩溃；修复临时退出车载不破坏已确认车机白名单并支持退出投屏/车机 UI 会话；修复 `AudioEffectManager` 同步初始化竞态、`CarSessionManager.init` 幂等性、投屏宿主按包名引用计数与白名单控制器追踪、`DIRECT_BYPASS` 瞬态音量均衡还原、关闭导航闪避后日常音频焦点还原（不误持久化瞬态 `DUCK`）、`PlaybackService` 通知栏标题/正文覆写、`CarLyricForwardingPlayer` 元数据监听包装、`TYPE_BUS` 监听、ViewModel 回调清理及 DSP ITD/声场状态复位。
+- **修复横屏退回竖屏标题跑马灯停滞**：修复从横屏沉浸播放页退出返回竖屏播放页后，长歌曲标题跑马灯停止滚动的缺陷。
+
+### 安全 (Security)
+- **QQ 扫码 OAuth 独立隔离与防 SSRF**：`DirectQqQrAuthGateway` 使用独立 `OkHttpClient`，不放宽 `*.kugou.com` 主通道凭据边界；强制白名单校验受信任的 QQ OAuth HTTPS 域名（`openmobile.qq.com` / `ptlogin2.qq.com` / `graph.qq.com` / `connect.qq.com`），禁用自动跳转并逐跳防 SSRF，会话 Cookie 仅单次内存态流转绝不持久化或混带酷狗内部 Header/Token。
+- **Release 混淆规则加固与封面解码安全**：在 `app/proguard-rules.pro` 长期保留车载互联、本地音频与本地歌单 Gson 持久化模型（配合 `@SerializedName` 与反序列化类型安全清洗）；封面裁剪解码接入防图像解压炸弹校验。
+
+---
+
 ## [1.4.2] - 2026-11-26
 
 ### 新增 (Added)
@@ -93,7 +127,8 @@
 - **v1.0.1**（2026-10-28）：新增系统级穿透桌面歌词、有线耳机线控定制、音频焦点策略、缓存分项清理与透明权限中心。
 - **v1.0.0**（2026-10-28）：首个正式版发布，完成端侧直连、高解析播放、64-bit 母带调音、KRC 逐字歌词与 2K 海报、动态取色及 120Hz 高刷播放舞台。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.3.6...v1.4.0
