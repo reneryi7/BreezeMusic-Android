@@ -587,6 +587,7 @@ fun MainContent(
         currentRoute.startsWith("radio_station") ||
         currentRoute == "search" ||
         currentRoute == "settings" ||
+        currentRoute == "download_queue" ||
         currentRoute == "vip_center" ||
         currentRoute == "viper_effect"
 
@@ -827,6 +828,9 @@ fun MainContent(
                                 onOpenSettings = {
                                     navController.navigate("settings") { launchSingleTop = true }
                                 },
+                                onOpenDownloadQueue = {
+                                    navController.navigate("download_queue") { launchSingleTop = true }
+                                },
                                 onOpenVipCenter = {
                                     navController.navigate("vip_center") { launchSingleTop = true }
                                 },
@@ -981,6 +985,9 @@ fun MainContent(
                         onOpenSettings = {
                             navController.navigate("settings") { launchSingleTop = true }
                         },
+                        onOpenDownloadQueue = {
+                            navController.navigate("download_queue") { launchSingleTop = true }
+                        },
                         onOpenVipCenter = {
                             navController.navigate("vip_center") { launchSingleTop = true }
                         },
@@ -1088,6 +1095,13 @@ fun MainContent(
                 // 蝰蛇音效与专业均衡器独立页面路由
                 composable("viper_effect") {
                     ViperSoundEffectScreen(
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                // 下载队列独立页面路由（我的页右上角动态下载图标一键直达）
+                composable("download_queue") {
+                    com.concept.music.ui.settings.DownloadQueueScreen(
                         onBack = { navController.popBackStack() }
                     )
                 }
@@ -1542,7 +1556,7 @@ fun MainContent(
         if (sortIsCreated != null) {
             val playlists by libraryViewModel.playlists.collectAsState()
             val sortableList = remember(playlists, sortIsCreated) {
-                if (sortIsCreated) playlists.filter { it.isCreatedByMe && !it.isLiked }
+                if (sortIsCreated) playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isPureLocalPlaylist }
                 else playlists.filter { !it.isCreatedByMe && !it.isLiked }
             }
             if (sortableList.size >= 2) {
@@ -1575,9 +1589,15 @@ fun MainContent(
             AddToPlaylistDialog(
                 song = targetSong,
                 playlists = playlists,
+                headerSubtitleOverride = if (targetSong.isLocalSong) {
+                    "本地歌曲仅保存在本机，不会同步到云端"
+                } else null,
+                createPlaylistHint = if (targetSong.isLocalSong) {
+                    "将创建纯本地歌单，不同步云端"
+                } else null,
                 onSelectPlaylist = { targetPl ->
                     songToAddToPlaylist = null
-                    libraryViewModel.addSongToPlaylist(targetPl.listId, targetSong, targetPl.title) { _, msg ->
+                    libraryViewModel.addSongToPlaylist(targetPl, targetSong) { _, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
                 },
@@ -1589,27 +1609,50 @@ fun MainContent(
         }
 
         if (showCreatePlaylistFromGlobal) {
+            val pendingSong = songToAddToPlaylist
+            val createLocalOnly = pendingSong?.isLocalSong == true
             CreatePlaylistDialog(
+                title = if (createLocalOnly) "新建本地歌单" else "新建歌单",
+                subtitle = if (createLocalOnly) {
+                    "纯本地歌单仅保存在本机，不会同步云端，并会立即加入当前本地歌曲"
+                } else {
+                    "输入歌单名称，创建专属音乐集"
+                },
                 onDismiss = { showCreatePlaylistFromGlobal = false },
                 onConfirmWithCallback = { name, onComplete ->
-                    val pendingSong = songToAddToPlaylist
-                    libraryViewModel.createPlaylist(
-                        name = name,
-                        onCreatedPlaylist = { createdPl ->
-                            if (createdPl != null && pendingSong != null) {
-                                songToAddToPlaylist = null
-                                libraryViewModel.addSongToPlaylist(createdPl.listId, pendingSong, createdPl.title) { _, addMsg ->
-                                    Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
+                    if (createLocalOnly) {
+                        libraryViewModel.createLocalOnlyPlaylist(
+                            name = name,
+                            initialSongs = listOfNotNull(pendingSong),
+                            onCreatedPlaylist = { createdPl ->
+                                if (createdPl != null) {
+                                    songToAddToPlaylist = null
                                 }
-                            }
-                        },
-                        onResult = { success, msg ->
-                            if (!success || pendingSong == null) {
+                            },
+                            onResult = { success, msg ->
                                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                onComplete(success)
                             }
-                            onComplete(success)
-                        }
-                    )
+                        )
+                    } else {
+                        libraryViewModel.createPlaylist(
+                            name = name,
+                            onCreatedPlaylist = { createdPl ->
+                                if (createdPl != null && pendingSong != null) {
+                                    songToAddToPlaylist = null
+                                    libraryViewModel.addSongToPlaylist(createdPl, pendingSong) { _, addMsg ->
+                                        Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onResult = { success, msg ->
+                                if (!success || pendingSong == null) {
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                                onComplete(success)
+                            }
+                        )
+                    }
                 }
             )
         }

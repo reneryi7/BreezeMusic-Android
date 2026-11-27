@@ -57,6 +57,7 @@ import com.concept.music.data.model.Song
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.LocalIsDarkTheme
 import com.concept.music.ui.theme.VipGold
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.rememberIsLifecycleStarted
 
 private val SongCoverCornerShape = RoundedCornerShape(13.dp)
@@ -154,8 +155,9 @@ fun SongItemRow(
         }
         if (displayAlbum.isNotBlank() && displayAlbum != "单曲" && displayAlbum != "未知专辑") "${song.artist} · $displayAlbum" else song.artist
     }
-    val qualityLabel = remember(song.isHiRes, song.isLossless, song.quality) {
+    val qualityLabel = remember(song.isLocalSong, song.localFormat, song.isHiRes, song.isLossless, song.quality) {
         when {
+            song.isLocalSong -> song.localQualityBadgeLabel
             song.isHiRes -> "Hi-Res"
             song.isLossless -> "SQ"
             song.quality == "320" -> "HQ"
@@ -291,10 +293,15 @@ fun SongItemRow(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(top = 3.dp)
             ) {
+                if (song.isLocalSong) {
+                    BadgeTag(text = "本地", color = conceptCyanAccentColor())
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
                 if (qualityLabel.isNotEmpty()) {
-                    val qColor = when (qualityLabel) {
-                        "Hi-Res" -> goldTagColor
-                        "SQ" -> ConceptPrimary
+                    val qColor = when {
+                        qualityLabel == "Hi-Res" -> goldTagColor
+                        song.isLocalSong && song.isLossless -> conceptCyanAccentColor()
+                        qualityLabel == "SQ" -> ConceptPrimary
                         else -> HqBadgeColor
                     }
                     BadgeTag(text = qualityLabel, color = qColor)

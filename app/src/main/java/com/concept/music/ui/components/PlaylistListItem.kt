@@ -26,6 +26,7 @@ import com.concept.music.ui.theme.ConceptCoralAccent
 import com.concept.music.ui.theme.ConceptMintAccent
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptVioletAccent
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import kotlin.math.abs
 
@@ -103,16 +104,25 @@ fun PlaylistListItem(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
-                Text(
-                    text = playlist.title,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 15.sp
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = playlist.title,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 15.sp
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (playlist.isPureLocalPlaylist) {
+                        BadgeTag(text = "本地", color = conceptCyanAccentColor())
+                    }
+                }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -122,11 +132,12 @@ fun PlaylistListItem(
                             .background(accentColor.copy(alpha = 0.75f))
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    val countPart = if (playlist.trackCount > 0) "${playlist.trackCount} 首歌曲" else "精选歌单"
-                    val creatorPart = if (!playlist.isCreatedByMe && playlist.creatorName.isNotBlank() && playlist.creatorName != "未知") {
-                        " · ${playlist.creatorName}"
-                    } else {
-                        ""
+                    val countPart = if (playlist.trackCount > 0) "${playlist.trackCount} 首歌曲" else if (playlist.isPureLocalPlaylist) "0 首歌曲" else "精选歌单"
+                    val creatorPart = when {
+                        playlist.isPureLocalPlaylist -> " · 仅本机保存"
+                        !playlist.isCreatedByMe && playlist.creatorName.isNotBlank() && playlist.creatorName != "未知" ->
+                            " · ${playlist.creatorName}"
+                        else -> ""
                     }
                     Text(
                         text = countPart + creatorPart,

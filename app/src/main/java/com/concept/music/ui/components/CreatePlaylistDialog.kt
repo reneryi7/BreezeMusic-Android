@@ -24,7 +24,9 @@ import com.concept.music.ui.theme.softCardClickable
 fun CreatePlaylistDialog(
     onDismiss: () -> Unit,
     onConfirmWithCallback: (name: String, onComplete: (Boolean) -> Unit) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    title: String = "新建歌单",
+    subtitle: String = "输入歌单名称，创建专属音乐集"
 ) {
     var name by remember { mutableStateOf("") }
     var isSubmitting by remember { mutableStateOf(false) }
@@ -77,7 +79,7 @@ fun CreatePlaylistDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "新建歌单",
+                    text = title,
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
                     color = MaterialTheme.colorScheme.onSurface
                 )
@@ -85,7 +87,7 @@ fun CreatePlaylistDialog(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "输入歌单名称，创建专属音乐集",
+                    text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

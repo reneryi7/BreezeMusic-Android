@@ -26,6 +26,7 @@ import com.concept.music.data.model.Playlist
 import com.concept.music.data.model.Song
 import com.concept.music.ui.theme.ConceptAnimatedOverlaySheet
 import com.concept.music.ui.theme.ConceptPrimary
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import com.concept.music.ui.theme.conceptSheetContainerColor
 import com.concept.music.ui.theme.softCardClickable
@@ -38,7 +39,10 @@ fun AddToPlaylistDialog(
     onSelectPlaylist: (Playlist) -> Unit,
     onCreateNewPlaylist: () -> Unit,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    batchCount: Int = 1,
+    headerSubtitleOverride: String? = null,
+    createPlaylistHint: String? = null
 ) {
     // 仅保留用户自建的歌单（排除“我喜欢”和历史，排除收藏的他人歌单）
     val customPlaylists = remember(playlists) {
@@ -147,13 +151,17 @@ fun AddToPlaylistDialog(
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = song.title,
+                                text = if (batchCount > 1) "已选 $batchCount 首歌曲 · ${song.title}" else song.title,
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = song.artist,
+                                text = headerSubtitleOverride ?: if (batchCount > 1) {
+                                    "共 $batchCount 首曲目将加入所选歌单"
+                                } else {
+                                    song.artist
+                                },
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 ),
@@ -191,13 +199,25 @@ fun AddToPlaylistDialog(
                         }
                     }
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "新建歌单",
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = ConceptPrimary
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "新建歌单",
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = ConceptPrimary
+                            )
                         )
-                    )
+                        if (!createPlaylistHint.isNullOrBlank()) {
+                            Text(
+                                text = createPlaylistHint,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
 
                 HorizontalDivider(
@@ -264,14 +284,23 @@ fun AddToPlaylistDialog(
                                 Spacer(modifier = Modifier.width(12.dp))
 
                                 Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = pl.title,
+                                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        if (pl.isPureLocalPlaylist) {
+                                            BadgeTag(text = "本地", color = conceptCyanAccentColor())
+                                        }
+                                    }
                                     Text(
-                                        text = pl.title,
-                                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "${pl.trackCount} 首",
+                                        text = if (pl.isPureLocalPlaylist) "${pl.trackCount} 首 · 仅本机保存" else "${pl.trackCount} 首",
                                         style = MaterialTheme.typography.bodySmall.copy(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )

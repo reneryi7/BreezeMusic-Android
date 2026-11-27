@@ -922,7 +922,15 @@ fun ConceptSlidingCategoryTabs(
         Column(
             modifier = Modifier
                 .then(if (trailingContent != null) Modifier.weight(1f, fill = false) else Modifier)
-                .then(if (scrollable) Modifier.horizontalScroll(scrollState) else Modifier)
+                .then(
+                    if (scrollable) {
+                        Modifier
+                            .horizontalScroll(scrollState)
+                            .padding(start = 2.dp, end = 6.dp)
+                    } else {
+                        Modifier
+                    }
+                )
         ) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(itemSpacing),
@@ -983,7 +991,13 @@ fun ConceptSlidingCategoryTabs(
                                 val s = textScaleState.value
                                 scaleX = s
                                 scaleY = s
-                                transformOrigin = TransformOrigin(0.5f, 0.85f)
+                                val pivotX = when {
+                                    tabs.size == 1 -> 0.5f
+                                    index == 0 -> 0f
+                                    index == tabs.lastIndex -> 1f
+                                    else -> 0.5f
+                                }
+                                transformOrigin = TransformOrigin(pivotX, 0.85f)
                             }
                         ) {
                             Text(

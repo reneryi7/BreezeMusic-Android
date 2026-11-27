@@ -389,6 +389,10 @@ fun PlaylistDetailScreen(
         currentPlaylist != null && currentPlaylist.isCreatedByMe && !currentPlaylist.isLiked && playlistId != "like" && !isHistory
     }
 
+    val isPureLocalPlaylist = remember(currentPlaylist, playlistId) {
+        currentPlaylist?.isPureLocalPlaylist == true || playlistId.startsWith("local_pl_")
+    }
+
     val canCustomSortTracks = remember(isCustomCreated, isLikedPlaylist, isHistory) {
         (isCustomCreated || isLikedPlaylist) && !isHistory
     }
@@ -397,7 +401,7 @@ fun PlaylistDetailScreen(
         (isCustomCreated || isLikedPlaylist) && !isHistory
     }
 
-    val canBatchDownload = permissionState.musicDownloadEnabled && !isHistory
+    val canBatchDownload = permissionState.musicDownloadEnabled && !isHistory && !isPureLocalPlaylist
 
     val isExternalPlaylist = remember(currentPlaylist, playlistId, isHistory) {
         currentPlaylist != null && !currentPlaylist.isCreatedByMe && playlistId != "like" && !isHistory
@@ -506,7 +510,11 @@ fun PlaylistDetailScreen(
                             )
                             if (isInlineReorderMode) {
                                 Text(
-                                    text = if (hasInlineOrderChanges) "顺序已修改 · 点击完成同步云端" else "按住左侧手柄上下拖动 · 共 ${workingReorderEntries.size} 首",
+                                    text = if (hasInlineOrderChanges) {
+                                        if (isPureLocalPlaylist) "顺序已修改 · 点击完成保存至本机" else "顺序已修改 · 点击完成同步云端"
+                                    } else {
+                                        "按住左侧手柄上下拖动 · 共 ${workingReorderEntries.size} 首"
+                                    },
                                     fontSize = 11.sp,
                                     color = if (hasInlineOrderChanges) ConceptPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -605,7 +613,7 @@ fun PlaylistDetailScreen(
                                 }
                             }
 
-                            if (!isHistory && playlistId != "like" && currentPlaylist != null && onOpenPlaylistComments != null) {
+                            if (!isHistory && !isPureLocalPlaylist && playlistId != "like" && currentPlaylist != null && onOpenPlaylistComments != null) {
                                 IconButton(
                                     onClick = {
                                         val targetPl = currentPlaylist.copy(
@@ -734,6 +742,7 @@ fun PlaylistDetailScreen(
                                         totalSongCount = songs.size,
                                         filteredSongCount = filteredAndSortedSongs.size,
                                         canCustomSortTracks = canCustomSortTracks,
+                                        isPureLocalPlaylist = isPureLocalPlaylist,
                                         onEnterCustomSort = { enterInlineReorderMode() }
                                     )
                                 }
@@ -808,7 +817,7 @@ fun PlaylistDetailScreen(
                                         if (onSongMoreClick != null) {
                                             val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
                                                 {
-                                                    viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), song) { _, msg ->
+                                                    viewModel.removeSongFromPlaylist(currentPlaylist, song) { _, msg ->
                                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                                     }
                                                 }
@@ -934,6 +943,7 @@ fun PlaylistDetailScreen(
                                         totalSongCount = songs.size,
                                         filteredSongCount = filteredAndSortedSongs.size,
                                         canCustomSortTracks = canCustomSortTracks,
+                                        isPureLocalPlaylist = isPureLocalPlaylist,
                                         onEnterCustomSort = { enterInlineReorderMode() }
                                     )
                                 }
@@ -1010,7 +1020,7 @@ fun PlaylistDetailScreen(
                                         if (onSongMoreClick != null) {
                                             val removeAction: (() -> Unit)? = if (isCustomCreated && currentPlaylist != null) {
                                                 {
-                                                    viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), song) { _, msg ->
+                                                    viewModel.removeSongFromPlaylist(currentPlaylist, song) { _, msg ->
                                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                                     }
                                                 }
@@ -1206,7 +1216,8 @@ fun PlaylistDetailScreen(
                 PlaylistManageBottomSheet(
                     playlist = currentPlaylist,
                     isCustomCreated = isCustomCreated,
-                    canShare = !isHistory,
+                    isPureLocalPlaylist = isPureLocalPlaylist,
+                    canShare = !isHistory && !isPureLocalPlaylist,
                     isRefreshing = loading,
                     onShare = {
                         showManageSheet = false
@@ -1331,7 +1342,7 @@ fun PlaylistDetailScreen(
 
             if (showBatchDownloadDialog && canBatchDownload) {
                 val chosenSongs = remember(filteredAndSortedSongs, selectedSongIds) {
-                    filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
+                    filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) && !it.isLocalSong }
                 }
                 if (chosenSongs.isNotEmpty()) {
                     BatchSongDownloadDialog(
@@ -1345,7 +1356,10 @@ fun PlaylistDetailScreen(
                         }
                     )
                 } else {
-                    showBatchDownloadDialog = false
+                    LaunchedEffect(showBatchDownloadDialog) {
+                        Toast.makeText(context, "所选曲目均为本地音频，无需重复下载", Toast.LENGTH_SHORT).show()
+                        showBatchDownloadDialog = false
+                    }
                 }
             }
         }
@@ -1363,7 +1377,7 @@ fun PlaylistDetailScreen(
                     enabled = !isBatchRemoving && chosenSongs.isNotEmpty(),
                     onClick = {
                         isBatchRemoving = true
-                        viewModel.removeSongsFromPlaylistBatch(currentPlaylist.resolveEffectiveListId(), chosenSongs) { ok, msg ->
+                        viewModel.removeSongsFromPlaylistBatch(currentPlaylist, chosenSongs) { ok, msg ->
                             isBatchRemoving = false
                             showBatchRemoveDialog = false
                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -1393,13 +1407,17 @@ fun PlaylistDetailScreen(
     if (showBatchAddToPlaylistDialog) {
         val chosenSongs = filteredAndSortedSongs.filter { selectedSongIds.contains(it.selectionKey()) }
         val lead = chosenSongs.firstOrNull()
+        val allLocalBatch = chosenSongs.isNotEmpty() && chosenSongs.all { it.isLocalSong }
         if (lead != null) {
             AddToPlaylistDialog(
                 song = lead,
                 playlists = playlists,
+                batchCount = chosenSongs.size,
+                headerSubtitleOverride = if (allLocalBatch) "本地歌曲仅本机保存，不会同步至云端" else null,
+                createPlaylistHint = if (allLocalBatch) "创建纯本地歌单（不同步歌单名至云端）" else null,
                 onSelectPlaylist = { targetPl ->
                     showBatchAddToPlaylistDialog = false
-                    viewModel.addSongsToPlaylistBatch(targetPl.resolveEffectiveListId(), chosenSongs, targetPl.title) { _, msg ->
+                    viewModel.addSongsToPlaylistBatch(targetPl, chosenSongs) { _, msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
                     isMultiSelectMode = false
@@ -1418,8 +1436,16 @@ fun PlaylistDetailScreen(
     if (showDeletePlaylistDialog && currentPlaylist != null) {
         AlertDialog(
             onDismissRequest = { showDeletePlaylistDialog = false },
-            title = { Text("删除歌单") },
-            text = { Text("确定要删除歌单「${currentPlaylist.title}」吗？删除后云端数据不可恢复。") },
+            title = { Text(if (isPureLocalPlaylist) "删除本地歌单" else "删除歌单") },
+            text = {
+                Text(
+                    if (isPureLocalPlaylist) {
+                        "确定要删除本地歌单「${currentPlaylist.title}」吗？仅删除歌单记录，不会删除手机中的音频文件。"
+                    } else {
+                        "确定要删除歌单「${currentPlaylist.title}」吗？删除后云端数据不可恢复。"
+                    }
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -1613,7 +1639,7 @@ fun PlaylistDetailScreen(
                             .softClickable {
                                 val s = targetSong
                                 selectedSongForMenu = null
-                                viewModel.removeSongFromPlaylist(currentPlaylist.resolveEffectiveListId(), s) { _, msg ->
+                                viewModel.removeSongFromPlaylist(currentPlaylist, s) { _, msg ->
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             }
@@ -1645,9 +1671,11 @@ fun PlaylistDetailScreen(
         AddToPlaylistDialog(
             song = s,
             playlists = playlists,
+            headerSubtitleOverride = if (s.isLocalSong) "本地歌曲仅本机保存，不会同步至云端" else null,
+            createPlaylistHint = if (s.isLocalSong) "创建纯本地歌单（不同步歌单名至云端）" else null,
             onSelectPlaylist = { targetPl ->
                 songToAddToPlaylist = null
-                viewModel.addSongToPlaylist(targetPl.resolveEffectiveListId(), s, targetPl.title) { _, msg ->
+                viewModel.addSongToPlaylist(targetPl, s) { _, msg ->
                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                 }
             },
@@ -1659,39 +1687,62 @@ fun PlaylistDetailScreen(
     }
 
     if (showCreateDialogFromAdd) {
+        val pendingSingle = songToAddToPlaylist
+        val pendingBatch = if (isMultiSelectMode) songs.filter { it.selectionKey() in selectedSongIds } else emptyList()
+        val pendingAll = if (pendingSingle != null) listOf(pendingSingle) else pendingBatch
+        val isPureLocalCreate = pendingAll.isNotEmpty() && pendingAll.all { it.isLocalSong }
+
         CreatePlaylistDialog(
+            title = if (isPureLocalCreate) "新建本地歌单" else "新建歌单",
+            subtitle = if (isPureLocalCreate) "纯本地音乐歌单仅保存在本机，不会同步歌单名或曲目至云端" else "输入歌单名称，创建专属音乐集",
             onDismiss = { showCreateDialogFromAdd = false },
             onConfirmWithCallback = { name, onComplete ->
-                val pendingSingle = songToAddToPlaylist
-                val pendingBatch = if (isMultiSelectMode) songs.filter { it.selectionKey() in selectedSongIds } else emptyList()
-                viewModel.createPlaylist(
-                    name = name,
-                    onCreatedPlaylist = { createdPl ->
-                        if (createdPl != null) {
-                            when {
-                                pendingSingle != null -> {
-                                    songToAddToPlaylist = null
-                                    viewModel.addSongToPlaylist(createdPl.resolveEffectiveListId(), pendingSingle, createdPl.title) { _, addMsg ->
-                                        Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                                pendingBatch.isNotEmpty() -> {
+                if (isPureLocalCreate) {
+                    viewModel.createLocalOnlyPlaylist(
+                        name = name,
+                        initialSongs = pendingAll,
+                        onResult = { success, msg ->
+                            if (success) {
+                                songToAddToPlaylist = null
+                                if (pendingBatch.isNotEmpty()) {
                                     isMultiSelectMode = false
                                     selectedSongIds = emptySet()
-                                    viewModel.addSongsToPlaylistBatch(createdPl.resolveEffectiveListId(), pendingBatch, createdPl.title) { _, addMsg ->
-                                        Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            onComplete(success)
+                        }
+                    )
+                } else {
+                    viewModel.createPlaylist(
+                        name = name,
+                        onCreatedPlaylist = { createdPl ->
+                            if (createdPl != null) {
+                                when {
+                                    pendingSingle != null -> {
+                                        songToAddToPlaylist = null
+                                        viewModel.addSongToPlaylist(createdPl, pendingSingle) { _, addMsg ->
+                                            Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                    pendingBatch.isNotEmpty() -> {
+                                        isMultiSelectMode = false
+                                        selectedSongIds = emptySet()
+                                        viewModel.addSongsToPlaylistBatch(createdPl, pendingBatch) { _, addMsg ->
+                                            Toast.makeText(context, addMsg, Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             }
+                        },
+                        onResult = { success, msg ->
+                            if (!success || (pendingSingle == null && pendingBatch.isEmpty())) {
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                            onComplete(success)
                         }
-                    },
-                    onResult = { success, msg ->
-                        if (!success || (pendingSingle == null && pendingBatch.isEmpty())) {
-                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        }
-                        onComplete(success)
-                    }
-                )
+                    )
+                }
             }
         )
     }
@@ -1886,6 +1937,7 @@ private fun PlaylistToolbarSection(
     totalSongCount: Int,
     filteredSongCount: Int,
     canCustomSortTracks: Boolean,
+    isPureLocalPlaylist: Boolean = false,
     onEnterCustomSort: () -> Unit
 ) {
     Column(
@@ -1959,6 +2011,7 @@ private fun PlaylistToolbarSection(
                 sortMode = sortMode,
                 onSortModeChange = onSortModeChange,
                 canCustomSortTracks = canCustomSortTracks,
+                isPureLocalPlaylist = isPureLocalPlaylist,
                 onEnterCustomSort = onEnterCustomSort
             )
         }
@@ -1986,6 +2039,7 @@ private fun PlaylistSortPopupButton(
     sortMode: PlaylistSortMode,
     onSortModeChange: (PlaylistSortMode) -> Unit,
     canCustomSortTracks: Boolean,
+    isPureLocalPlaylist: Boolean = false,
     onEnterCustomSort: () -> Unit
 ) {
     val density = LocalDensity.current
@@ -2132,7 +2186,7 @@ private fun PlaylistSortPopupButton(
                     color = conceptSheetContainerColor().copy(alpha = 0.98f),
                     shadowElevation = 18.dp,
                     modifier = Modifier
-                        .width(206.dp)
+                        .width(if (canCustomSortTracks) 168.dp else 148.dp)
                         .graphicsLayer {
                             val rawP = popupProgress.value
                             val clampedP = rawP.coerceIn(0f, 1f)
@@ -2195,7 +2249,7 @@ private fun PlaylistSortPopupButton(
                                                     closePopupAnimated(null)
                                                 }
                                             }
-                                            .padding(horizontal = 11.dp),
+                                            .padding(horizontal = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Icon(
@@ -2204,7 +2258,7 @@ private fun PlaylistSortPopupButton(
                                             tint = iconTint,
                                             modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         Text(
                                             text = mode.label,
                                             fontSize = 13.sp,
@@ -2255,26 +2309,26 @@ private fun PlaylistSortPopupButton(
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         closePopupAnimated { onEnterCustomSort() }
                                     }
-                                    .padding(horizontal = 11.dp, vertical = 9.dp),
+                                    .padding(horizontal = 10.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.SwapVert,
                                     contentDescription = "自定义默认排序",
                                     tint = cyanAccent,
-                                    modifier = Modifier.size(17.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
-                                Spacer(modifier = Modifier.width(9.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "自定义默认排序",
-                                        fontSize = 12.8.sp,
+                                        fontSize = 12.5.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = cyanAccent,
                                         maxLines = 1
                                     )
                                     Text(
-                                        text = "拖拽调整 · 同步云端",
+                                        text = if (isPureLocalPlaylist) "拖拽调整 · 本机保存" else "拖拽调整 · 同步云端",
                                         fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                                         maxLines = 1
@@ -2796,6 +2850,7 @@ private fun PlaylistHeaderCard(
 private fun PlaylistManageBottomSheet(
     playlist: Playlist,
     isCustomCreated: Boolean,
+    isPureLocalPlaylist: Boolean = false,
     canShare: Boolean,
     isRefreshing: Boolean,
     onShare: () -> Unit,
@@ -2861,7 +2916,7 @@ private fun PlaylistManageBottomSheet(
                 icon = Icons.Rounded.Refresh,
                 iconTint = textSecondary,
                 title = if (isRefreshing) "正在刷新歌单..." else "刷新歌单曲目",
-                subtitle = "从云端重新同步最新歌曲列表",
+                subtitle = if (isPureLocalPlaylist) "刷新本机曲目封面与歌词信息" else "从云端重新同步最新歌曲列表",
                 cardBg = cardBg,
                 onClick = onRefresh
             )
@@ -2874,8 +2929,8 @@ private fun PlaylistManageBottomSheet(
                 PlaylistManageActionItem(
                     icon = Icons.Rounded.DeleteOutline,
                     iconTint = MaterialTheme.colorScheme.error,
-                    title = "删除歌单",
-                    subtitle = "永久删除此自建歌单，云端不可恢复",
+                    title = if (isPureLocalPlaylist) "删除本地歌单" else "删除歌单",
+                    subtitle = if (isPureLocalPlaylist) "仅删除本机歌单记录，不删除手机原文件" else "永久删除此自建歌单，云端不可恢复",
                     titleColor = MaterialTheme.colorScheme.error,
                     cardBg = MaterialTheme.colorScheme.error.copy(alpha = 0.08f),
                     onClick = onDeletePlaylist
@@ -2981,7 +3036,11 @@ private fun EditPlaylistMetaDialog(
                     onSave(name.trim(), intro.trim()) { _ -> saving = false }
                 }
             ) {
-                Text(if (saving) "保存中..." else "保存同步", color = ConceptPrimary, fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (saving) "保存中..." else if (playlist.isPureLocalPlaylist) "保存" else "保存同步",
+                    color = ConceptPrimary,
+                    fontWeight = FontWeight.Bold
+                )
             }
         },
         dismissButton = {

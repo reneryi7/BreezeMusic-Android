@@ -2,8 +2,21 @@ package com.concept.music.ui.library
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -28,9 +41,13 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
@@ -45,7 +62,9 @@ import com.concept.music.data.kugou.AccountProfile
 import com.concept.music.data.kugou.AuthState
 import com.concept.music.data.model.*
 import com.concept.music.data.vip.VipManager
+import com.concept.music.service.DownloadShortcutBadgeState
 import com.concept.music.service.FocusPodManager
+import com.concept.music.service.MusicDownloadManager
 import com.concept.music.ui.components.BadgeTag
 import com.concept.music.ui.components.LibraryShortcutGlyph
 import com.concept.music.ui.components.RefinedShortcutBadge
@@ -75,8 +94,10 @@ import com.concept.music.ui.theme.conceptSheetContainerColor
 import com.concept.music.ui.theme.softCardClickable
 import com.concept.music.ui.theme.ConceptCategoryTabItem
 import com.concept.music.ui.theme.ConceptFluidRefreshIcon
+import com.concept.music.ui.theme.ConceptMotion
 import com.concept.music.ui.theme.ConceptSlidingCategoryTabs
 import com.concept.music.ui.theme.horizontalCategorySwipe
+import com.concept.music.ui.theme.rememberIsLifecycleStarted
 import com.concept.music.ui.theme.softClickable
 import com.concept.music.ui.viewmodel.LibraryViewModel
 import kotlinx.coroutines.launch
@@ -97,6 +118,7 @@ fun LibraryScreen(
     onOpenPlaylist: (String) -> Unit,
     onOpenSearch: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onOpenDownloadQueue: () -> Unit = {},
     onOpenVipCenter: (() -> Unit)? = null,
     onOpenArtist: (String) -> Unit = {},
     onOpenAlbum: (String) -> Unit = {},
@@ -164,6 +186,14 @@ fun LibraryScreen(
     var showAssetToolsMenu by remember { mutableStateOf(false) }
     var isLibrarySubSheetDismissing by remember { mutableStateOf(false) }
     val focusPodState by FocusPodManager.state.collectAsState()
+    val downloadBadgeState by MusicDownloadManager.shortcutBadgeState.collectAsState()
+
+    LaunchedEffect(downloadBadgeState.activeCount, downloadBadgeState.hasUnseenSessionCompletion) {
+        if (downloadBadgeState.activeCount == 0 && downloadBadgeState.hasUnseenSessionCompletion) {
+            kotlinx.coroutines.delay(8_000L)
+            MusicDownloadManager.markDownloadQueueViewed()
+        }
+    }
 
     LaunchedEffect(isOverlayOpen) {
         if (isOverlayOpen) {
@@ -519,7 +549,7 @@ fun LibraryScreen(
                                     }
                                 }
                                 if (selectedTab == 0 || selectedTab == 1) {
-                                    val sortableCount = if (selectedTab == 0) myPlaylists.size else favoritePlaylists.size
+                                    val sortableCount = if (selectedTab == 0) myPlaylists.count { !it.isPureLocalPlaylist } else favoritePlaylists.size
                                     Box {
                                         IconButton(
                                             onClick = { showAssetToolsMenu = true },
@@ -1142,6 +1172,31 @@ fun LibraryScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        val showDownloadShortcut = downloadBadgeState.activeCount > 0 || downloadBadgeState.hasUnseenSessionCompletion
+                        AnimatedVisibility(
+                            visible = showDownloadShortcut,
+                            enter = fadeIn(tween(220)) +
+                                expandHorizontally(
+                                    expandFrom = Alignment.End,
+                                    animationSpec = ConceptMotion.spatialSheetSpring()
+                                ) +
+                                scaleIn(initialScale = 0.86f, animationSpec = ConceptMotion.spatialSheetSpring()),
+                            exit = fadeOut(tween(180)) +
+                                shrinkHorizontally(
+                                    shrinkTowards = Alignment.End,
+                                    animationSpec = tween(220)
+                                ) +
+                                scaleOut(targetScale = 0.86f, animationSpec = tween(180))
+                        ) {
+                            DynamicDownloadQueueShortcutButton(
+                                state = downloadBadgeState,
+                                onClick = {
+                                    MusicDownloadManager.markDownloadQueueViewed()
+                                    onOpenDownloadQueue()
+                                }
+                            )
+                        }
+
                         // 平板横屏双栏平铺模式（DUAL_PANE_HOME）下，左侧发现页已常驻搜索入口，右侧我的页不再重复显示搜索按钮；
                         // 平板竖屏或手机端独立展示「我的」页时保留搜索与设置按钮
                         if (adaptiveInfo.navigationMode != com.concept.music.ui.theme.ConceptNavigationMode.DUAL_PANE_HOME) {
@@ -1211,7 +1266,7 @@ fun LibraryScreen(
         val sortTab = playlistSortTargetTab
         if (sortTab != null && !isOverlayOpen) {
             val isCreatedByMe = sortTab == 0
-            val sourcePlaylists = if (isCreatedByMe) myPlaylists else favoritePlaylists
+            val sourcePlaylists = if (isCreatedByMe) myPlaylists.filterNot { it.isPureLocalPlaylist } else favoritePlaylists
             PlaylistOrderSortSheet(
                 title = if (isCreatedByMe) "调整自建歌单顺序" else "调整收藏歌单顺序",
                 playlists = sourcePlaylists,
@@ -1592,6 +1647,132 @@ private fun MediaShortcutCard(
                     ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 我的页右上角动态下载队列快捷入口（无边框设计）：
+ * - 批量/单曲下载进行中时，在搜索图标左侧平滑滑入展示实时环形进度与剩余任务数；
+ * - 全部下载完毕后短暂呈现完成/异常反馈，自动柔和收起；点击一键直达下载队列页面。
+ */
+@Composable
+private fun DynamicDownloadQueueShortcutButton(
+    state: DownloadShortcutBadgeState,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isDark = LocalIsDarkTheme.current
+    val isLifecycleStarted = rememberIsLifecycleStarted()
+    val isActive = state.activeCount > 0
+    val isAllFailed = !isActive && state.failedInSessionCount > 0 && state.completedInSessionCount == 0
+
+    val accentColor = when {
+        isActive -> ConceptPrimary
+        isAllFailed -> ConceptCoralAccent
+        else -> ConceptMintAccent
+    }
+    val containerColor = accentColor.copy(alpha = if (isDark) 0.18f else 0.12f)
+
+    val animatedProgress by animateFloatAsState(
+        targetValue = state.overallProgress.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "downloadShortcutProgress"
+    )
+
+    val arrowPulseY = if (isActive && isLifecycleStarted) {
+        val infiniteTransition = rememberInfiniteTransition(label = "downloadShortcutArrowPulse")
+        val y by infiniteTransition.animateFloat(
+            initialValue = -1.6f,
+            targetValue = 1.6f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 780, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "downloadShortcutArrowOffsetY"
+        )
+        y
+    } else {
+        0f
+    }
+
+    Surface(
+        shape = CircleShape,
+        color = containerColor,
+        contentColor = accentColor,
+        shadowElevation = 0.dp,
+        modifier = modifier
+            .height(34.dp)
+            .clip(CircleShape)
+            .softClickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            if (isActive) {
+                Box(
+                    modifier = Modifier.size(20.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val strokePx = 2.1.dp.toPx()
+                        val inset = strokePx / 2f
+                        val arcSize = Size(size.width - strokePx, size.height - strokePx)
+                        drawArc(
+                            color = accentColor.copy(alpha = 0.22f),
+                            startAngle = 0f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        )
+                        val sweep = (animatedProgress.coerceIn(0.08f, 1f)) * 360f
+                        drawArc(
+                            color = accentColor,
+                            startAngle = -90f,
+                            sweepAngle = sweep,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Rounded.ArrowDownward,
+                        contentDescription = "查看下载队列",
+                        tint = accentColor,
+                        modifier = Modifier
+                            .size(11.5.dp)
+                            .graphicsLayer {
+                                translationY = arrowPulseY.dp.toPx()
+                            }
+                    )
+                }
+                Text(
+                    text = state.activeCount.toString(),
+                    color = accentColor,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1
+                )
+            } else {
+                Icon(
+                    imageVector = if (isAllFailed) Icons.Rounded.ErrorOutline else Icons.Rounded.DownloadDone,
+                    contentDescription = "查看下载队列",
+                    tint = accentColor,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = if (isAllFailed) "失败" else "已下完",
+                    color = accentColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
                 )
             }
         }

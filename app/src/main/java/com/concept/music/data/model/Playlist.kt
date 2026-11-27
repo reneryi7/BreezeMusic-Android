@@ -20,9 +20,14 @@ data class Playlist(
     val listCreateUserid: String = "",
     val listCreateListid: String = "",
     val listCreateGid: String = "",
-    val specialId: String = ""
+    val specialId: String = "",
+    val isLocalOnly: Boolean = false
 ) {
     val songCount: Int get() = trackCount
+
+    /** 是否为纯本机自建歌单（绝不同步歌单名与曲目至云端） */
+    val isPureLocalPlaylist: Boolean
+        get() = isLocalOnly || id.startsWith("local_pl_")
 
     /** 是否为酷狗系统遗留的「默认收藏」歌单（is_def = 1） */
     val isDefaultCollect: Boolean
@@ -32,6 +37,7 @@ data class Playlist(
      * 解析酷狗云端歌单的数字 listid（支持从 listId、listCreateListid 及 collection_3_{uid}_{listid}_0 中提取）
      */
     fun resolveEffectiveListId(): Long {
+        if (isPureLocalPlaylist) return 0L
         if (listId > 0L) return listId
         listCreateListid.trim().toLongOrNull()?.takeIf { it > 0L }?.let { return it }
         for (raw in listOf(globalCollectionId, listCreateGid, id, specialId)) {
@@ -128,6 +134,7 @@ data class Playlist(
         listCreateUserid = (listCreateUserid as String?) ?: "",
         listCreateListid = (listCreateListid as String?) ?: "",
         listCreateGid = (listCreateGid as String?) ?: "",
-        specialId = (specialId as String?) ?: ""
+        specialId = (specialId as String?) ?: "",
+        isLocalOnly = isLocalOnly || ((id as String?)?.startsWith("local_pl_") == true)
     )
 }

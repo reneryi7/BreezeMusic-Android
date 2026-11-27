@@ -1,23 +1,26 @@
 package com.concept.music.ui.library
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -25,23 +28,31 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,16 +60,28 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import coil.compose.AsyncImage
 import com.concept.music.data.model.*
+import com.concept.music.ui.components.AddToPlaylistDialog
 import com.concept.music.ui.components.BadgeTag
+import com.concept.music.ui.components.CreatePlaylistDialog
 import com.concept.music.ui.components.rememberOptimizedAsyncImageModel
 import com.concept.music.ui.theme.*
 import kotlinx.coroutines.launch
 import java.util.Locale
 
 internal sealed class LocalDrillDownTarget {
-    data class Folder(val folderId: String, val folderName: String) : LocalDrillDownTarget()
-    data class Artist(val normalizedKey: String, val artistName: String) : LocalDrillDownTarget()
-    data class Album(val normalizedKey: String, val albumName: String) : LocalDrillDownTarget()
+    abstract val stableKey: String
+
+    data class Folder(val folderId: String, val folderName: String) : LocalDrillDownTarget() {
+        override val stableKey: String get() = "folder_$folderId"
+    }
+
+    data class Artist(val normalizedKey: String, val artistName: String) : LocalDrillDownTarget() {
+        override val stableKey: String get() = "artist_$normalizedKey"
+    }
+
+    data class Album(val normalizedKey: String, val albumName: String) : LocalDrillDownTarget() {
+        override val stableKey: String get() = "album_$normalizedKey"
+    }
 }
 
 private enum class ActiveSecondaryPopup {
@@ -69,9 +92,9 @@ private enum class ActiveSecondaryPopup {
 
 /**
  * 本地音乐核心展示页面：
- * - 空态：简洁优雅的文件夹导入引导舞台，明确支持格式与离线隐私承诺；
- * - 已导入态：Hero 统计概览（精确统计 Hi-Res / 无损曲目数与总大小）+ 一级四维流体滑动 Tab
- *   （全部歌曲 / 文件夹 / 歌手[多歌手严格拆分] / 专辑）+ 多目录 Tag 切换 + 通用二级丝滑灵动弹性小浮窗筛选（音质 / 排序）。
+ * - 空态：简洁优雅的无框文件夹导入引导舞台，明确支持格式与离线隐私承诺；
+ * - 已导入态：无框 Hero 统计概览 + 一级四维流体滑动 Tab（全部歌曲 / 文件夹 / 歌手 / 专辑，虚化滑移动效仅作用于下方列表）
+ *   + 二级钻取平滑推入/弹出过渡 + 无框沉浸式歌曲列表 + 仅歌曲列表可见的多选管理与零云同步加歌单/建单 + 紧凑无框音质/排序浮窗。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -79,19 +102,22 @@ internal fun LocalMusicTabContent(
     tracks: List<LocalAudioTrack>,
     folders: List<LocalMusicFolder>,
     lyricFolders: List<LocalLyricFolder>,
+    playlists: List<Playlist>,
     summary: LocalLibrarySummary,
     scanProgress: LocalScanProgress,
     searchQuery: String,
     primaryTab: LocalPrimaryTab,
     onSelectPrimaryTab: (LocalPrimaryTab) -> Unit,
-    selectedFolderTagId: String?,
-    onSelectFolderTagId: (String?) -> Unit,
     qualityFilter: LocalQualityFilter,
     onSelectQualityFilter: (LocalQualityFilter) -> Unit,
     sortOption: LocalSortOption,
     onSelectSortOption: (LocalSortOption) -> Unit,
     drillDown: LocalDrillDownTarget?,
     onChangeDrillDown: (LocalDrillDownTarget?) -> Unit,
+    selectionMode: Boolean,
+    selectedTrackIds: Set<String>,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onSelectedTrackIdsChange: (Set<String>) -> Unit,
     currentPlayingSongId: String? = null,
     isPlaying: Boolean = false,
     onPickMusicFolder: () -> Unit,
@@ -99,32 +125,42 @@ internal fun LocalMusicTabContent(
     onRescanFolder: (LocalMusicFolder) -> Unit,
     onRemoveFolder: (LocalMusicFolder) -> Unit,
     onRemoveLyricFolder: (LocalLyricFolder) -> Unit,
+    onRemoveTracksBatch: (Collection<String>) -> Unit,
+    onAddSongsToPlaylist: (Playlist, List<Song>) -> Unit,
+    onCreateLocalPlaylistWithSongs: (String, List<Song>, (Boolean) -> Unit) -> Unit,
     onPlaySong: (Song, List<Song>) -> Unit,
+    onAddNextPlay: (Song) -> Unit,
     onOpenSongActions: ((Song) -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val isDark = LocalIsDarkTheme.current
     val adaptive = LocalConceptAdaptiveInfo.current
     val cyanAccent = conceptCyanAccentColor()
     val goldAccent = conceptGoldAccentColor()
     val cardBg = conceptFloatingCardColor()
     val elevatedBg = conceptElevatedSurfaceColor()
-    val primaryText = MaterialTheme.colorScheme.onSurface
     val subText = MaterialTheme.colorScheme.onSurfaceVariant
 
     var pendingRemoveFolder by remember { mutableStateOf<LocalMusicFolder?>(null) }
     var activePopup by remember { mutableStateOf(ActiveSecondaryPopup.NONE) }
+    var showBatchAddToPlaylistDialog by remember { mutableStateOf(false) }
+    var showCreateLocalPlaylistDialog by remember { mutableStateOf(false) }
+    var showBatchRemoveTracksDialog by remember { mutableStateOf(false) }
 
-    // 若已导入的文件夹被移除且正好被目录 Tag 或钻取态选中，自动回退至「全部」
-    LaunchedEffect(folders, selectedFolderTagId, drillDown) {
-        if (selectedFolderTagId != null && folders.none { it.id == selectedFolderTagId }) {
-            onSelectFolderTagId(null)
-        }
+    // 若已导入的文件夹被移除且正好处于该文件夹钻取态，自动回退至顶层
+    LaunchedEffect(folders, drillDown) {
         if (drillDown is LocalDrillDownTarget.Folder && folders.none { it.id == drillDown.folderId }) {
             onChangeDrillDown(null)
         }
     }
 
-    // 当尚未导入任何文件夹且无歌曲（也未处于扫描态）时，展示极简高质感引导舞台
+    // 切换钻取页或进入多选时收起浮窗
+    LaunchedEffect(drillDown, selectionMode) {
+        activePopup = ActiveSecondaryPopup.NONE
+    }
+
+    // 当尚未导入任何文件夹且无歌曲（也未处于扫描态）时，展示极简无框引导舞台
     if (tracks.isEmpty() && folders.isEmpty() && !scanProgress.isScanning) {
         LocalMusicEmptyStage(
             isDark = isDark,
@@ -142,41 +178,6 @@ internal fun LocalMusicTabContent(
     }
     val allAlbumGroupsBase = remember(tracks) {
         LocalMusicQueryEngine.groupByAlbums(tracks)
-    }
-
-    // 计算当前视图上下文的底层曲目池（供二级音质筛选实时计数与展示）
-    val contextBaseTracks = remember(tracks, drillDown, primaryTab, selectedFolderTagId) {
-        when (val d = drillDown) {
-            is LocalDrillDownTarget.Folder -> tracks.filter { it.folderId == d.folderId }
-            is LocalDrillDownTarget.Artist -> tracks.filter { t ->
-                val list = t.artists.ifEmpty { LocalMusicQueryEngine.splitArtistNames(t.artist) }
-                list.any { LocalMusicQueryEngine.normalizeArtistKey(it) == d.normalizedKey }
-            }
-            is LocalDrillDownTarget.Album -> tracks.filter { t ->
-                LocalMusicQueryEngine.normalizeAlbumKey(t.album) == d.normalizedKey
-            }
-            null -> {
-                if (primaryTab == LocalPrimaryTab.ALL_SONGS && !selectedFolderTagId.isNullOrBlank()) {
-                    tracks.filter { it.folderId == selectedFolderTagId }
-                } else {
-                    tracks
-                }
-            }
-        }
-    }
-
-    val displayedTracks = remember(contextBaseTracks, qualityFilter, sortOption, searchQuery) {
-        LocalMusicQueryEngine.filterAndSortTracks(
-            tracks = contextBaseTracks,
-            folderId = null,
-            qualityFilter = qualityFilter,
-            sortOption = sortOption,
-            searchQuery = searchQuery
-        )
-    }
-
-    val displayedSongs = remember(displayedTracks) {
-        displayedTracks.map { it.toSong() }
     }
 
     val displayedArtists = remember(tracks, qualityFilter, sortOption, searchQuery) {
@@ -218,432 +219,744 @@ internal fun LocalMusicTabContent(
         }
     }
 
-    val qualityCounts = remember(contextBaseTracks) {
-        LocalQualityFilter.entries.associateWith { filter ->
-            LocalMusicQueryEngine.countByQualityFilter(contextBaseTracks, filter)
-        }
+    // 计算当前视图上下文的底层曲目池（供多选操作条与实时筛选共享）
+    val activeContextBaseTracks = remember(tracks, drillDown) {
+        resolveTracksForDrillDown(tracks, drillDown)
+    }
+    val activeDisplayedTracks = remember(activeContextBaseTracks, qualityFilter, sortOption, searchQuery) {
+        LocalMusicQueryEngine.filterAndSortTracks(
+            tracks = activeContextBaseTracks,
+            folderId = null,
+            qualityFilter = qualityFilter,
+            sortOption = sortOption,
+            searchQuery = searchQuery
+        )
     }
 
-    val listState = rememberLazyListState()
+    val rootListState = rememberLazyListState()
     val horizontalPad = if (adaptive.isLargeScreenDevice) adaptive.horizontalContentPadding else 16.dp
+
+    // 仅作用于下方列表内容的 120fps GPU 横移 + 方向性运动虚化，绝不波及顶部 Hero 卡、一级 Tag 栏与工具栏
+    val tabSwitchAnimMod = rememberCategorySwitchGraphicModifier(
+        selectedIndex = primaryTab.ordinal,
+        applyMotionBlur = true
+    )
+
+    val latestPrimaryTab by rememberUpdatedState(primaryTab)
+    val latestDrillDown by rememberUpdatedState(drillDown)
+    val latestSelectionMode by rememberUpdatedState(selectionMode)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .then(
-                if (drillDown == null) {
-                    Modifier.horizontalCategorySwipe(
-                        currentIndex = primaryTab.ordinal,
-                        itemCount = LocalPrimaryTab.entries.size,
-                        onSelectIndex = { nextIdx ->
+            .pointerInput(Unit) {
+                var totalDx = 0f
+                var triggered = false
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        totalDx = 0f
+                        triggered = false
+                    },
+                    onDragEnd = {
+                        totalDx = 0f
+                        triggered = false
+                    },
+                    onDragCancel = {
+                        totalDx = 0f
+                        triggered = false
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        if (triggered || latestDrillDown != null || latestSelectionMode) return@detectHorizontalDragGestures
+                        totalDx += dragAmount
+                        val curIdx = latestPrimaryTab.ordinal
+                        val count = LocalPrimaryTab.entries.size
+                        if (totalDx <= -130f && curIdx < count - 1) {
+                            triggered = true
+                            change.consume()
                             activePopup = ActiveSecondaryPopup.NONE
-                            onSelectPrimaryTab(LocalPrimaryTab.entries[nextIdx])
+                            onSelectPrimaryTab(LocalPrimaryTab.entries[curIdx + 1])
+                        } else if (totalDx >= 130f && curIdx > 0) {
+                            triggered = true
+                            change.consume()
+                            activePopup = ActiveSecondaryPopup.NONE
+                            onSelectPrimaryTab(LocalPrimaryTab.entries[curIdx - 1])
                         }
-                    )
-                } else {
-                    Modifier
-                }
-            ),
+                    }
+                )
+            },
         contentAlignment = Alignment.TopCenter
     ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .widthIn(max = 880.dp)
-                .fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = horizontalPad,
-                end = horizontalPad,
-                top = 6.dp,
-                bottom = 132.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            // 1. 顶部概览卡（钻取态展示清爽的子视图头部，顶层展示完整 Hero 统计卡）
-            if (drillDown == null) {
-                item(key = "local_hero_card") {
-                    LocalLibraryHeroCard(
-                        summary = summary,
-                        sampleCovers = remember(tracks) {
-                            tracks.mapNotNull { it.coverModelUrl.takeIf { u -> u.isNotBlank() } }.distinct().take(4)
-                        },
-                        scanProgress = scanProgress,
-                        isDark = isDark,
-                        cyanAccent = cyanAccent,
-                        goldAccent = goldAccent,
-                        onPlayAll = {
-                            if (displayedSongs.isNotEmpty()) {
-                                onPlaySong(displayedSongs.first(), displayedSongs)
-                            } else if (tracks.isNotEmpty()) {
-                                val all = tracks.map { it.toSong() }
-                                onPlaySong(all.first(), all)
-                            }
-                        },
-                        onShufflePlay = {
-                            val pool = if (displayedSongs.isNotEmpty()) displayedSongs else tracks.map { it.toSong() }
-                            if (pool.isNotEmpty()) {
-                                val shuffled = pool.shuffled()
-                                onPlaySong(shuffled.first(), shuffled)
-                            }
-                        },
-                        onPickMusicFolder = onPickMusicFolder
+        // 顶层与二级钻取页面之间具备丝滑弹性推入 / 弹出过渡，并完整保留顶层列表滚动位置
+        AnimatedContent(
+            targetState = drillDown,
+            contentKey = { target -> target?.stableKey ?: "local_root_page" },
+            transitionSpec = {
+                val enteringDrillDown = initialState == null && targetState != null
+                val exitingDrillDown = initialState != null && targetState == null
+                when {
+                    enteringDrillDown -> ContentTransform(
+                        targetContentEnter = slideInHorizontally(
+                            animationSpec = ConceptMotion.spatialPageSpring()
+                        ) { fullWidth -> (fullWidth * 0.28f).toInt() } +
+                            fadeIn(animationSpec = tween(220, easing = ConceptMotion.EmphasizedDecelerate)),
+                        initialContentExit = slideOutHorizontally(
+                            animationSpec = ConceptMotion.spatialPageSpring()
+                        ) { fullWidth -> -(fullWidth * 0.12f).toInt() } +
+                            fadeOut(animationSpec = tween(180, easing = ConceptMotion.EmphasizedAccelerate)),
+                        sizeTransform = SizeTransform(clip = false) { _, _ -> snap() }
+                    )
+                    exitingDrillDown -> ContentTransform(
+                        targetContentEnter = slideInHorizontally(
+                            animationSpec = ConceptMotion.spatialPageSpring()
+                        ) { fullWidth -> -(fullWidth * 0.12f).toInt() } +
+                            fadeIn(animationSpec = tween(220, easing = ConceptMotion.EmphasizedDecelerate)),
+                        initialContentExit = slideOutHorizontally(
+                            animationSpec = ConceptMotion.spatialPageSpring()
+                        ) { fullWidth -> (fullWidth * 0.28f).toInt() } +
+                            fadeOut(animationSpec = tween(180, easing = ConceptMotion.EmphasizedAccelerate)),
+                        sizeTransform = SizeTransform(clip = false) { _, _ -> snap() }
+                    )
+                    else -> ContentTransform(
+                        targetContentEnter = fadeIn(animationSpec = tween(200)),
+                        initialContentExit = fadeOut(animationSpec = tween(160)),
+                        sizeTransform = SizeTransform(clip = false) { _, _ -> snap() }
                     )
                 }
-
-                // 2. 一级筛选：流体滑动 Tab 栏（全部歌曲 / 文件夹 / 歌手 / 专辑）
-                item(key = "local_primary_tabs") {
-                    val primaryTabs = listOf(
-                        ConceptCategoryTabItem(LocalPrimaryTab.ALL_SONGS.key, "全部歌曲", summary.totalCount.toString(), ConceptPrimary),
-                        ConceptCategoryTabItem(LocalPrimaryTab.FOLDERS.key, "文件夹", folders.size.toString(), cyanAccent),
-                        ConceptCategoryTabItem(LocalPrimaryTab.ARTISTS.key, "歌手", allArtistGroupsBase.size.toString(), ConceptCoralAccent),
-                        ConceptCategoryTabItem(LocalPrimaryTab.ALBUMS.key, "专辑", allAlbumGroupsBase.size.toString(), goldAccent)
-                    )
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        ConceptSlidingCategoryTabs(
-                            tabs = primaryTabs,
-                            selectedKey = primaryTab.key,
-                            onSelectTab = { key ->
-                                val target = LocalPrimaryTab.entries.firstOrNull { it.key == key } ?: LocalPrimaryTab.ALL_SONGS
-                                activePopup = ActiveSecondaryPopup.NONE
-                                onSelectPrimaryTab(target)
-                            },
-                            itemSpacing = 20.dp,
-                            fontSize = 15.sp,
-                            indicatorWidth = 22.dp,
-                            scrollable = true
-                        )
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
-                        )
-                    }
-                }
-
-                // 3. 多文件夹目录 Tag 快速切换（当存在 >= 2 个音乐目录且位于「全部歌曲」时展示，默认选中全部目录）
-                if (primaryTab == LocalPrimaryTab.ALL_SONGS && folders.size >= 2) {
-                    item(key = "local_folder_tags") {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            contentPadding = PaddingValues(vertical = 2.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            item(key = "folder_tag_all") {
-                                FolderFilterTagChip(
-                                    label = "全部目录",
-                                    count = summary.totalCount,
-                                    selected = selectedFolderTagId == null,
-                                    accentColor = ConceptPrimary,
-                                    onClick = { onSelectFolderTagId(null) }
-                                )
-                            }
-                            items(items = folders, key = { "folder_tag_${it.id}" }) { folder ->
-                                FolderFilterTagChip(
-                                    label = folder.displayName,
-                                    count = folder.trackCount,
-                                    selected = selectedFolderTagId == folder.id,
-                                    accentColor = cyanAccent,
-                                    onClick = {
-                                        onSelectFolderTagId(if (selectedFolderTagId == folder.id) null else folder.id)
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
-                // 钻取子视图头部（某个文件夹 / 歌手 / 专辑内的歌曲列表）
-                item(key = "local_drilldown_header") {
-                    val (categoryLabel, titleLabel, badgeColor) = when (drillDown) {
-                        is LocalDrillDownTarget.Folder -> Triple("文件夹", drillDown.folderName, cyanAccent)
-                        is LocalDrillDownTarget.Artist -> Triple("歌手", drillDown.artistName, ConceptCoralAccent)
-                        is LocalDrillDownTarget.Album -> Triple("专辑", drillDown.albumName, goldAccent)
-                    }
-                    LocalDrillDownHeaderCard(
-                        categoryLabel = categoryLabel,
-                        title = titleLabel,
-                        trackCount = displayedTracks.size,
-                        hiResCount = displayedTracks.count { it.isHiRes },
-                        losslessCount = displayedTracks.count { !it.isHiRes && it.isLossless },
-                        accentColor = badgeColor,
-                        cardBg = cardBg,
-                        onBack = {
-                            activePopup = ActiveSecondaryPopup.NONE
-                            onChangeDrillDown(null)
-                        },
-                        onPlayAll = {
-                            if (displayedSongs.isNotEmpty()) {
-                                onPlaySong(displayedSongs.first(), displayedSongs)
-                            }
-                        }
-                    )
+            },
+            modifier = Modifier.fillMaxSize(),
+            label = "localDrillDownPageTransition"
+        ) { activeDrillDown ->
+            val pageBaseTracks = remember(tracks, activeDrillDown) {
+                resolveTracksForDrillDown(tracks, activeDrillDown)
+            }
+            val pageDisplayedTracks = remember(pageBaseTracks, qualityFilter, sortOption, searchQuery) {
+                LocalMusicQueryEngine.filterAndSortTracks(
+                    tracks = pageBaseTracks,
+                    folderId = null,
+                    qualityFilter = qualityFilter,
+                    sortOption = sortOption,
+                    searchQuery = searchQuery
+                )
+            }
+            val pageDisplayedSongs = remember(pageDisplayedTracks) {
+                pageDisplayedTracks.map { it.toSong() }
+            }
+            val pageQualityCounts = remember(pageBaseTracks) {
+                LocalQualityFilter.entries.associateWith { filter ->
+                    LocalMusicQueryEngine.countByQualityFilter(pageBaseTracks, filter)
                 }
             }
 
-            // 4. 二级筛选工具条：左侧结果摘要 + 右侧两个独立灵动按钮（音质 / 排序）
-            item(key = "local_secondary_filter_bar") {
-                val summaryLeftText = when {
-                    drillDown != null -> "共 ${displayedTracks.size} 首曲目"
-                    primaryTab == LocalPrimaryTab.ALL_SONGS -> {
-                        val folderSuffix = selectedFolderTagId?.let { id ->
-                            folders.firstOrNull { it.id == id }?.displayName?.let { " · $it" }
-                        }.orEmpty()
-                        "${displayedTracks.size} 首歌曲$folderSuffix"
-                    }
-                    primaryTab == LocalPrimaryTab.FOLDERS -> "${displayedFolders.size} 个音乐目录"
-                    primaryTab == LocalPrimaryTab.ARTISTS -> "${displayedArtists.size} 位歌手"
-                    else -> "${displayedAlbums.size} 张专辑"
-                }
+            val showTrackList = activeDrillDown != null || primaryTab == LocalPrimaryTab.ALL_SONGS
+            val canShowMultiSelectBtn = showTrackList && pageDisplayedTracks.isNotEmpty() && !selectionMode
+            val listState = if (activeDrillDown == null) rootListState else rememberLazyListState()
 
-                Row(
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .widthIn(max = 880.dp)
+                        .fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = horizontalPad,
+                        end = horizontalPad,
+                        top = 6.dp,
+                        bottom = if (selectionMode) 176.dp else 132.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(if (showTrackList) 2.dp else 10.dp)
                 ) {
-                    Text(
-                        text = summaryLeftText,
-                        color = subText,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(start = 4.dp, end = 8.dp)
-                    )
+                    // 1. 顶部概览卡（顶层为 Hero 统计卡 + 一级 Tab 栏；二级页为清爽钻取头部）
+                    if (activeDrillDown == null) {
+                        item(key = "local_hero_card") {
+                            Column {
+                                LocalLibraryHeroCard(
+                                    summary = summary,
+                                    sampleCovers = remember(tracks) {
+                                        tracks.mapNotNull { it.coverModelUrl.takeIf { u -> u.isNotBlank() } }.distinct().take(4)
+                                    },
+                                    scanProgress = scanProgress,
+                                    isDark = isDark,
+                                    cyanAccent = cyanAccent,
+                                    goldAccent = goldAccent,
+                                    onPlayAll = {
+                                        if (pageDisplayedSongs.isNotEmpty()) {
+                                            onPlaySong(pageDisplayedSongs.first(), pageDisplayedSongs)
+                                        } else if (tracks.isNotEmpty()) {
+                                            val all = tracks.map { it.toSong() }
+                                            onPlaySong(all.first(), all)
+                                        }
+                                    },
+                                    onShufflePlay = {
+                                        val pool = if (pageDisplayedSongs.isNotEmpty()) pageDisplayedSongs else tracks.map { it.toSong() }
+                                        if (pool.isNotEmpty()) {
+                                            val shuffled = pool.shuffled()
+                                            onPlaySong(shuffled.first(), shuffled)
+                                        }
+                                    },
+                                    onPickMusicFolder = onPickMusicFolder
+                                )
+                                if (showTrackList) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                }
+                            }
+                        }
 
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // 独立「音质」按钮 + 丝滑灵动弹性小浮窗
-                        Box {
-                            LocalFilterAnchorButton(
-                                icon = Icons.Rounded.GraphicEq,
-                                label = if (qualityFilter == LocalQualityFilter.ALL) "音质" else qualityFilter.label,
-                                active = qualityFilter != LocalQualityFilter.ALL,
-                                expanded = activePopup == ActiveSecondaryPopup.QUALITY,
-                                accentColor = if (qualityFilter == LocalQualityFilter.HI_RES) goldAccent else cyanAccent,
-                                containerBg = elevatedBg,
-                                onClick = {
-                                    activePopup = if (activePopup == ActiveSecondaryPopup.QUALITY) {
-                                        ActiveSecondaryPopup.NONE
-                                    } else {
-                                        ActiveSecondaryPopup.QUALITY
+                        // 2. 一级筛选：流体滑动 Tab 栏（全部歌曲 / 文件夹 / 歌手 / 专辑）
+                        item(key = "local_primary_tabs") {
+                            val primaryTabs = listOf(
+                                ConceptCategoryTabItem(LocalPrimaryTab.ALL_SONGS.key, "全部歌曲", summary.totalCount.toString(), ConceptPrimary),
+                                ConceptCategoryTabItem(LocalPrimaryTab.FOLDERS.key, "文件夹", folders.size.toString(), cyanAccent),
+                                ConceptCategoryTabItem(LocalPrimaryTab.ARTISTS.key, "歌手", allArtistGroupsBase.size.toString(), ConceptCoralAccent),
+                                ConceptCategoryTabItem(LocalPrimaryTab.ALBUMS.key, "专辑", allAlbumGroupsBase.size.toString(), goldAccent)
+                            )
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                ConceptSlidingCategoryTabs(
+                                    tabs = primaryTabs,
+                                    selectedKey = primaryTab.key,
+                                    onSelectTab = { key ->
+                                        val target = LocalPrimaryTab.entries.firstOrNull { it.key == key } ?: LocalPrimaryTab.ALL_SONGS
+                                        activePopup = ActiveSecondaryPopup.NONE
+                                        onSelectPrimaryTab(target)
+                                    },
+                                    itemSpacing = 20.dp,
+                                    fontSize = 15.sp,
+                                    indicatorWidth = 22.dp,
+                                    scrollable = true
+                                )
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                                )
+                                if (showTrackList) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
+                            }
+                        }
+                    } else {
+                        item(key = "local_drilldown_header") {
+                            val (categoryLabel, titleLabel, badgeColor) = when (activeDrillDown) {
+                                is LocalDrillDownTarget.Folder -> Triple("文件夹", activeDrillDown.folderName, cyanAccent)
+                                is LocalDrillDownTarget.Artist -> Triple("歌手", activeDrillDown.artistName, ConceptCoralAccent)
+                                is LocalDrillDownTarget.Album -> Triple("专辑", activeDrillDown.albumName, goldAccent)
+                            }
+                            Column {
+                                LocalDrillDownHeaderCard(
+                                    categoryLabel = categoryLabel,
+                                    title = titleLabel,
+                                    trackCount = pageDisplayedTracks.size,
+                                    hiResCount = pageDisplayedTracks.count { it.isHiRes },
+                                    losslessCount = pageDisplayedTracks.count { !it.isHiRes && it.isLossless },
+                                    accentColor = badgeColor,
+                                    cardBg = cardBg,
+                                    onBack = {
+                                        activePopup = ActiveSecondaryPopup.NONE
+                                        onChangeDrillDown(null)
+                                    },
+                                    onPlayAll = {
+                                        if (pageDisplayedSongs.isNotEmpty()) {
+                                            onPlaySong(pageDisplayedSongs.first(), pageDisplayedSongs)
+                                        }
+                                    }
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+                        }
+                    }
+
+                    // 3. 二级筛选工具条：左侧结果摘要 + 右侧多选（仅歌曲列表非空时显示）/ 音质 / 默认排序
+                    item(key = "local_secondary_filter_bar") {
+                        val summaryLeftText = when {
+                            activeDrillDown != null -> "共 ${pageDisplayedTracks.size} 首曲目"
+                            primaryTab == LocalPrimaryTab.ALL_SONGS -> "${pageDisplayedTracks.size} 首歌曲"
+                            primaryTab == LocalPrimaryTab.FOLDERS -> "${displayedFolders.size} 个音乐目录"
+                            primaryTab == LocalPrimaryTab.ARTISTS -> "${displayedArtists.size} 位歌手"
+                            else -> "${displayedAlbums.size} 张专辑"
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = summaryLeftText,
+                                color = subText,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 4.dp, end = 6.dp)
+                            )
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 仅当歌曲列表有歌曲展示时呈现「多选」无框色阶按钮
+                                if (canShowMultiSelectBtn) {
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = elevatedBg,
+                                        modifier = Modifier.softCardClickable(shape = RoundedCornerShape(14.dp)) {
+                                            activePopup = ActiveSecondaryPopup.NONE
+                                            onSelectionModeChange(true)
+                                            onSelectedTrackIdsChange(emptySet())
+                                        }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.5.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Checklist,
+                                                contentDescription = "多选歌曲",
+                                                tint = cyanAccent,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                            Text(
+                                                text = "多选",
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
                                     }
                                 }
-                            )
-                            if (activePopup == ActiveSecondaryPopup.QUALITY) {
-                                LocalFilterFloatingPopup(
-                                    title = "音质筛选",
-                                    accentColor = cyanAccent,
-                                    onDismiss = { activePopup = ActiveSecondaryPopup.NONE },
-                                    items = LocalQualityFilter.entries.map { qf ->
-                                        FilterPopupOption(
-                                            key = qf.key,
-                                            label = qf.label,
-                                            subtitle = qf.shortHint,
-                                            count = qualityCounts[qf] ?: 0,
-                                            selected = qf == qualityFilter,
-                                            accentColor = when (qf) {
-                                                LocalQualityFilter.HI_RES -> goldAccent
-                                                LocalQualityFilter.FLAC_WAV -> cyanAccent
-                                                LocalQualityFilter.MP3_AAC -> ConceptPrimary
-                                                LocalQualityFilter.ALL -> ConceptPrimary
+
+                                // 独立「音质」无框按钮 + 紧凑弹性小浮窗
+                                Box {
+                                    LocalFilterAnchorButton(
+                                        icon = Icons.Rounded.GraphicEq,
+                                        label = if (qualityFilter == LocalQualityFilter.ALL) "音质" else qualityFilter.label,
+                                        active = qualityFilter != LocalQualityFilter.ALL,
+                                        expanded = activePopup == ActiveSecondaryPopup.QUALITY,
+                                        accentColor = if (qualityFilter == LocalQualityFilter.HI_RES) goldAccent else cyanAccent,
+                                        containerBg = elevatedBg,
+                                        onClick = {
+                                            activePopup = if (activePopup == ActiveSecondaryPopup.QUALITY) {
+                                                ActiveSecondaryPopup.NONE
+                                            } else {
+                                                ActiveSecondaryPopup.QUALITY
+                                            }
+                                        }
+                                    )
+                                    if (activePopup == ActiveSecondaryPopup.QUALITY) {
+                                        LocalFilterFloatingPopup(
+                                            title = "音质筛选",
+                                            popupWidth = 174.dp,
+                                            onDismiss = { activePopup = ActiveSecondaryPopup.NONE },
+                                            items = LocalQualityFilter.entries.map { qf ->
+                                                FilterPopupOption(
+                                                    key = qf.key,
+                                                    label = qf.label,
+                                                    subtitle = qf.shortHint,
+                                                    count = pageQualityCounts[qf] ?: 0,
+                                                    selected = qf == qualityFilter,
+                                                    accentColor = when (qf) {
+                                                        LocalQualityFilter.HI_RES -> goldAccent
+                                                        LocalQualityFilter.FLAC_WAV -> cyanAccent
+                                                        LocalQualityFilter.MP3_AAC -> ConceptPrimary
+                                                        LocalQualityFilter.ALL -> ConceptPrimary
+                                                    }
+                                                )
+                                            },
+                                            onSelect = { key ->
+                                                val picked = LocalQualityFilter.entries.firstOrNull { it.key == key }
+                                                    ?: LocalQualityFilter.ALL
+                                                onSelectQualityFilter(picked)
+                                                activePopup = ActiveSecondaryPopup.NONE
                                             }
                                         )
-                                    },
-                                    onSelect = { key ->
-                                        val picked = LocalQualityFilter.entries.firstOrNull { it.key == key }
-                                            ?: LocalQualityFilter.ALL
-                                        onSelectQualityFilter(picked)
-                                        activePopup = ActiveSecondaryPopup.NONE
-                                    }
-                                )
-                            }
-                        }
-
-                        // 独立「排序」按钮 + 丝滑灵动弹性小浮窗
-                        Box {
-                            LocalFilterAnchorButton(
-                                icon = Icons.Rounded.SwapVert,
-                                label = if (sortOption == LocalSortOption.DEFAULT) "排序" else sortOption.label,
-                                active = sortOption != LocalSortOption.DEFAULT,
-                                expanded = activePopup == ActiveSecondaryPopup.SORT,
-                                accentColor = ConceptPrimary,
-                                containerBg = elevatedBg,
-                                onClick = {
-                                    activePopup = if (activePopup == ActiveSecondaryPopup.SORT) {
-                                        ActiveSecondaryPopup.NONE
-                                    } else {
-                                        ActiveSecondaryPopup.SORT
                                     }
                                 }
-                            )
-                            if (activePopup == ActiveSecondaryPopup.SORT) {
-                                LocalFilterFloatingPopup(
-                                    title = "排序方式",
-                                    accentColor = ConceptPrimary,
-                                    onDismiss = { activePopup = ActiveSecondaryPopup.NONE },
-                                    items = LocalSortOption.entries.map { so ->
-                                        FilterPopupOption(
-                                            key = so.key,
-                                            label = so.label,
-                                            subtitle = so.shortHint,
-                                            count = null,
-                                            selected = so == sortOption,
-                                            accentColor = ConceptPrimary
+
+                                // 独立「排序」无框按钮（默认态直接展示「默认」）+ 超紧凑弹性小浮窗
+                                Box {
+                                    LocalFilterAnchorButton(
+                                        icon = Icons.Rounded.SwapVert,
+                                        label = sortOption.label,
+                                        active = sortOption != LocalSortOption.DEFAULT,
+                                        expanded = activePopup == ActiveSecondaryPopup.SORT,
+                                        accentColor = ConceptPrimary,
+                                        containerBg = elevatedBg,
+                                        onClick = {
+                                            activePopup = if (activePopup == ActiveSecondaryPopup.SORT) {
+                                                ActiveSecondaryPopup.NONE
+                                            } else {
+                                                ActiveSecondaryPopup.SORT
+                                            }
+                                        }
+                                    )
+                                    if (activePopup == ActiveSecondaryPopup.SORT) {
+                                        LocalFilterFloatingPopup(
+                                            title = "排序方式",
+                                            popupWidth = 118.dp,
+                                            onDismiss = { activePopup = ActiveSecondaryPopup.NONE },
+                                            items = LocalSortOption.entries.map { so ->
+                                                FilterPopupOption(
+                                                    key = so.key,
+                                                    label = so.label,
+                                                    subtitle = so.shortHint,
+                                                    count = null,
+                                                    selected = so == sortOption,
+                                                    accentColor = ConceptPrimary
+                                                )
+                                            },
+                                            onSelect = { key ->
+                                                val picked = LocalSortOption.entries.firstOrNull { it.key == key }
+                                                    ?: LocalSortOption.DEFAULT
+                                                onSelectSortOption(picked)
+                                                activePopup = ActiveSecondaryPopup.NONE
+                                            }
                                         )
+                                    }
+                                }
+                            }
+                        }
+                        if (showTrackList) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                    }
+
+                    // 4. 列表主体（顶层切换一级 Tab 时，方向性虚化与滑移动画仅挂载在下方列表条目上）
+                    val itemAnimModifier = if (activeDrillDown == null) tabSwitchAnimMod else Modifier
+                    if (showTrackList) {
+                        if (pageDisplayedTracks.isEmpty()) {
+                            item(key = "local_tracks_empty_filter") {
+                                Box(modifier = itemAnimModifier) {
+                                    LocalFilterEmptyCard(
+                                        hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
+                                        cardBg = cardBg,
+                                        onResetFilter = {
+                                            onSelectQualityFilter(LocalQualityFilter.ALL)
+                                        },
+                                        onPickMusicFolder = onPickMusicFolder
+                                    )
+                                }
+                            }
+                        } else {
+                            itemsIndexed(
+                                items = pageDisplayedTracks,
+                                key = { _, track -> "local_track_${track.id}" },
+                                contentType = { _, _ -> "local_track_row" }
+                            ) { index, track ->
+                                val songModel = pageDisplayedSongs.getOrElse(index) { track.toSong() }
+                                val isCurrent = currentPlayingSongId != null &&
+                                    (currentPlayingSongId == songModel.id || currentPlayingSongId == track.id)
+                                val isSelected = track.id in selectedTrackIds
+                                val toggleTrackSelection = {
+                                    val next = if (isSelected) selectedTrackIds - track.id else selectedTrackIds + track.id
+                                    onSelectedTrackIdsChange(next)
+                                }
+                                LocalTrackRowCard(
+                                    index = index + 1,
+                                    track = track,
+                                    sortOption = sortOption,
+                                    isCurrent = isCurrent,
+                                    isPlaying = isCurrent && isPlaying,
+                                    selectionMode = selectionMode,
+                                    isSelected = isSelected,
+                                    cyanAccent = cyanAccent,
+                                    goldAccent = goldAccent,
+                                    onClick = {
+                                        if (selectionMode) {
+                                            toggleTrackSelection()
+                                        } else {
+                                            onPlaySong(songModel, pageDisplayedSongs)
+                                        }
                                     },
-                                    onSelect = { key ->
-                                        val picked = LocalSortOption.entries.firstOrNull { it.key == key }
-                                            ?: LocalSortOption.DEFAULT
-                                        onSelectSortOption(picked)
-                                        activePopup = ActiveSecondaryPopup.NONE
+                                    onLongClick = if (!selectionMode) {
+                                        {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onSelectionModeChange(true)
+                                            onSelectedTrackIdsChange(setOf(track.id))
+                                        }
+                                    } else null,
+                                    onMoreActions = if (!selectionMode) {
+                                        onOpenSongActions?.let { handler -> { handler(songModel) } }
+                                    } else null,
+                                    modifier = itemAnimModifier
+                                )
+                            }
+                        }
+                    } else {
+                        when (primaryTab) {
+                            LocalPrimaryTab.FOLDERS -> {
+                                if (displayedFolders.isEmpty()) {
+                                    item(key = "local_folders_empty") {
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalFilterEmptyCard(
+                                                hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
+                                                cardBg = cardBg,
+                                                onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
+                                                onPickMusicFolder = onPickMusicFolder
+                                            )
+                                        }
                                     }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 5. 列表主体（按当前一级 Tab 或钻取子视图呈现）
-            val showTrackList = drillDown != null || primaryTab == LocalPrimaryTab.ALL_SONGS
-            if (showTrackList) {
-                if (displayedTracks.isEmpty()) {
-                    item(key = "local_tracks_empty_filter") {
-                        LocalFilterEmptyCard(
-                            hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank() || selectedFolderTagId != null,
-                            cardBg = cardBg,
-                            onResetFilter = {
-                                onSelectQualityFilter(LocalQualityFilter.ALL)
-                                onSelectFolderTagId(null)
-                            },
-                            onPickMusicFolder = onPickMusicFolder
-                        )
-                    }
-                } else {
-                    itemsIndexed(
-                        items = displayedTracks,
-                        key = { _, track -> "local_track_${track.id}" },
-                        contentType = { _, _ -> "local_track_row" }
-                    ) { index, track ->
-                        val songModel = displayedSongs.getOrElse(index) { track.toSong() }
-                        val isCurrent = currentPlayingSongId != null &&
-                            (currentPlayingSongId == songModel.id || currentPlayingSongId == track.id)
-                        LocalTrackRowCard(
-                            index = index + 1,
-                            track = track,
-                            sortOption = sortOption,
-                            isCurrent = isCurrent,
-                            isPlaying = isCurrent && isPlaying,
-                            cyanAccent = cyanAccent,
-                            goldAccent = goldAccent,
-                            cardBg = cardBg,
-                            onClick = { onPlaySong(songModel, displayedSongs) },
-                            onMoreActions = onOpenSongActions?.let { handler -> { handler(songModel) } }
-                        )
-                    }
-                }
-            } else {
-                when (primaryTab) {
-                    LocalPrimaryTab.FOLDERS -> {
-                        if (displayedFolders.isEmpty()) {
-                            item(key = "local_folders_empty") {
-                                LocalFilterEmptyCard(
-                                    hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
-                                    cardBg = cardBg,
-                                    onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
-                                    onPickMusicFolder = onPickMusicFolder
-                                )
-                            }
-                        } else {
-                            items(items = displayedFolders, key = { "folder_card_${it.first.id}" }) { (folder, matchingTracks) ->
-                                LocalFolderGroupCard(
-                                    folder = folder,
-                                    matchedCount = matchingTracks.size,
-                                    isFiltered = qualityFilter != LocalQualityFilter.ALL,
-                                    cyanAccent = cyanAccent,
-                                    goldAccent = goldAccent,
-                                    cardBg = cardBg,
-                                    onClick = {
-                                        onChangeDrillDown(LocalDrillDownTarget.Folder(folder.id, folder.displayName))
-                                    },
-                                    onRescan = { onRescanFolder(folder) },
-                                    onRemove = { pendingRemoveFolder = folder }
-                                )
-                            }
-                        }
-
-                        // 独立歌词文件夹管理卡片区（放在「文件夹」Tab 下，清晰实用且不打扰歌单浏览）
-                        item(key = "local_lyric_folders_card") {
-                            LocalLyricFoldersManagementCard(
-                                lyricFolders = lyricFolders,
-                                cardBg = cardBg,
-                                elevatedBg = elevatedBg,
-                                cyanAccent = cyanAccent,
-                                onAddLyricFolder = onPickLyricFolder,
-                                onRemoveLyricFolder = onRemoveLyricFolder
-                            )
-                        }
-                    }
-
-                    LocalPrimaryTab.ARTISTS -> {
-                        if (displayedArtists.isEmpty()) {
-                            item(key = "local_artists_empty") {
-                                LocalFilterEmptyCard(
-                                    hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
-                                    cardBg = cardBg,
-                                    onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
-                                    onPickMusicFolder = onPickMusicFolder
-                                )
-                            }
-                        } else {
-                            items(items = displayedArtists, key = { "artist_group_${it.normalizedKey}" }) { group ->
-                                LocalArtistGroupCard(
-                                    group = group,
-                                    cyanAccent = cyanAccent,
-                                    goldAccent = goldAccent,
-                                    cardBg = cardBg,
-                                    onClick = {
-                                        onChangeDrillDown(LocalDrillDownTarget.Artist(group.normalizedKey, group.name))
+                                } else {
+                                    items(items = displayedFolders, key = { "folder_card_${it.first.id}" }) { (folder, matchingTracks) ->
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalFolderGroupCard(
+                                                folder = folder,
+                                                matchedCount = matchingTracks.size,
+                                                isFiltered = qualityFilter != LocalQualityFilter.ALL,
+                                                cyanAccent = cyanAccent,
+                                                goldAccent = goldAccent,
+                                                cardBg = cardBg,
+                                                onClick = {
+                                                    onChangeDrillDown(LocalDrillDownTarget.Folder(folder.id, folder.displayName))
+                                                },
+                                                onRescan = { onRescanFolder(folder) },
+                                                onRemove = { pendingRemoveFolder = folder }
+                                            )
+                                        }
                                     }
-                                )
-                            }
-                        }
-                    }
+                                }
 
-                    LocalPrimaryTab.ALBUMS -> {
-                        if (displayedAlbums.isEmpty()) {
-                            item(key = "local_albums_empty") {
-                                LocalFilterEmptyCard(
-                                    hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
-                                    cardBg = cardBg,
-                                    onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
-                                    onPickMusicFolder = onPickMusicFolder
-                                )
-                            }
-                        } else {
-                            items(items = displayedAlbums, key = { "album_group_${it.normalizedKey}" }) { group ->
-                                LocalAlbumGroupCard(
-                                    group = group,
-                                    cyanAccent = cyanAccent,
-                                    goldAccent = goldAccent,
-                                    cardBg = cardBg,
-                                    onClick = {
-                                        onChangeDrillDown(LocalDrillDownTarget.Album(group.normalizedKey, group.name))
+                                // 独立歌词文件夹管理卡片区（放在「文件夹」Tab 下，清晰实用且不打扰歌单浏览）
+                                item(key = "local_lyric_folders_card") {
+                                    Box(modifier = itemAnimModifier) {
+                                        LocalLyricFoldersManagementCard(
+                                            lyricFolders = lyricFolders,
+                                            cardBg = cardBg,
+                                            elevatedBg = elevatedBg,
+                                            cyanAccent = cyanAccent,
+                                            onAddLyricFolder = onPickLyricFolder,
+                                            onRemoveLyricFolder = onRemoveLyricFolder
+                                        )
                                     }
-                                )
+                                }
                             }
+
+                            LocalPrimaryTab.ARTISTS -> {
+                                if (displayedArtists.isEmpty()) {
+                                    item(key = "local_artists_empty") {
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalFilterEmptyCard(
+                                                hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
+                                                cardBg = cardBg,
+                                                onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
+                                                onPickMusicFolder = onPickMusicFolder
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    items(items = displayedArtists, key = { "artist_group_${it.normalizedKey}" }) { group ->
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalArtistGroupCard(
+                                                group = group,
+                                                cyanAccent = cyanAccent,
+                                                goldAccent = goldAccent,
+                                                cardBg = cardBg,
+                                                onClick = {
+                                                    onChangeDrillDown(LocalDrillDownTarget.Artist(group.normalizedKey, group.name))
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            LocalPrimaryTab.ALBUMS -> {
+                                if (displayedAlbums.isEmpty()) {
+                                    item(key = "local_albums_empty") {
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalFilterEmptyCard(
+                                                hasAnyFilter = qualityFilter != LocalQualityFilter.ALL || searchQuery.isNotBlank(),
+                                                cardBg = cardBg,
+                                                onResetFilter = { onSelectQualityFilter(LocalQualityFilter.ALL) },
+                                                onPickMusicFolder = onPickMusicFolder
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    items(items = displayedAlbums, key = { "album_group_${it.normalizedKey}" }) { group ->
+                                        Box(modifier = itemAnimModifier) {
+                                            LocalAlbumGroupCard(
+                                                group = group,
+                                                cyanAccent = cyanAccent,
+                                                goldAccent = goldAccent,
+                                                cardBg = cardBg,
+                                                onClick = {
+                                                    onChangeDrillDown(LocalDrillDownTarget.Album(group.normalizedKey, group.name))
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            LocalPrimaryTab.ALL_SONGS -> Unit
                         }
                     }
-
-                    LocalPrimaryTab.ALL_SONGS -> Unit
                 }
             }
         }
+
+        // 底部无框悬浮多选操作条（自动避让底部迷你播放栏）
+        AnimatedVisibility(
+            visible = selectionMode,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 90.dp)
+        ) {
+            val chosenTracks = remember(activeDisplayedTracks, selectedTrackIds) {
+                activeDisplayedTracks.filter { it.id in selectedTrackIds }
+            }
+            val chosenSongs = remember(chosenTracks) {
+                chosenTracks.map { it.toSong() }
+            }
+            val hasSelection = chosenSongs.isNotEmpty()
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = conceptSheetContainerColor().copy(alpha = 0.96f),
+                shadowElevation = 14.dp,
+                modifier = Modifier
+                    .widthIn(max = 520.dp)
+                    .fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    LocalMultiSelectDockAction(
+                        icon = Icons.Rounded.PlayArrow,
+                        label = "播放",
+                        tint = ConceptPrimary,
+                        enabled = hasSelection,
+                        onClick = {
+                            if (chosenSongs.isNotEmpty()) {
+                                onPlaySong(chosenSongs.first(), chosenSongs)
+                                onSelectionModeChange(false)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    LocalMultiSelectDockAction(
+                        icon = Icons.Rounded.QueuePlayNext,
+                        label = "下一首",
+                        tint = ConceptMintAccent,
+                        enabled = hasSelection,
+                        onClick = {
+                            if (chosenSongs.isNotEmpty()) {
+                                chosenSongs.asReversed().forEach { onAddNextPlay(it) }
+                                Toast.makeText(context, "已将 ${chosenSongs.size} 首本地歌曲加入下一首播放", Toast.LENGTH_SHORT).show()
+                                onSelectionModeChange(false)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    LocalMultiSelectDockAction(
+                        icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
+                        label = "加歌单",
+                        tint = cyanAccent,
+                        enabled = hasSelection,
+                        onClick = { showBatchAddToPlaylistDialog = true },
+                        modifier = Modifier.weight(1f)
+                    )
+                    LocalMultiSelectDockAction(
+                        icon = Icons.Rounded.DeleteOutline,
+                        label = "移出曲库",
+                        tint = MaterialTheme.colorScheme.error,
+                        enabled = hasSelection,
+                        onClick = { showBatchRemoveTracksDialog = true },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+
+    // 批量添加到现有自建歌单或新建纯本地歌单
+    if (showBatchAddToPlaylistDialog) {
+        val chosenSongs = remember(activeDisplayedTracks, selectedTrackIds) {
+            activeDisplayedTracks.filter { it.id in selectedTrackIds }.map { it.toSong() }
+        }
+        val lead = chosenSongs.firstOrNull()
+        if (lead != null) {
+            AddToPlaylistDialog(
+                song = lead,
+                playlists = playlists,
+                batchCount = chosenSongs.size,
+                headerSubtitleOverride = "本地歌曲仅本机保存，不会同步至云端",
+                createPlaylistHint = "创建纯本地歌单（不同步歌单名至云端）",
+                onSelectPlaylist = { targetPl ->
+                    showBatchAddToPlaylistDialog = false
+                    onAddSongsToPlaylist(targetPl, chosenSongs)
+                    onSelectionModeChange(false)
+                },
+                onCreateNewPlaylist = {
+                    showBatchAddToPlaylistDialog = false
+                    showCreateLocalPlaylistDialog = true
+                },
+                onDismiss = { showBatchAddToPlaylistDialog = false }
+            )
+        } else {
+            showBatchAddToPlaylistDialog = false
+        }
+    }
+
+    if (showCreateLocalPlaylistDialog) {
+        val pendingSongs = remember(activeDisplayedTracks, selectedTrackIds) {
+            activeDisplayedTracks.filter { it.id in selectedTrackIds }.map { it.toSong() }
+        }
+        CreatePlaylistDialog(
+            title = "新建本地歌单",
+            subtitle = "纯本地音乐歌单仅保存在本机，不会将歌单名或曲目同步至云端",
+            onDismiss = { showCreateLocalPlaylistDialog = false },
+            onConfirmWithCallback = { name, onComplete ->
+                onCreateLocalPlaylistWithSongs(name, pendingSongs) { ok ->
+                    onComplete(ok)
+                    if (ok) {
+                        showCreateLocalPlaylistDialog = false
+                        onSelectionModeChange(false)
+                    }
+                }
+            }
+        )
+    }
+
+    if (showBatchRemoveTracksDialog) {
+        val idsToRemove = selectedTrackIds.toList()
+        AlertDialog(
+            onDismissRequest = { showBatchRemoveTracksDialog = false },
+            title = { Text("移出本地曲库列表？", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text("将选中的 ${idsToRemove.size} 首歌曲从微风本地曲库列表中移除。此操作不会删除您手机中的原始音频文件。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBatchRemoveTracksDialog = false
+                        onRemoveTracksBatch(idsToRemove)
+                        onSelectionModeChange(false)
+                    }
+                ) {
+                    Text("确认移除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchRemoveTracksDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 
     pendingRemoveFolder?.let { folder ->
@@ -673,8 +986,57 @@ internal fun LocalMusicTabContent(
     }
 }
 
+private fun resolveTracksForDrillDown(
+    tracks: List<LocalAudioTrack>,
+    drillDown: LocalDrillDownTarget?
+): List<LocalAudioTrack> = when (drillDown) {
+    is LocalDrillDownTarget.Folder -> tracks.filter { it.folderId == drillDown.folderId }
+    is LocalDrillDownTarget.Artist -> tracks.filter { t ->
+        val list = t.artists.ifEmpty { LocalMusicQueryEngine.splitArtistNames(t.artist) }
+        list.any { LocalMusicQueryEngine.normalizeArtistKey(it) == drillDown.normalizedKey }
+    }
+    is LocalDrillDownTarget.Album -> tracks.filter { t ->
+        LocalMusicQueryEngine.normalizeAlbumKey(t.album) == drillDown.normalizedKey
+    }
+    null -> tracks
+}
+
+@Composable
+private fun LocalMultiSelectDockAction(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val effectiveTint = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .softClickable(enabled = enabled, pressScale = 0.94f, onClick = onClick)
+            .padding(vertical = 7.dp, horizontal = 4.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = effectiveTint,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = label,
+            color = effectiveTint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+    }
+}
+
 // =============================================================================
-// 1. 初始空态极简高质感引导舞台
+// 1. 初始空态极简无框高质感引导舞台
 // =============================================================================
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -710,7 +1072,7 @@ private fun LocalMusicEmptyStage(
                 .padding(bottom = 48.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 极简光晕音符文件夹徽标
+            // 极简无框光晕音符文件夹徽标
             Box(
                 modifier = Modifier.size(96.dp),
                 contentAlignment = Alignment.Center
@@ -719,12 +1081,7 @@ private fun LocalMusicEmptyStage(
                     modifier = Modifier
                         .size(86.dp)
                         .clip(RoundedCornerShape(28.dp))
-                        .background(badgeBrush)
-                        .border(
-                            width = 1.dp,
-                            color = (if (isDark) Color.White else ConceptPrimary).copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(28.dp)
-                        ),
+                        .background(badgeBrush),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -884,7 +1241,7 @@ private fun LocalMusicEmptyStage(
 }
 
 // =============================================================================
-// 2. 已导入态 Hero 统计概览卡（严谨展示 Hi-Res & 无损统计）
+// 2. 已导入态无框 Hero 统计概览卡（严谨展示 Hi-Res & 无损统计）
 // =============================================================================
 
 @Composable
@@ -904,14 +1261,12 @@ private fun LocalLibraryHeroCard(
     } else {
         Brush.linearGradient(listOf(Color(0xFFE7F3FF), Color(0xFFF1F7FF), Color(0xFFF6FAFF)))
     }
-    val borderColor = if (isDark) Color.White.copy(alpha = 0.08f) else ConceptPrimary.copy(alpha = 0.10f)
     val primaryText = MaterialTheme.colorScheme.onSurface
     val subText = MaterialTheme.colorScheme.onSurfaceVariant
 
     Surface(
         shape = RoundedCornerShape(24.dp),
         color = Color.Transparent,
-        border = BorderStroke(0.8.dp, borderColor),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -925,7 +1280,6 @@ private fun LocalLibraryHeroCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 左侧动态 2×2 封面拼贴 / 单封面 / 渐变音符徽标
                 LocalCoverCollageBadge(
                     covers = sampleCovers,
                     isDark = isDark,
@@ -959,7 +1313,6 @@ private fun LocalLibraryHeroCard(
                         )
                     }
 
-                    // 严谨识别统计文案：XX 首 Hi-Res · XX 首无损
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1006,7 +1359,6 @@ private fun LocalLibraryHeroCard(
                 }
             }
 
-            // 实时扫描进度条
             AnimatedVisibility(
                 visible = scanProgress.isScanning,
                 enter = expandVertically() + fadeIn(),
@@ -1032,7 +1384,6 @@ private fun LocalLibraryHeroCard(
                 }
             }
 
-            // 操作按钮行（呼应参考图 2 的高对比播放全部按钮）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1178,58 +1529,8 @@ private fun LocalCoverCollageBadge(
 }
 
 // =============================================================================
-// 3. 多文件夹目录 Tag 胶囊 & 钻取头部
+// 3. 钻取子视图头部
 // =============================================================================
-
-@Composable
-private fun FolderFilterTagChip(
-    label: String,
-    count: Int,
-    selected: Boolean,
-    accentColor: Color,
-    onClick: () -> Unit
-) {
-    val isDark = LocalIsDarkTheme.current
-    val bgColor = if (selected) {
-        accentColor.copy(alpha = if (isDark) 0.22f else 0.16f)
-    } else {
-        conceptElevatedSurfaceColor()
-    }
-    val textColor = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = bgColor,
-        border = if (selected) BorderStroke(1.dp, accentColor.copy(alpha = 0.48f)) else null,
-        modifier = Modifier.softCardClickable(shape = RoundedCornerShape(12.dp), onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-            Icon(
-                imageVector = if (selected) Icons.Rounded.FolderOpen else Icons.Rounded.Folder,
-                contentDescription = null,
-                tint = textColor,
-                modifier = Modifier.size(14.dp)
-            )
-            Text(
-                text = label,
-                color = textColor,
-                fontSize = 12.sp,
-                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = count.toString(),
-                color = textColor.copy(alpha = 0.72f),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
 
 @Composable
 private fun LocalDrillDownHeaderCard(
@@ -1305,7 +1606,7 @@ private fun LocalDrillDownHeaderCard(
 }
 
 // =============================================================================
-// 4. 二级独立筛选按钮 & 丝滑灵动弹性小浮窗（竖向排列 Tag）
+// 4. 二级无框独立筛选按钮 & 紧凑丝滑弹性小浮窗
 // =============================================================================
 
 @Composable
@@ -1325,7 +1626,7 @@ private fun LocalFilterAnchorButton(
         label = "filterChevronRotation"
     )
     val bgColor = if (active || expanded) {
-        accentColor.copy(alpha = if (isDark) 0.20f else 0.14f)
+        accentColor.copy(alpha = if (isDark) 0.22f else 0.14f)
     } else {
         containerBg
     }
@@ -1334,11 +1635,10 @@ private fun LocalFilterAnchorButton(
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = bgColor,
-        border = if (active || expanded) BorderStroke(1.dp, accentColor.copy(alpha = 0.45f)) else null,
         modifier = Modifier.softCardClickable(shape = RoundedCornerShape(14.dp), onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.5.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -1378,15 +1678,14 @@ private data class FilterPopupOption(
 )
 
 /**
- * 丝滑灵动弹性绽放小浮窗：
- * - 锚定在对应按钮正下方弹出；
- * - 使用 `ConceptMotion.floatingPopupSpring()` 驱动 GPU `graphicsLayer` 绽放缩放、微位移与渐显（0 内容重组）；
- * - 各项 Tag 竖向整齐排列，带实时数量角标与选中态高亮。
+ * 紧凑无框丝滑灵动弹性绽放小浮窗：
+ * - 锚定在对应按钮正下方弹出，按内容类型精确控制宽度消除右侧冗余留白；
+ * - 无边框设计，使用 `ConceptMotion.floatingPopupSpring()` 驱动 GPU `graphicsLayer` 绽放缩放与渐显。
  */
 @Composable
 private fun LocalFilterFloatingPopup(
     title: String,
-    accentColor: Color,
+    popupWidth: Dp,
     items: List<FilterPopupOption>,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit
@@ -1424,16 +1723,14 @@ private fun LocalFilterFloatingPopup(
         onDismissRequest = { animateDismiss(onDismiss) },
         properties = PopupProperties(focusable = true)
     ) {
-        val surfaceBg = if (isDark) Color(0xFF141D2E).copy(alpha = 0.97f) else Color.White.copy(alpha = 0.98f)
-        val borderCol = if (isDark) Color.White.copy(alpha = 0.12f) else accentColor.copy(alpha = 0.18f)
+        val surfaceBg = conceptSheetContainerColor().copy(alpha = 0.98f)
 
         Surface(
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(18.dp),
             color = surfaceBg,
-            border = BorderStroke(1.dp, borderCol),
             shadowElevation = 18.dp,
             modifier = Modifier
-                .width(214.dp)
+                .width(popupWidth)
                 .graphicsLayer {
                     val raw = progress.value
                     val clamped = raw.coerceIn(0f, 1f)
@@ -1442,21 +1739,21 @@ private fun LocalFilterFloatingPopup(
                     scaleY = s
                     alpha = (clamped * 1.15f).coerceIn(0f, 1f)
                     translationY = (1f - raw) * (-12f * density.density)
-                    transformOrigin = TransformOrigin(0.84f, 0f)
+                    transformOrigin = TransformOrigin(0.86f, 0f)
                 }
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 Text(
                     text = title,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                 )
 
                 items.forEach { opt ->
@@ -1466,18 +1763,18 @@ private fun LocalFilterFloatingPopup(
                         Color.Transparent
                     }
                     Surface(
-                        shape = RoundedCornerShape(13.dp),
+                        shape = RoundedCornerShape(12.dp),
                         color = rowBg,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .softCardClickable(shape = RoundedCornerShape(13.dp)) {
+                            .softCardClickable(shape = RoundedCornerShape(12.dp)) {
                                 animateDismiss { onSelect(opt.key) }
                             }
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 9.dp),
+                                .padding(horizontal = 9.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -1487,28 +1784,27 @@ private fun LocalFilterFloatingPopup(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(7.dp)
+                                        .size(6.dp)
                                         .clip(CircleShape)
                                         .background(
                                             if (opt.selected) opt.accentColor
                                             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.28f)
                                         )
                                 )
-                                Spacer(modifier = Modifier.width(9.dp))
-                                Column {
-                                    Text(
-                                        text = opt.label,
-                                        fontSize = 13.5.sp,
-                                        fontWeight = if (opt.selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                        color = if (opt.selected) opt.accentColor else MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1
-                                    )
-                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = opt.label,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (opt.selected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                    color = if (opt.selected) opt.accentColor else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
 
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 if (opt.count != null) {
                                     Text(
@@ -1523,7 +1819,7 @@ private fun LocalFilterFloatingPopup(
                                         imageVector = Icons.Rounded.Check,
                                         contentDescription = "已选中",
                                         tint = opt.accentColor,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(15.dp)
                                     )
                                 }
                             }
@@ -1536,7 +1832,7 @@ private fun LocalFilterFloatingPopup(
 }
 
 // =============================================================================
-// 5. 本地曲目行卡片 & 一级分组卡片（文件夹 / 歌词目录 / 歌手 / 专辑）
+// 5. 无框沉浸式本地曲目行 & 一级分组卡片（文件夹 / 歌词目录 / 歌手 / 专辑）
 // =============================================================================
 
 @Composable
@@ -1546,21 +1842,25 @@ private fun LocalTrackRowCard(
     sortOption: LocalSortOption,
     isCurrent: Boolean,
     isPlaying: Boolean,
+    selectionMode: Boolean,
+    isSelected: Boolean,
     cyanAccent: Color,
     goldAccent: Color,
-    cardBg: Color,
     onClick: () -> Unit,
-    onMoreActions: (() -> Unit)?
+    onLongClick: (() -> Unit)?,
+    onMoreActions: (() -> Unit)?,
+    modifier: Modifier = Modifier
 ) {
     val isDark = LocalIsDarkTheme.current
     val primaryText = MaterialTheme.colorScheme.onSurface
     val subText = MaterialTheme.colorScheme.onSurfaceVariant
     val activeHighlight = if (track.isHiRes) goldAccent else ConceptPrimary
 
-    val rowBg = if (isCurrent) {
-        activeHighlight.copy(alpha = if (isDark) 0.14f else 0.10f)
-    } else {
-        cardBg
+    // 统一项目内无框沉浸式设计：常规态透明直通舞台背景，仅在多选选中或当前播放时给予轻柔圆角色阶高亮
+    val highlightBg = when {
+        selectionMode && isSelected -> cyanAccent.copy(alpha = if (isDark) 0.16f else 0.11f)
+        isCurrent -> activeHighlight.copy(alpha = if (isDark) 0.14f else 0.10f)
+        else -> Color.Transparent
     }
 
     val qualityBadgeText = when {
@@ -1575,131 +1875,148 @@ private fun LocalTrackRowCard(
         LocalAudioQualityTier.LOSSY -> ConceptPrimary
     }
 
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = rowBg,
-        shadowElevation = 0.dp,
-        modifier = Modifier
+    Row(
+        modifier = modifier
             .fillMaxWidth()
-            .softCardClickable(shape = RoundedCornerShape(18.dp), onClick = onClick)
+            .drawBehind {
+                if (highlightBg.alpha > 0f) {
+                    val r = 16.dp.toPx()
+                    drawRoundRect(
+                        color = highlightBg,
+                        cornerRadius = CornerRadius(r, r)
+                    )
+                }
+            }
+            .softClickable(
+                pressScale = 0.985f,
+                pressAlpha = 0.88f,
+                onLongClick = onLongClick,
+                onClick = onClick
+            )
+            .padding(start = 6.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 10.dp, end = 6.dp, top = 9.dp, bottom = 9.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // 左侧：多选态展示无框勾选图标，常规态展示精致编号 / 播放态指示
+        Box(
+            modifier = Modifier.width(30.dp),
+            contentAlignment = Alignment.Center
         ) {
-            // 编号 / 播放态指示（呼应参考图 2 的精致蓝色编号）
-            Box(
-                modifier = Modifier.width(28.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isCurrent) {
+            when {
+                selectionMode -> {
+                    Icon(
+                        imageVector = if (isSelected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                        contentDescription = if (isSelected) "已选中" else "未选中",
+                        tint = if (isSelected) cyanAccent else subText.copy(alpha = 0.55f),
+                        modifier = Modifier.size(21.dp)
+                    )
+                }
+                isCurrent -> {
                     Icon(
                         imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.PlayArrow,
                         contentDescription = null,
                         tint = activeHighlight,
                         modifier = Modifier.size(18.dp)
                     )
-                } else {
+                }
+                else -> {
                     Text(
                         text = String.format(Locale.US, "%02d", index),
                         fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ConceptPrimary.copy(alpha = 0.78f)
+                        fontWeight = if (index in 1..3) FontWeight.Bold else FontWeight.SemiBold,
+                        color = if (index in 1..3) ConceptPrimary else subText.copy(alpha = 0.82f)
                     )
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(4.dp))
 
-            // 封面缩略图
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)),
-                contentAlignment = Alignment.Center
-            ) {
-                if (track.coverModelUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = rememberOptimizedAsyncImageModel(track.coverModelUrl, sizePx = 144),
-                        contentDescription = track.title,
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.Medium,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Rounded.MusicNote,
-                        contentDescription = null,
-                        tint = qualityBadgeColor.copy(alpha = 0.75f),
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
+        // 封面缩略图
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (track.coverModelUrl.isNotBlank()) {
+                AsyncImage(
+                    model = rememberOptimizedAsyncImageModel(track.coverModelUrl, sizePx = 144),
+                    contentDescription = track.title,
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.Medium,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.MusicNote,
+                    contentDescription = null,
+                    tint = qualityBadgeColor.copy(alpha = 0.75f),
+                    modifier = Modifier.size(22.dp)
+                )
             }
+        }
 
-            Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(12.dp))
 
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.5.dp)
+        ) {
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
+                    fontSize = 15.sp
+                ),
+                color = if (isCurrent) activeHighlight else primaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
+                BadgeTag(text = qualityBadgeText, color = qualityBadgeColor)
+                if (track.isHiRes && track.format.isNotBlank() && track.format != "HI-RES") {
+                    BadgeTag(text = track.format.uppercase(Locale.ROOT), color = cyanAccent)
+                }
+                if (track.hasLocalLyric) {
+                    BadgeTag(text = "词", color = ConceptMintAccent)
+                }
+
+                val tailSpec = when (sortOption) {
+                    LocalSortOption.FILE_SIZE -> LocalMusicQueryEngine.formatBytes(track.fileSizeBytes)
+                    LocalSortOption.DURATION -> formatTrackDuration(track.durationMs)
+                    else -> track.technicalSpecLabel
+                }
+                val subtitleText = buildString {
+                    append(track.artist.ifBlank { "未知歌手" })
+                    if (track.album.isNotBlank()) append(" · ${track.album}")
+                    if (tailSpec.isNotBlank()) append(" · $tailSpec")
+                }
                 Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Bold,
-                        fontSize = 14.5.sp
-                    ),
-                    color = if (isCurrent) activeHighlight else primaryText,
+                    text = subtitleText,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.8.sp),
+                    color = subText,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    BadgeTag(text = qualityBadgeText, color = qualityBadgeColor)
-                    if (track.isHiRes && track.format.isNotBlank() && track.format != "HI-RES") {
-                        BadgeTag(text = track.format.uppercase(Locale.ROOT), color = cyanAccent)
-                    }
-                    if (track.hasLocalLyric) {
-                        BadgeTag(text = "词", color = ConceptMintAccent)
-                    }
-
-                    val tailSpec = when (sortOption) {
-                        LocalSortOption.FILE_SIZE -> LocalMusicQueryEngine.formatBytes(track.fileSizeBytes)
-                        LocalSortOption.DURATION -> formatTrackDuration(track.durationMs)
-                        else -> track.technicalSpecLabel
-                    }
-                    val subtitleText = buildString {
-                        append(track.artist.ifBlank { "未知歌手" })
-                        if (track.album.isNotBlank()) append(" · ${track.album}")
-                        if (tailSpec.isNotBlank()) append(" · $tailSpec")
-                    }
-                    Text(
-                        text = subtitleText,
-                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.8.sp),
-                        color = subText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
+        }
 
-            if (onMoreActions != null) {
-                IconButton(
-                    onClick = onMoreActions,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.MoreVert,
-                        contentDescription = "更多操作",
-                        tint = subText,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
+        if (onMoreActions != null) {
+            IconButton(
+                onClick = onMoreActions,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "更多操作",
+                    tint = subText,
+                    modifier = Modifier.size(19.dp)
+                )
             }
         }
     }

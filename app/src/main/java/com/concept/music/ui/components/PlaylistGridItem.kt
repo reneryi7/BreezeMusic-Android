@@ -26,6 +26,7 @@ import com.concept.music.ui.theme.ConceptCoralAccent
 import com.concept.music.ui.theme.ConceptMintAccent
 import com.concept.music.ui.theme.ConceptPrimary
 import com.concept.music.ui.theme.ConceptVioletAccent
+import com.concept.music.ui.theme.conceptCyanAccentColor
 import com.concept.music.ui.theme.conceptElevatedSurfaceColor
 import kotlin.math.abs
 
@@ -82,6 +83,16 @@ fun PlaylistGridItem(
                     tint = accentColor,
                     modifier = Modifier.size(38.dp)
                 )
+            }
+
+            if (playlist.isPureLocalPlaylist) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                ) {
+                    BadgeTag(text = "本地", color = conceptCyanAccentColor())
+                }
             }
 
             val badgeText = playlist.playCount.ifBlank {

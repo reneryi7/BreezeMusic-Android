@@ -745,6 +745,81 @@ internal fun DownloadSettingsSectionContent(
 }
 
 /**
+ * 独立全屏「下载队列」页面（供「我的」页顶栏动态下载快捷图标一键直达）：
+ * 直接复用 `DownloadHistorySubPageContent()`，支持手机与平板居中自适应排版，进入及退出时自动清除已完成小红点宽限状态。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DownloadQueueScreen(
+    onBack: () -> Unit
+) {
+    val adaptive = LocalConceptAdaptiveInfo.current
+    val horizontalPad = if (adaptive.isLargeScreenDevice) adaptive.horizontalContentPadding else 16.dp
+
+    LaunchedEffect(Unit) {
+        MusicDownloadManager.markDownloadQueueViewed()
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            MusicDownloadManager.markDownloadQueueViewed()
+        }
+    }
+
+    ConceptStageBackground(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = "下载队列",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 18.sp
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "返回"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                )
+            }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .widthIn(max = 840.dp)
+                        .fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = horizontalPad,
+                        end = horizontalPad,
+                        top = 6.dp,
+                        bottom = 132.dp
+                    )
+                ) {
+                    item(key = "download_queue_body") {
+                        DownloadHistorySubPageContent()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * 「最近下载记录」独立二级子页面：
  * 展示全部下载任务状态、进度、已内嵌标签详情与保存文件路径，支持一键清理已完成记录。
  */

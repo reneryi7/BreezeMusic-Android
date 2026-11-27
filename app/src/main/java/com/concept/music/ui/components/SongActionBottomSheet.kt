@@ -326,6 +326,11 @@ fun SongActionBottomSheet(
                     )
 
                     if (song.isLocalSong) {
+                        SongActionMenuItem(
+                            icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
+                            title = "添加到歌单...",
+                            onClick = { dismissWithAction { onAddToPlaylist() } }
+                        )
                         if (onBindLocalLyric != null) {
                             SongActionMenuItem(
                                 icon = Icons.Rounded.Lyrics,
@@ -357,7 +362,19 @@ fun SongActionBottomSheet(
                                 onClick = { dismissWithAction { onOpenSongDetail() } }
                             )
                         }
-                        if (onRemoveLocalSong != null) {
+                        if (onRemoveFromCurrentPlaylist != null) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.DeleteOutline,
+                                title = "从当前歌单中移除",
+                                tint = MaterialTheme.colorScheme.error,
+                                textColor = MaterialTheme.colorScheme.error,
+                                onClick = { dismissWithAction { onRemoveFromCurrentPlaylist() } }
+                            )
+                        } else if (onRemoveLocalSong != null) {
                             HorizontalDivider(
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
                                 modifier = Modifier.padding(vertical = 4.dp)

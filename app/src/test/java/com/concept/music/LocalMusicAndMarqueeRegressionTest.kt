@@ -352,6 +352,102 @@ class LocalMusicAndMarqueeRegressionTest {
     }
 
     // =========================================================================
+    // 4. 本地音乐 UI 无框化、局部虚化、首字防裁切、二级过渡、精简浮窗与下载快捷入口回归保护
+    // =========================================================================
+
+    private fun readProjectSource(relativePath: String): String {
+        val candidates = listOf(
+            File("src/main/java/com/concept/music/$relativePath"),
+            File("app/src/main/java/com/concept/music/$relativePath")
+        )
+        val file = candidates.firstOrNull { it.exists() }
+            ?: error("无法定位源码文件: $relativePath")
+        return file.readText(Charsets.UTF_8)
+    }
+
+    @Test
+    fun testLocalMusicUiFramelessAndAnimationRegressionGuards() {
+        val localTabSrc = readProjectSource("ui/library/LocalMusicTabContent.kt")
+        val localAndCloudSrc = readProjectSource("ui/library/LocalAndCloudMusicScreen.kt")
+        val themeSrc = readProjectSource("ui/theme/Theme.kt")
+        val playlistDetailSrc = readProjectSource("ui/library/PlaylistDetailScreen.kt")
+        val librarySrc = readProjectSource("ui/library/LibraryScreen.kt")
+        val mainActivitySrc = readProjectSource("MainActivity.kt")
+
+        // 1. 严格无框设计：本地音乐与切换顶栏绝不使用 BorderStroke 或 .border(
+        assertFalse("LocalMusicTabContent.kt 不可使用 BorderStroke", localTabSrc.contains("BorderStroke"))
+        assertFalse("LocalMusicTabContent.kt 不可使用 .border(", localTabSrc.contains(".border("))
+        assertFalse("LocalAndCloudMusicScreen.kt 不可使用 BorderStroke", localAndCloudSrc.contains("BorderStroke"))
+        assertFalse("LocalAndCloudMusicScreen.kt 不可使用 .border(", localAndCloudSrc.contains(".border("))
+
+        // 2. 删除多余的文件夹快速切换栏
+        assertFalse("应彻底删除 FolderFilterTagChip", localTabSrc.contains("FolderFilterTagChip"))
+        assertFalse("应彻底删除 local_folder_tags", localTabSrc.contains("local_folder_tags"))
+        assertFalse("应彻底删除 localFolderTagId 状态", localAndCloudSrc.contains("localFolderTagId"))
+
+        // 3. 一级 Tag 切换虚化仅作用在歌曲/列表项，不作用于外层容器；并支持二级页平滑过渡
+        assertTrue(
+            "LocalMusicTabContent.kt 应使用局部 rememberCategorySwitchGraphicModifier",
+            localTabSrc.contains("rememberCategorySwitchGraphicModifier(") &&
+                localTabSrc.contains("selectedIndex = primaryTab.ordinal") &&
+                localTabSrc.contains("applyMotionBlur = true")
+        )
+        assertFalse(
+            "LocalMusicTabContent.kt 外层不可再整页挂载 horizontalCategorySwipe 导致顶卡虚化",
+            localTabSrc.contains(".horizontalCategorySwipe(")
+        )
+        assertTrue(
+            "LocalMusicTabContent.kt 应使用 AnimatedContent 为二级钻取页提供过渡动画",
+            localTabSrc.contains("AnimatedContent(") && localTabSrc.contains("ConceptMotion.spatialPageSpring()")
+        )
+
+        // 4. 歌曲列表项取消每行独立胶囊外框，统一无框沉浸式设计
+        val rowCardIdx = localTabSrc.indexOf("private fun LocalTrackRowCard")
+        assertTrue("应存在 LocalTrackRowCard 定义", rowCardIdx > 0)
+        val rowCardBody = localTabSrc.substring(rowCardIdx, (rowCardIdx + 1200).coerceAtMost(localTabSrc.length))
+        assertFalse(
+            "LocalTrackRowCard 不可再包裹 RoundedCornerShape(18.dp) 胶囊卡片 Surface",
+            rowCardBody.contains("RoundedCornerShape(18.dp)")
+        )
+
+        // 5. 本地音乐多选按钮仅在歌曲列表有曲目展示时出现，并支持零云同步创建本地歌单
+        assertTrue(
+            "多选按钮必须由歌曲列表可见且非空门控",
+            localTabSrc.contains("showTrackList && pageDisplayedTracks.isNotEmpty() && !selectionMode")
+        )
+        assertTrue(
+            "本地音乐页应通过 createLocalOnlyPlaylist 创建纯本地歌单",
+            localAndCloudSrc.contains("createLocalOnlyPlaylist")
+        )
+
+        // 6. 首 Tab 缩放锚点与滚动左侧缓冲防止「全」字左缘被裁切
+        assertTrue(
+            "ConceptSlidingCategoryTabs 首项应左对齐缩放锚点并保留左侧缓冲防裁切",
+            themeSrc.contains("index == 0 -> 0f") &&
+                themeSrc.contains("TransformOrigin(pivotX, 0.85f)") &&
+                themeSrc.contains(".padding(start = 2.dp, end = 6.dp)")
+        )
+
+        // 7. 默认排序显示「默认」且音质/排序浮窗缩窄消除右侧留白
+        assertTrue("本地排序按钮默认应展示 sortOption.label（默认）", localTabSrc.contains("label = sortOption.label"))
+        assertTrue("音质筛选浮窗应缩窄为 174.dp", localTabSrc.contains("popupWidth = 174.dp"))
+        assertTrue("本地排序浮窗应大幅缩窄为 118.dp", localTabSrc.contains("popupWidth = 118.dp"))
+        assertTrue(
+            "歌单/我喜欢排序浮窗应缩窄消除右侧留白",
+            playlistDetailSrc.contains("if (canCustomSortTracks) 168.dp else 148.dp")
+        )
+
+        // 8. 我的页右上角搜索左侧动态下载快捷入口及独立下载队列路由
+        assertTrue("LibraryScreen 应提供 onOpenDownloadQueue 回调", librarySrc.contains("onOpenDownloadQueue: () -> Unit"))
+        assertTrue("LibraryScreen 应包含 DynamicDownloadQueueShortcutButton", librarySrc.contains("private fun DynamicDownloadQueueShortcutButton"))
+        assertTrue("动态下载入口动效应受生命周期约束", librarySrc.contains("rememberIsLifecycleStarted()"))
+        val shortcutCallIdx = librarySrc.indexOf("DynamicDownloadQueueShortcutButton(")
+        val searchIconIdx = librarySrc.indexOf("Icons.Rounded.Search")
+        assertTrue("动态下载入口应位于我的页顶栏搜索图标左侧", shortcutCallIdx in 1 until searchIconIdx)
+        assertTrue("MainActivity 应注册 download_queue 路由", mainActivitySrc.contains("composable(\"download_queue\")"))
+    }
+
+    // =========================================================================
     // 内存最小二进制音频构造器（用于真实字节流单元测试）
     // =========================================================================
 

@@ -1253,16 +1253,13 @@ internal fun CloudDiskTabContent(
                 playlists = createdLists,
                 onDismiss = { batchAddToPlaylistSongs = null },
                 onSelectPlaylist = { pl ->
-                    val targetListId = pl.resolveEffectiveListId()
                     batchAddToPlaylistSongs = null
-                    if (targetListId > 0L) {
-                        viewModel.addSongsToPlaylistBatch(targetListId, songsToAdd, pl.title) { _, msg ->
-                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        }
-                        if (selectionMode) {
-                            onSelectionModeChange(false)
-                            onSelectedKvIdsChange(emptySet())
-                        }
+                    viewModel.addSongsToPlaylistBatch(pl, songsToAdd) { _, msg ->
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                    if (selectionMode) {
+                        onSelectionModeChange(false)
+                        onSelectedKvIdsChange(emptySet())
                     }
                 },
                 onCreateNewPlaylist = { showCreatePlaylistForBatch = true }

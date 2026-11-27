@@ -774,6 +774,7 @@ class MusicApiRepository(
 
     // 取消收藏或删除自建歌单
     suspend fun deleteOrUncollectPlaylist(playlist: Playlist): Boolean = auth { ctx ->
+        if (playlist.isPureLocalPlaylist) return@auth false
         val session = ctx.session
         var resolvedListId = playlist.listId.takeIf { it > 0L }
             ?: peekCollectedPlaylistMeta(playlist)?.listId?.takeIf { it > 0L }
@@ -854,6 +855,7 @@ class MusicApiRepository(
 
     // 向歌单添加歌曲 (对齐 MakcRe/KuGouMusicApi module/playlist_tracks_add.js，补齐歌手-歌名标准格式与双路由同步)
     suspend fun addSongToPlaylist(playlistId: Long, song: Song): Boolean = auth { ctx ->
+        if (playlistId <= 0L || song.isLocalSong) return@auth false
         val session = ctx.session
         val clientTime = System.currentTimeMillis() / 1000
         val query = mapOf(
@@ -919,7 +921,8 @@ class MusicApiRepository(
 
     // 批量向歌单添加歌曲 (对齐 MakcRe/KuGouMusicApi module/playlist_tracks_add.js，单次请求批量提交曲目数组)
     suspend fun addSongsToPlaylistBatch(playlistId: Long, songs: List<Song>): Int = auth { ctx ->
-        if (songs.isEmpty()) return@auth 0
+        val cloudSongs = songs.filterNot { it.isLocalSong }
+        if (playlistId <= 0L || cloudSongs.isEmpty()) return@auth 0
         val session = ctx.session
         val clientTime = System.currentTimeMillis() / 1000
         val query = mapOf(
@@ -929,14 +932,14 @@ class MusicApiRepository(
             "token" to session.token
         )
         val dataArr = JsonArray()
-        songs.forEachIndexed { idx, song ->
+        cloudSongs.forEachIndexed { idx, song ->
             val cleanTitle = stripKnownAudioFileExtension(song.title)
             val fullTrackName = if (song.artist.isNotBlank() && song.artist != "未知歌手" && !cleanTitle.contains(" - ")) {
                 "${song.artist} - $cleanTitle"
             } else {
                 cleanTitle
             }
-            val mixId = song.albumAudioId.takeIf { it > 0L } ?: song.audioId.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: 0L.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: song.id.toLongOrNull() ?: 0L
+            val mixId = song.albumAudioId.takeIf { it > 0L } ?: song.audioId.takeIf { it > 0L } ?: song.mixSongId.toLongOrNull()?.takeIf { it > 0L } ?: song.id.toLongOrNull() ?: 0L
             val primaryHash = song.hash128.ifBlank { song.hash }.uppercase()
             val songItem = JsonObject().apply {
                 addProperty("number", idx + 1)
@@ -971,7 +974,7 @@ class MusicApiRepository(
             )
             response.status == 1 || response.code == 0
         }.getOrDefault(false)
-        if (primaryOk) return@auth songs.size
+        if (primaryOk) return@auth cloudSongs.size
 
         val fallbackOk = runCatching {
             val response = transport.call(
@@ -984,11 +987,12 @@ class MusicApiRepository(
             )
             response.status == 1 || response.code == 0
         }.getOrDefault(false)
-        if (fallbackOk) songs.size else 0
+        if (fallbackOk) cloudSongs.size else 0
     }
 
     // 从歌单删除歌曲 (对齐 MakcRe/KuGouMusicApi module/playlist_tracks_del.js，当 fileId 为 0 时自动解析云端真实 fileid)
     suspend fun removeSongFromPlaylist(playlistId: Long, song: Song): Boolean = auth { ctx ->
+        if (playlistId <= 0L || song.isLocalSong) return@auth false
         val session = ctx.session
         val clientTime = System.currentTimeMillis() / 1000
         val query = mapOf(
@@ -1062,7 +1066,8 @@ class MusicApiRepository(
      * 从自建歌单批量移除多首歌曲（对齐 MakcRe/KuGouMusicApi module/playlist_tracks_del.js，一次请求提交全部 fileid）
      */
     suspend fun removeSongsFromPlaylistBatch(playlistId: Long, songs: List<Song>): Boolean = auth { ctx ->
-        if (songs.isEmpty()) return@auth false
+        val cloudSongs = songs.filterNot { it.isLocalSong }
+        if (playlistId <= 0L || cloudSongs.isEmpty()) return@auth false
         val session = ctx.session
         val clientTime = System.currentTimeMillis() / 1000
         val query = mapOf(
@@ -1074,7 +1079,7 @@ class MusicApiRepository(
 
         // 若存在 fileId 缺失曲目，仅拉取一次歌单完整曲目表批量补齐 fileid
         var remoteTracks: List<Song>? = null
-        if (songs.any { it.fileId <= 0L }) {
+        if (cloudSongs.any { it.fileId <= 0L }) {
             remoteTracks = runCatching {
                 val targetPl = userPlaylists().firstOrNull { it.listId == playlistId }
                 if (targetPl != null) {
@@ -1085,7 +1090,7 @@ class MusicApiRepository(
 
         val dataArr = JsonArray()
         val seenKeys = HashSet<String>()
-        songs.forEach { song ->
+        cloudSongs.forEach { song ->
             var resolvedFileId = song.fileId
             if (resolvedFileId <= 0L && !remoteTracks.isNullOrEmpty()) {
                 val matched = remoteTracks.firstOrNull { t ->

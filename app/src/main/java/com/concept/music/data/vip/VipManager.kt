@@ -9,6 +9,7 @@ import com.concept.music.data.recommendation.SongTagMetadataCache
 import com.concept.music.data.repository.DiscoverLocalCache
 import com.concept.music.data.repository.LocalListenStatsRepository
 import com.concept.music.data.repository.LocalMusicRepository
+import com.concept.music.data.repository.LocalPlaylistRepository
 import com.concept.music.data.repository.PlaybackHistoryRepository
 import com.concept.music.data.repository.PlaylistCoverOverrideRepository
 import com.concept.music.data.repository.SearchHistoryRepository
@@ -30,6 +31,7 @@ object VipManager {
     lateinit var history: PlaybackHistoryRepository; private set
     var listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null); private set
     var localMusic: LocalMusicRepository = LocalMusicRepository(null); private set
+    var localPlaylists: LocalPlaylistRepository = LocalPlaylistRepository(null); private set
     var searchHistoryRepo: SearchHistoryRepository = SearchHistoryRepository(null); private set
     var discoverCache: DiscoverLocalCache = DiscoverLocalCache(null); private set
     var playlistCoverOverrides: PlaylistCoverOverrideRepository = PlaylistCoverOverrideRepository(null); private set
@@ -69,6 +71,7 @@ object VipManager {
         history = PlaybackHistoryRepository(appCtx)
         listenStats = LocalListenStatsRepository(appCtx)
         localMusic = LocalMusicRepository(appCtx)
+        localPlaylists = LocalPlaylistRepository(appCtx)
         searchHistoryRepo = SearchHistoryRepository(appCtx)
         discoverCache = DiscoverLocalCache(appCtx)
         playlistCoverOverrides = PlaylistCoverOverrideRepository(appCtx)
@@ -113,6 +116,7 @@ object VipManager {
         history: PlaybackHistoryRepository,
         device: () -> DeviceIdentity = { DeviceIdentity("00000000-0000-0000-0000-000000000000", "0", "Android") },
         listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null),
+        localPlaylists: LocalPlaylistRepository = LocalPlaylistRepository(null),
         songTagCache: SongTagMetadataCache = SongTagMetadataCache(null),
         recommendationPrefs: RecommendationPreferenceRepository = RecommendationPreferenceRepository(null),
         tasteProfile: PersonalTasteProfileRepository = PersonalTasteProfileRepository(null)
@@ -125,6 +129,7 @@ object VipManager {
         this.lyric = lyric
         this.history = history
         this.listenStats = listenStats
+        this.localPlaylists = localPlaylists
         this.songTagCache = songTagCache
         this.recommendationPrefs = recommendationPrefs
         this.tasteProfile = tasteProfile

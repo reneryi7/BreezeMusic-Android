@@ -67,6 +67,15 @@ data class DownloadTaskItem(
 )
 
 @Immutable
+data class DownloadShortcutBadgeState(
+    val activeCount: Int = 0,
+    val overallProgress: Float = 0f,
+    val completedInSessionCount: Int = 0,
+    val failedInSessionCount: Int = 0,
+    val hasUnseenSessionCompletion: Boolean = false
+)
+
+@Immutable
 data class MusicDownloadConfig(
     val downloadDirectoryPath: String = MusicDownloadManager.DEFAULT_AUDIO_DOWNLOAD_PATH,
     val lyricDirectoryPath: String = MusicDownloadManager.DEFAULT_LYRIC_DOWNLOAD_PATH,
@@ -116,6 +125,56 @@ object MusicDownloadManager {
 
     private val _tasks = MutableStateFlow<List<DownloadTaskItem>>(emptyList())
     val tasks = _tasks.asStateFlow()
+
+    private val _shortcutBadgeState = MutableStateFlow(DownloadShortcutBadgeState())
+    val shortcutBadgeState = _shortcutBadgeState.asStateFlow()
+
+    private val sessionTrackedTaskIds = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
+    internal fun isActiveStatus(status: DownloadTaskStatus): Boolean =
+        status == DownloadTaskStatus.QUEUED ||
+            status == DownloadTaskStatus.RESOLVING ||
+            status == DownloadTaskStatus.DOWNLOADING ||
+            status == DownloadTaskStatus.EMBEDDING
+
+    private fun refreshShortcutBadgeState(triggerUnseenOnIdle: Boolean = false) {
+        val allTasks = _tasks.value
+        val activeTasks = allTasks.filter { isActiveStatus(it.status) }
+        val activeCount = activeTasks.size
+        val avgProgress = if (activeTasks.isNotEmpty()) {
+            activeTasks.map { it.progress.coerceIn(0f, 1f) }.average().toFloat().coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+        val trackedSnapshot = synchronized(sessionTrackedTaskIds) { sessionTrackedTaskIds.toSet() }
+        val sessionTasks = if (trackedSnapshot.isEmpty()) emptyList() else allTasks.filter { it.taskId in trackedSnapshot }
+        val completedCnt = sessionTasks.count {
+            it.status == DownloadTaskStatus.COMPLETED || it.status == DownloadTaskStatus.SKIPPED_EXISTING
+        }
+        val failedCnt = sessionTasks.count { it.status == DownloadTaskStatus.FAILED }
+        val prevUnseen = _shortcutBadgeState.value.hasUnseenSessionCompletion
+        val nextUnseen = when {
+            activeCount > 0 -> false
+            trackedSnapshot.isEmpty() -> false
+            triggerUnseenOnIdle && (completedCnt > 0 || failedCnt > 0) -> true
+            else -> prevUnseen && (completedCnt > 0 || failedCnt > 0)
+        }
+        _shortcutBadgeState.value = DownloadShortcutBadgeState(
+            activeCount = activeCount,
+            overallProgress = avgProgress,
+            completedInSessionCount = completedCnt,
+            failedInSessionCount = failedCnt,
+            hasUnseenSessionCompletion = nextUnseen
+        )
+    }
+
+    fun markDownloadQueueViewed() {
+        val activeIds = _tasks.value.filter { isActiveStatus(it.status) }.map { it.taskId }.toHashSet()
+        synchronized(sessionTrackedTaskIds) {
+            sessionTrackedTaskIds.retainAll(activeIds)
+        }
+        refreshShortcutBadgeState(triggerUnseenOnIdle = false)
+    }
 
     private val KUGOU_THUMB_SIZE_REGEX = Regex("""/(100|120|150|200|240|300|400|480)/""")
 
@@ -174,6 +233,21 @@ object MusicDownloadManager {
     fun resetForTest() {
         _config.value = MusicDownloadConfig()
         _tasks.value = emptyList()
+        synchronized(sessionTrackedTaskIds) { sessionTrackedTaskIds.clear() }
+        _shortcutBadgeState.value = DownloadShortcutBadgeState()
+    }
+
+    internal fun applyTasksForTest(
+        tasks: List<DownloadTaskItem>,
+        trackedIds: Set<String> = emptySet(),
+        triggerUnseenOnIdle: Boolean = false
+    ) {
+        _tasks.value = tasks
+        synchronized(sessionTrackedTaskIds) {
+            sessionTrackedTaskIds.clear()
+            sessionTrackedTaskIds.addAll(trackedIds)
+        }
+        refreshShortcutBadgeState(triggerUnseenOnIdle = triggerUnseenOnIdle)
     }
 
     private fun resolveDefaultPublicMusicDir(subFolder: String): String {
@@ -432,10 +506,14 @@ object MusicDownloadManager {
                 createdAtMs = batchBaseTs + idx
             )
         }
+        synchronized(sessionTrackedTaskIds) {
+            newTasks.forEach { sessionTrackedTaskIds.add(it.taskId) }
+        }
         _tasks.update { newTasks + it }
+        refreshShortcutBadgeState(triggerUnseenOnIdle = false)
         Toast.makeText(
             context,
-            "已将 ${newTasks.size} 首歌曲加入下载队列 (${quality.label})，可在「设置 → 下载」查看进度",
+            "已将 ${newTasks.size} 首歌曲加入下载队列 (${quality.label})，可在「我的」页右上角或「设置 → 下载」查看进度",
             Toast.LENGTH_LONG
         ).show()
 
@@ -503,7 +581,11 @@ object MusicDownloadManager {
             requestedQuality = quality,
             status = DownloadTaskStatus.QUEUED
         )
+        synchronized(sessionTrackedTaskIds) {
+            sessionTrackedTaskIds.add(newTask.taskId)
+        }
         _tasks.update { listOf(newTask) + it }
+        refreshShortcutBadgeState(triggerUnseenOnIdle = false)
         Toast.makeText(
             context,
             "已开始下载：《${song.title}》(${quality.label})",
@@ -516,9 +598,19 @@ object MusicDownloadManager {
     }
 
     private fun updateTask(taskId: String, transform: (DownloadTaskItem) -> DownloadTaskItem) {
+        var becameTerminal = false
         _tasks.update { list ->
-            list.map { if (it.taskId == taskId) transform(it) else it }
+            list.map { item ->
+                if (item.taskId == taskId) {
+                    val next = transform(item)
+                    if (isActiveStatus(item.status) && !isActiveStatus(next.status)) {
+                        becameTerminal = true
+                    }
+                    next
+                } else item
+            }
         }
+        refreshShortcutBadgeState(triggerUnseenOnIdle = becameTerminal)
     }
 
     private suspend fun executeDownloadTask(
