@@ -742,6 +742,548 @@ fun CloudDiskScreen(
     }
 }
 
+/**
+ * 可嵌入「本地/云盘」双页中心的音乐云盘内容组件（复用全套容量仪表卡、列表、排序与云端删除交互，支持未登录优雅引导）。
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+internal fun CloudDiskTabContent(
+    viewModel: LibraryViewModel,
+    isLoggedIn: Boolean,
+    searchQuery: String,
+    selectionMode: Boolean,
+    selectedKvIds: Set<Long>,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onSelectedKvIdsChange: (Set<Long>) -> Unit,
+    currentPlayingSongId: String? = null,
+    isPlaying: Boolean = false,
+    onLogin: () -> Unit = {},
+    onPlaySong: (Song, List<Song>) -> Unit,
+    onAddNextPlay: (Song) -> Unit = {},
+    onOpenSongActions: ((Song) -> Unit)? = null
+) {
+    val context = LocalContext.current
+    val isDark = LocalIsDarkTheme.current
+    val adaptive = LocalConceptAdaptiveInfo.current
+    val summary by viewModel.cloudDiskSummary.collectAsState()
+    val loading by viewModel.cloudDiskLoading.collectAsState()
+    val loadingMore by viewModel.cloudDiskLoadingMore.collectAsState()
+    val deleting by viewModel.cloudDiskDeleting.collectAsState()
+    val errorMessage by viewModel.cloudDiskError.collectAsState()
+    val playlists by viewModel.playlists.collectAsState()
+
+    val cyanAccent = conceptCyanAccentColor()
+    val cardBg = conceptFloatingCardColor()
+    val elevatedBg = conceptElevatedSurfaceColor()
+    val primaryText = MaterialTheme.colorScheme.onSurface
+    val subText = MaterialTheme.colorScheme.onSurfaceVariant
+
+    var sortOption by remember { mutableStateOf(CloudSortOption.LATEST) }
+    var pendingDeleteItems by remember { mutableStateOf<List<CloudSongItem>?>(null) }
+    var batchAddToPlaylistSongs by remember { mutableStateOf<List<Song>?>(null) }
+    var showCreatePlaylistForBatch by remember { mutableStateOf(false) }
+
+    val listState = rememberLazyListState()
+    val pullRefreshState = rememberPullToRefreshState()
+
+    LaunchedEffect(isLoggedIn) {
+        if (isLoggedIn) {
+            viewModel.loadCloudDisk(force = false)
+        }
+    }
+
+    LaunchedEffect(pullRefreshState.isRefreshing) {
+        if (pullRefreshState.isRefreshing) {
+            if (isLoggedIn) {
+                viewModel.loadCloudDisk(force = true)
+            } else {
+                pullRefreshState.endRefresh()
+            }
+        }
+    }
+    LaunchedEffect(loading) {
+        if (!loading && pullRefreshState.isRefreshing) {
+            pullRefreshState.endRefresh()
+        }
+    }
+
+    if (!isLoggedIn) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = cardBg,
+                shadowElevation = 0.dp,
+                modifier = Modifier
+                    .widthIn(max = 420.dp)
+                    .fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 26.dp, vertical = 38.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    RefinedShortcutBadge(
+                        glyph = LibraryShortcutGlyph.CLOUD_DISK,
+                        accentColor = cyanAccent,
+                        size = 64.dp
+                    )
+                    Text(
+                        text = "登录开启音乐云盘",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 19.sp
+                        ),
+                        color = primaryText
+                    )
+                    Text(
+                        text = "登录酷狗账号后即可实时同步您在各端上传的私有无损曲库；无需登录也可切换至「本地音乐」离线导入畅听",
+                        style = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
+                        color = subText
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Button(
+                        onClick = onLogin,
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = cyanAccent, contentColor = Color(0xFF06161B)),
+                        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("登录酷狗账号", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    val displayedItems = remember(summary.songs, searchQuery, sortOption) {
+        val kw = searchQuery.trim().lowercase(Locale.ROOT)
+        val filtered = if (kw.isEmpty()) {
+            summary.songs
+        } else {
+            summary.songs.filter { item ->
+                item.title.lowercase(Locale.ROOT).contains(kw) ||
+                    item.artist.lowercase(Locale.ROOT).contains(kw) ||
+                    item.album.lowercase(Locale.ROOT).contains(kw) ||
+                    item.extName.lowercase(Locale.ROOT).contains(kw)
+            }
+        }
+        when (sortOption) {
+            CloudSortOption.LATEST -> filtered
+            CloudSortOption.FILE_SIZE -> filtered.sortedByDescending { it.fileSize }
+        }
+    }
+
+    val displayedSongs = remember(displayedItems) {
+        displayedItems.map { it.toSong() }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(pullRefreshState.nestedScrollConnection),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        val horizontalPad = if (adaptive.isLargeScreenDevice) adaptive.horizontalContentPadding else 16.dp
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .widthIn(max = 880.dp)
+                .fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = horizontalPad,
+                end = horizontalPad,
+                top = 6.dp,
+                bottom = if (selectionMode) 128.dp else 132.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item(key = "cloud_tab_hero") {
+                CloudStorageOverviewHeroCard(
+                    summary = summary,
+                    displayedCount = displayedItems.size,
+                    cyanAccent = cyanAccent,
+                    isDark = isDark,
+                    onPlayAll = {
+                        if (displayedSongs.isNotEmpty()) {
+                            onPlaySong(displayedSongs.first(), displayedSongs)
+                        }
+                    },
+                    onShufflePlay = {
+                        if (displayedSongs.isNotEmpty()) {
+                            val shuffled = displayedSongs.shuffled()
+                            onPlaySong(shuffled.first(), shuffled)
+                        }
+                    }
+                )
+            }
+
+            if (summary.songs.isNotEmpty()) {
+                item(key = "cloud_tab_sort_bar") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (searchQuery.isNotBlank()) {
+                                "匹配到 ${displayedItems.size} 首云盘曲目"
+                            } else if (loadingMore || summary.hasMore) {
+                                "同步中 · 已加载 ${summary.songs.size} 首"
+                            } else {
+                                "云盘曲目 · 共 ${maxOf(summary.totalCount, summary.songs.size)} 首"
+                            },
+                            color = subText,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = elevatedBg,
+                            modifier = Modifier.softCardClickable(shape = RoundedCornerShape(14.dp)) {
+                                sortOption = if (sortOption == CloudSortOption.LATEST) {
+                                    CloudSortOption.FILE_SIZE
+                                } else {
+                                    CloudSortOption.LATEST
+                                }
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SwapVert,
+                                    contentDescription = "切换排序方式",
+                                    tint = ConceptPrimary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = sortOption.label,
+                                    color = primaryText,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            when {
+                loading && summary.songs.isEmpty() -> {
+                    item(key = "cloud_tab_loading") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 72.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = cyanAccent, strokeWidth = 2.6.dp)
+                        }
+                    }
+                }
+                errorMessage != null && summary.songs.isEmpty() -> {
+                    item(key = "cloud_tab_error") {
+                        Surface(
+                            shape = RoundedCornerShape(24.dp),
+                            color = cardBg,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 44.dp, horizontal = 24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CloudOff,
+                                    contentDescription = null,
+                                    tint = subText.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(42.dp)
+                                )
+                                Text(errorMessage ?: "云盘加载失败", color = subText, fontSize = 13.5.sp)
+                                Button(
+                                    onClick = { viewModel.loadCloudDisk(force = true) },
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text("重新连接云盘", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+                displayedItems.isEmpty() -> {
+                    item(key = "cloud_tab_empty") {
+                        Surface(
+                            shape = RoundedCornerShape(24.dp),
+                            color = cardBg,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 52.dp, horizontal = 24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                RefinedShortcutBadge(
+                                    glyph = LibraryShortcutGlyph.CLOUD_DISK,
+                                    accentColor = cyanAccent,
+                                    size = 54.dp
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = if (summary.songs.isEmpty()) "个人音乐云盘暂无曲目" else "没有符合筛选条件的云盘歌曲",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = if (summary.songs.isEmpty()) {
+                                        "您在酷狗各端上传的私有无损与珍藏音频会实时在此同步呈现"
+                                    } else {
+                                        "请尝试更换或清空搜索关键词"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = subText
+                                )
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    itemsIndexed(
+                        items = displayedItems,
+                        key = { idx, item -> "cloud_tab_row_${item.kvId}_${item.hash}_$idx" },
+                        contentType = { _, _ -> "cloud_song_row" }
+                    ) { index, item ->
+                        val songModel = displayedSongs.getOrElse(index) { item.toSong() }
+                        val isCurrentPlaying = currentPlayingSongId != null &&
+                            (songModel.id == currentPlayingSongId ||
+                                (songModel.hash.isNotBlank() && currentPlayingSongId.contains(songModel.hash.take(8), ignoreCase = true)))
+                        val isSelected = item.kvId in selectedKvIds
+
+                        CloudSongRowCard(
+                            index = index + 1,
+                            item = item,
+                            isCurrent = isCurrentPlaying,
+                            isPlaying = isCurrentPlaying && isPlaying,
+                            selectionMode = selectionMode,
+                            selected = isSelected,
+                            cyanAccent = cyanAccent,
+                            cardBg = cardBg,
+                            onClick = {
+                                if (selectionMode) {
+                                    if (item.kvId > 0L) {
+                                        onSelectedKvIdsChange(if (isSelected) selectedKvIds - item.kvId else selectedKvIds + item.kvId)
+                                    }
+                                } else {
+                                    onPlaySong(songModel, displayedSongs)
+                                }
+                            },
+                            onLongPress = {
+                                if (!selectionMode && item.kvId > 0L) {
+                                    onSelectionModeChange(true)
+                                    onSelectedKvIdsChange(setOf(item.kvId))
+                                }
+                            },
+                            onPlayNext = {
+                                onAddNextPlay(songModel)
+                                Toast.makeText(context, "已加入下一首播放：《${item.title}》", Toast.LENGTH_SHORT).show()
+                            },
+                            onAddToPlaylist = {
+                                batchAddToPlaylistSongs = listOf(songModel)
+                            },
+                            onMoreActions = onOpenSongActions?.let { handler -> { handler(songModel) } },
+                            onDelete = {
+                                pendingDeleteItems = listOf(item)
+                            }
+                        )
+                    }
+
+                    if (loadingMore) {
+                        item(key = "cloud_tab_loading_more") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(color = cyanAccent, strokeWidth = 2.2.dp, modifier = Modifier.size(24.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (pullRefreshState.progress > 0.05f || pullRefreshState.isRefreshing) {
+            PullToRefreshContainer(
+                state = pullRefreshState,
+                modifier = Modifier.align(Alignment.TopCenter),
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = cyanAccent
+            )
+        }
+
+        // 批量操作底部浮动栏
+        AnimatedVisibility(
+            visible = selectionMode,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            val selectedItems = remember(summary.songs, selectedKvIds) {
+                summary.songs.filter { it.kvId in selectedKvIds }
+            }
+            Surface(
+                color = if (isDark) Color(0xFF131B2A).copy(alpha = 0.97f) else Color.White.copy(alpha = 0.97f),
+                shadowElevation = 12.dp,
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledTonalButton(
+                        enabled = selectedItems.isNotEmpty(),
+                        onClick = {
+                            selectedItems.reversed().forEach { onAddNextPlay(it.toSong()) }
+                            Toast.makeText(context, "已将 ${selectedItems.size} 首云盘歌曲加入下一首播放", Toast.LENGTH_SHORT).show()
+                            onSelectionModeChange(false)
+                            onSelectedKvIdsChange(emptySet())
+                        },
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.QueueMusic, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("下一首播", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                    FilledTonalButton(
+                        enabled = selectedItems.isNotEmpty(),
+                        onClick = { batchAddToPlaylistSongs = selectedItems.map { it.toSong() } },
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.PlaylistAdd, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("加入歌单", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        enabled = selectedItems.isNotEmpty() && !deleting,
+                        onClick = { pendingDeleteItems = selectedItems },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.DeleteForever, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (deleting) "同步删除中..." else "云端删除 (${selectedItems.size})",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    pendingDeleteItems?.let { targets ->
+        AlertDialog(
+            onDismissRequest = { if (!deleting) pendingDeleteItems = null },
+            title = { Text(if (targets.size == 1) "从云盘永久删除？" else "批量删除 ${targets.size} 首云盘歌曲？", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text(
+                    if (targets.size == 1) "确认将《${targets.first().title}》从酷狗官方云盘中实时永久移除吗？删除后不可恢复。"
+                    else "确认将所选的 ${targets.size} 首云盘曲目从酷狗官方云盘永久移除吗？删除操作将实时同步至云端。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !deleting,
+                    onClick = {
+                        val toDelete = targets
+                        pendingDeleteItems = null
+                        viewModel.deleteCloudSongsBatch(toDelete) { ok, msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            if (ok && selectionMode) {
+                                onSelectionModeChange(false)
+                                onSelectedKvIdsChange(emptySet())
+                            }
+                        }
+                    }
+                ) {
+                    Text("永久删除", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !deleting, onClick = { pendingDeleteItems = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    batchAddToPlaylistSongs?.let { songsToAdd ->
+        val leadSong = songsToAdd.firstOrNull()
+        val createdLists = remember(playlists) {
+            playlists.filter { it.isCreatedByMe && !it.isLiked && !it.isDefaultCollect }
+        }
+        if (leadSong != null) {
+            AddToPlaylistDialog(
+                song = leadSong,
+                playlists = createdLists,
+                onDismiss = { batchAddToPlaylistSongs = null },
+                onSelectPlaylist = { pl ->
+                    val targetListId = pl.resolveEffectiveListId()
+                    batchAddToPlaylistSongs = null
+                    if (targetListId > 0L) {
+                        viewModel.addSongsToPlaylistBatch(targetListId, songsToAdd, pl.title) { _, msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                        if (selectionMode) {
+                            onSelectionModeChange(false)
+                            onSelectedKvIdsChange(emptySet())
+                        }
+                    }
+                },
+                onCreateNewPlaylist = { showCreatePlaylistForBatch = true }
+            )
+        }
+    }
+
+    if (showCreatePlaylistForBatch) {
+        CreatePlaylistDialog(
+            onDismiss = { showCreatePlaylistForBatch = false },
+            onConfirmWithCallback = { name, onDone ->
+                viewModel.createPlaylist(name) { ok, msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    onDone(ok)
+                    if (ok) showCreatePlaylistForBatch = false
+                }
+            }
+        )
+    }
+}
+
 @Composable
 private fun CloudStorageOverviewHeroCard(
     summary: CloudDiskSummary,

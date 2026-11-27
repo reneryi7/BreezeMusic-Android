@@ -1541,6 +1541,7 @@ private fun PermissionDisclosureCard(
         AppPermissionType.NOTIFICATION_MEDIA -> Icons.Rounded.NotificationsActive to ConceptCyanAccent
         AppPermissionType.SYSTEM_OVERLAY -> Icons.Rounded.PictureInPictureAlt to ConceptVioletAccent
         AppPermissionType.STORAGE_EXPORT -> Icons.Rounded.PhotoLibrary to ConceptAmberAccent
+        AppPermissionType.LOCAL_AUDIO_IMPORT -> Icons.Rounded.LibraryMusic to ConceptCyanAccent
         AppPermissionType.MUSIC_DOWNLOAD -> Icons.Rounded.Download to ConceptCyanAccent
         AppPermissionType.BACKGROUND_GUARDIAN -> Icons.Rounded.BatteryChargingFull to ConceptMintAccent
         AppPermissionType.MOTION_ORIENTATION -> Icons.Rounded.ScreenRotation to ConceptCoralAccent

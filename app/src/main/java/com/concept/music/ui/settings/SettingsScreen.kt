@@ -820,6 +820,8 @@ fun SettingsScreen(
     val detailedCacheStats by AudioCacheManager.detailedStats.collectAsState()
     val cacheLimit by AudioCacheManager.cacheLimit.collectAsState()
     val downloadConfig by MusicDownloadManager.config.collectAsState()
+    val localDefaultTab by com.concept.music.data.vip.VipManager.localMusic.defaultTab.collectAsState()
+    val localOnlineLyricFallback by com.concept.music.data.vip.VipManager.localMusic.onlineLyricFallbackEnabled.collectAsState()
     val appVersionInfo = remember(context) { com.concept.music.ui.components.resolveAppVersionInfo(context) }
     val themeMode by ThemeManager.themeMode.collectAsState()
     val audioEffectState by AudioEffectManager.state.collectAsState()
@@ -1233,6 +1235,53 @@ fun SettingsScreen(
                                             subtitle = "提取封面主色渲染播放键与进度条",
                                             checked = dynamicCoverAccentEnabled,
                                             onCheckedChange = { viewModel.setDynamicCoverAccentEnabled(it) }
+                                        )
+                                    }
+                                }
+
+                                item {
+                                    SettingsSectionCard(
+                                        title = "本地与云盘曲库偏好",
+                                        icon = Icons.Rounded.LibraryMusic
+                                    ) {
+                                        Text(
+                                            text = "「本地/云盘」默认显示页面",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "从「我的」进入本地/云盘时默认展示的页面，也可在页面右上角菜单随时切换",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            fontSize = 11.5.sp
+                                        )
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                            com.concept.music.data.model.LocalCloudDefaultTab.entries.forEach { tab ->
+                                                ConceptBorderlessChoicePill(
+                                                    selected = localDefaultTab == tab,
+                                                    label = tab.label,
+                                                    accentColor = ConceptCyanAccent,
+                                                    onClick = {
+                                                        com.concept.music.data.vip.VipManager.localMusic.setDefaultTab(tab)
+                                                        Toast.makeText(context, "默认显示页已设为「${tab.label}」", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                )
+                                            }
+                                        }
+
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(vertical = 12.dp),
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                                        )
+
+                                        SettingToggleRow(
+                                            title = "本地歌曲缺失歌词时自动联网匹配",
+                                            subtitle = "优先读取单曲绑定、同目录、独立歌词目录与内嵌歌词，均无时联网匹配酷狗逐字歌词",
+                                            checked = localOnlineLyricFallback,
+                                            onCheckedChange = { enabled ->
+                                                com.concept.music.data.vip.VipManager.localMusic.setOnlineLyricFallbackEnabled(enabled)
+                                            }
                                         )
                                     }
                                 }

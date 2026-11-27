@@ -125,6 +125,7 @@ fun LibraryScreen(
     val purchasedSongs by viewModel.purchasedSongs.collectAsState()
     val purchasedAlbums by viewModel.purchasedAlbums.collectAsState()
     val cloudDiskSummary by viewModel.cloudDiskSummary.collectAsState()
+    val localSummary by viewModel.localSummary.collectAsState()
     val localListenStatsVersion by VipManager.listenStats.statsVersion.collectAsState()
     val localListenTotalCount = remember(account.currentId, localListenStatsVersion) {
         VipManager.listenStats.getTotalPlayCount(account.currentId)
@@ -338,20 +339,22 @@ fun LibraryScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        val localAndCloudSubtitle = when {
+                            localSummary.totalCount > 0 && cloudDiskSummary.totalCount > 0 ->
+                                "本地 ${localSummary.totalCount} 首 · 云盘 ${cloudDiskSummary.totalCount} 首"
+                            localSummary.totalCount > 0 ->
+                                "本地 ${localSummary.totalCount} 首 · 离线畅听"
+                            cloudDiskSummary.totalCount > 0 ->
+                                "云盘 ${cloudDiskSummary.totalCount} 首 · 本地导入"
+                            else -> "本地导入 · 音乐云盘"
+                        }
                         MediaShortcutCard(
-                            title = "音乐云盘",
-                            subtitle = if (cloudDiskSummary.totalCount > 0) "${cloudDiskSummary.totalCount} 首曲目" else "私有云端曲库",
+                            title = "本地/云盘",
+                            subtitle = localAndCloudSubtitle,
                             glyph = LibraryShortcutGlyph.CLOUD_DISK,
                             iconTint = cyanAccent,
                             gradientColors = cloudGradient,
-                            onClick = {
-                                if (!isLoggedIn) {
-                                    Toast.makeText(context, "请先登录酷狗账号查看音乐云盘", Toast.LENGTH_SHORT).show()
-                                    onLogin()
-                                } else {
-                                    onOpenCloudDisk()
-                                }
-                            },
+                            onClick = { onOpenCloudDisk() },
                             modifier = Modifier.weight(1f)
                         )
                         MediaShortcutCard(

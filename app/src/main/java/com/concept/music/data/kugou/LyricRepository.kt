@@ -33,6 +33,15 @@ class LyricRepository(
         }
     }
 
+    fun invalidateSongCache(songId: String) {
+        if (songId.isBlank()) return
+        synchronized(cache) {
+            cache.remove(songId)
+            cache.remove(songId.removePrefix("local_"))
+            cache.remove("local_${songId.removePrefix("local_")}")
+        }
+    }
+
     private fun isPredominantlyChinese(data: LyricData?): Boolean {
         if (data == null || data.lines.isEmpty()) return false
         var totalLetters = 0
@@ -65,6 +74,25 @@ class LyricRepository(
         }
 
         return withContext(Dispatchers.IO) {
+            // 本地歌曲 5 级歌词管线：
+            // 1. 单曲手动绑定独立歌词 -> 2. 同目录同名 .lrc/.krc -> 3. 已导入独立歌词目录 -> 4. 音频内嵌歌词 -> 5. (可选) 有网自动匹配酷狗 KRC 逐字歌词
+            if (song.isLocalSong) {
+                val localResolved = runCatching {
+                    com.concept.music.data.vip.VipManager.localMusic.resolveLocalLyric(song)
+                }.getOrNull()
+                if (localResolved != null && localResolved.lyricData.lines.isNotEmpty()) {
+                    if (cacheKey.isNotBlank()) synchronized(cache) { cache[cacheKey] = localResolved.lyricData }
+                    return@withContext localResolved.lyricData
+                }
+                val allowOnlineFallback = com.concept.music.data.vip.VipManager.localMusic.onlineLyricFallbackEnabled.value &&
+                    com.concept.music.service.AppPermissionManager.isPermissionEnabled(
+                        com.concept.music.service.AppPermissionType.NETWORK_ACCESS
+                    )
+                if (!allowOnlineFallback) {
+                    return@withContext LyricData()
+                }
+            }
+
             val candidates = searchLyricCandidates(song)
             if (candidates.isEmpty()) {
                 return@withContext LyricData()
@@ -229,13 +257,19 @@ class LyricRepository(
     private suspend fun searchLyricCandidates(song: Song): List<LyricCandidate> {
         val d = device()
         val clientTime = System.currentTimeMillis() / 1000
+        val effectiveHash = if (song.isLocalSong || song.hash.startsWith("local_")) "" else song.hash.lowercase()
+        val effectiveKeyword = if (song.isLocalSong && song.artist.isNotBlank() && song.artist != "未知歌手") {
+            "${song.artist} - ${song.title}"
+        } else {
+            song.title
+        }
         val query = linkedMapOf(
             "album_audio_id" to song.albumAudioId.toString(),
             "appid" to "3116",
             "clientver" to "11440",
             "duration" to song.durationMs.toString(),
-            "hash" to song.hash.lowercase(),
-            "keyword" to song.title,
+            "hash" to effectiveHash,
+            "keyword" to effectiveKeyword,
             "lrctxt" to "1",
             "man" to "yes",
             "clienttime" to clientTime.toString(),
@@ -273,8 +307,8 @@ class LyricRepository(
         }
         if (primary.isNotEmpty()) return primary
 
-        // 备用通道：对齐 kgmusicbot 的 krcs.kugou.com/search 接口
-        if (song.hash.isNotBlank()) {
+        // 备用通道：对齐 kgmusicbot 的 krcs.kugou.com/search 接口（仅限具酷狗真实 Hash 的在线曲目）
+        if (effectiveHash.isNotBlank()) {
             return try {
                 val krcsResp = transport.callAdvanced(
                     path = "/search",

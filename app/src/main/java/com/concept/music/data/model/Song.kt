@@ -86,10 +86,32 @@ data class Song(
     val sourceDeviceLabel: String = "",
     val playCount: Int = 0,
     val addTimeSec: Long = 0L,
-    val cloudSortOrder: Long = 0L
+    val cloudSortOrder: Long = 0L,
+    val localUri: String = "",
+    val localFolderId: String = "",
+    val localFolderName: String = "",
+    val localFormat: String = "",
+    val sampleRateHz: Int = 0,
+    val bitDepth: Int = 0,
+    val localLyricUri: String = ""
 ) {
     val isCloudSong: Boolean
         get() = cloudKvId > 0L || id.startsWith("cloud_")
+
+    val isLocalSong: Boolean
+        get() = localUri.isNotBlank() || id.startsWith("local_")
+
+    val localQualityBadgeLabel: String
+        get() {
+            if (!isLocalSong) return highestQuality.shortBadge
+            val fmt = localFormat.uppercase(java.util.Locale.ROOT)
+            return when {
+                isHiRes -> "Hi-Res"
+                fmt.isNotBlank() -> fmt
+                isLossless -> "SQ"
+                else -> highestQuality.shortBadge
+            }
+        }
 
     val hasAccompaniment: Boolean
         get() = accompanyHash.isNotBlank()
@@ -121,6 +143,15 @@ data class Song(
 
     val effectiveQualities: List<AudioQuality>
         get() {
+            if (isLocalSong) {
+                val nativeQ = actualPlayQuality ?: when {
+                    isHiRes -> AudioQuality.HI_RES
+                    isLossless -> AudioQuality.LOSSLESS
+                    bitrateKbps >= 256 || quality == "320" -> AudioQuality.HIGH
+                    else -> AudioQuality.STANDARD
+                }
+                return listOf(nativeQ)
+            }
             if (availableQualities.isNotEmpty()) return availableQualities
             val list = mutableListOf(AudioQuality.STANDARD)
             if (hash320.isNotBlank() || quality == "320" || isLossless || isHiRes) {
@@ -209,7 +240,14 @@ data class Song(
             sourceDeviceLabel = (sourceDeviceLabel as String?) ?: "",
             playCount = playCount,
             addTimeSec = addTimeSec,
-            cloudSortOrder = cloudSortOrder
+            cloudSortOrder = cloudSortOrder,
+            localUri = (localUri as String?) ?: "",
+            localFolderId = (localFolderId as String?) ?: "",
+            localFolderName = (localFolderName as String?) ?: "",
+            localFormat = (localFormat as String?) ?: "",
+            sampleRateHz = sampleRateHz,
+            bitDepth = bitDepth,
+            localLyricUri = (localLyricUri as String?) ?: ""
         )
         }
 }

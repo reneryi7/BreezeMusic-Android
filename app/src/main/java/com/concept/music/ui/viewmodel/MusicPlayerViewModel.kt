@@ -423,9 +423,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         if (recordHistory) {
             VipManager.history.add(currentUser, song)
         }
-        KugouCsccReporter.onSongStart(song)
-        // 仅在实际开始新曲播放（非每 60s CSCC 检查点、且非云盘本地文件）时按 15s 节流上报云端播放历史
-        if (recordHistory && !song.isCloudSong) {
+        if (!song.isLocalSong) {
+            KugouCsccReporter.onSongStart(song)
+        }
+        // 仅在实际开始新曲播放（非每 60s CSCC 检查点、且非云盘/本地音频文件）时按 15s 节流上报云端播放历史
+        if (recordHistory && !song.isCloudSong && !song.isLocalSong) {
             val nowMs = System.currentTimeMillis()
             if (song.id != lastCloudHandoffSongId || nowMs - lastCloudHandoffAtMs > 15_000L) {
                 lastCloudHandoffSongId = song.id
@@ -504,7 +506,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 )
             }
         }
-        if (targetSong != null && csccSegmentOpen && playedMs >= 10_000L) {
+        if (targetSong != null && !targetSong.isLocalSong && csccSegmentOpen && playedMs >= 10_000L) {
             KugouCsccReporter.onSongEnd(targetSong, playedMs, state = state)
             accumulatedPlayedMs = 0L
             currentSegmentRecordedGradeSec = 0L
@@ -868,7 +870,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         existingRecent: List<SavedPlayQueue>
     ): Pair<List<SavedPlayQueue>, String> {
         if (queue.isEmpty()) return existingRecent to currentActiveId
-        val cleanSongs = queue.map { it.copy(playUrl = "") }
+        val cleanSongs = queue.map { s -> if (s.isLocalSong) s else s.copy(playUrl = "") }
         val now = System.currentTimeMillis()
         val matchedExisting = existingRecent.find { it.id == currentActiveId && isSameQueueLineage(it.songs, cleanSongs) }
             ?: existingRecent.find { isSameQueueLineage(it.songs, cleanSongs) }
@@ -1096,8 +1098,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             fun sanitizePersistedSong(rawSong: Song): Song {
                 val s = rawSong.sanitizeFromJson()
-                // 云盘曲目所有档位指向同一原始文件 Hash，豁免伪 Hi-Res 清洗
-                if (!s.isHiRes || s.isCloudSong) return s
+                // 云盘曲目与本地曲目保持原始音频规格，豁免伪 Hi-Res 清洗
+                if (!s.isHiRes || s.isCloudSong || s.isLocalSong) return s
                 val realHiRes = s.hashHiRes.isNotBlank() &&
                     !s.hashHiRes.equals(s.hash320, ignoreCase = true) &&
                     !s.hashHiRes.equals(s.hash128, ignoreCase = true)
@@ -1167,7 +1169,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             mutableState.update { cur ->
                 if (cur.currentSong != null || cur.playlistQueue.isNotEmpty()) cur
                 else cur.copy(
-                    currentQualityLabel = effectiveRestoredQuality.label,
+                    currentQualityLabel = if (restoredSong?.isLocalSong == true) {
+                        formatLocalQualityCapsule(restoredSong)
+                    } else {
+                        effectiveRestoredQuality.label
+                    },
                     playlistQueue = sanitizedQueue,
                     currentIndex = savedIndex,
                     recentQueues = syncedRecent,
@@ -1181,11 +1187,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
             if (restoredSong != null) {
                 loadLyric(restoredSong)
-                if (playerOverride == null) {
+                if (playerOverride == null && !restoredSong.isLocalSong) {
                     val warmList = buildList {
                         add(restoredSong)
                         val nextIdx = (savedIndex + 1) % sanitizedQueue.size.coerceAtLeast(1)
-                        sanitizedQueue.getOrNull(nextIdx)?.let { if (it.id != restoredSong.id) add(it) }
+                        sanitizedQueue.getOrNull(nextIdx)?.let { if (it.id != restoredSong.id && !it.isLocalSong) add(it) }
                     }
                     runCatching { VipManager.music.prewarmSongsPlayback(warmList, savedQuality, maxCount = 2) }
                 }
@@ -1204,9 +1210,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                         }
                     }
                 }
-                // 错峰延后拉取评论总数，避免在冷启动首屏阶段与发现页推荐流争抢网络带宽
-                delay(450L)
-                loadComments(isRefresh = true)
+                if (!restoredSong.isLocalSong) {
+                    // 错峰延后拉取评论总数，避免在冷启动首屏阶段与发现页推荐流争抢网络带宽
+                    delay(450L)
+                    loadComments(isRefresh = true)
+                }
             }
         }
     }
@@ -1220,7 +1228,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             val queueJson = if (snapshot.playlistQueue === lastSerializedQueueRef && lastSerializedQueueJson.isNotBlank()) {
                 lastSerializedQueueJson
             } else {
-                val cleanQueue = snapshot.playlistQueue.map { it.copy(playUrl = "") }
+                val cleanQueue = snapshot.playlistQueue.map { s -> if (s.isLocalSong) s else s.copy(playUrl = "") }
                 gson.toJson(cleanQueue).also {
                     lastSerializedQueueRef = snapshot.playlistQueue
                     lastSerializedQueueJson = it
@@ -1229,7 +1237,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             // queueJson cached above
             val recentJson = gson.toJson(
                 snapshot.recentQueues.take(5).map { rq ->
-                    rq.copy(songs = rq.songs.map { s -> s.copy(playUrl = "") })
+                    rq.copy(songs = rq.songs.map { s -> if (s.isLocalSong) s else s.copy(playUrl = "") })
                 }
             )
             putString("cover_style", snapshot.coverStyle.name)
@@ -1335,11 +1343,15 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
         val initialPrefQuality = mutableState.value.preferredQuality
         val initialPlayQuality = if (initialPrefQuality in song.effectiveQualities) initialPrefQuality else song.highestQuality
-        val initialQualityLabel = when (initialPlayQuality) {
-            AudioQuality.HI_RES -> "Hi-Res"
-            AudioQuality.LOSSLESS -> "SQ 无损"
-            AudioQuality.HIGH -> "高品 320K"
-            AudioQuality.STANDARD -> "标准 128K"
+        val initialQualityLabel = if (song.isLocalSong) {
+            formatLocalQualityCapsule(song)
+        } else {
+            when (initialPlayQuality) {
+                AudioQuality.HI_RES -> "Hi-Res"
+                AudioQuality.LOSSLESS -> "SQ 无损"
+                AudioQuality.HIGH -> "高品 320K"
+                AudioQuality.STANDARD -> "标准 128K"
+            }
         }
 
         val (updatedRecentQueues, newActiveQueueId) = syncActiveQueueInRecent(
@@ -1419,9 +1431,12 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     full.distinct().sortedBy { it.ordinal }
                 }
                 val isTrulyHiRes = resolvedQuality == AudioQuality.HI_RES ||
+                    (song.isLocalSong && song.isHiRes) ||
                     (song.isCloudSong && song.isHiRes) ||
                     (song.isHiRes && song.hashHiRes.isNotBlank() && !song.hashHiRes.equals(song.hash320, ignoreCase = true))
-                val sanitizedQualities = if (!isTrulyHiRes) {
+                val sanitizedQualities = if (song.isLocalSong) {
+                    listOf(resolvedQuality)
+                } else if (!isTrulyHiRes) {
                     fullQualities.filter { it != AudioQuality.HI_RES }.ifEmpty { listOf(AudioQuality.STANDARD) }
                 } else fullQualities
 
@@ -1482,11 +1497,15 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 player.play()
 
-                val qualityLabel = when (resolvedQuality) {
-                    AudioQuality.HI_RES -> "Hi-Res" + (if (playbackResult.bitrateKbps > 0) " ${playbackResult.bitrateKbps}k" else "")
-                    AudioQuality.LOSSLESS -> "SQ 无损" + (if (playbackResult.bitrateKbps > 0) " ${playbackResult.bitrateKbps}k" else "")
-                    AudioQuality.HIGH -> "高品 320K"
-                    AudioQuality.STANDARD -> "标准 128K"
+                val qualityLabel = if (resolvedSong.isLocalSong) {
+                    formatLocalQualityCapsule(resolvedSong)
+                } else {
+                    when (resolvedQuality) {
+                        AudioQuality.HI_RES -> "Hi-Res" + (if (playbackResult.bitrateKbps > 0) " ${playbackResult.bitrateKbps}k" else "")
+                        AudioQuality.LOSSLESS -> "SQ 无损" + (if (playbackResult.bitrateKbps > 0) " ${playbackResult.bitrateKbps}k" else "")
+                        AudioQuality.HIGH -> "高品 320K"
+                        AudioQuality.STANDARD -> "标准 128K"
+                    }
                 }
 
                 val updatedQueue = mutableState.value.playlistQueue.map {
@@ -1509,7 +1528,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 )
 
                 prefetchNextSong(updatedQueue, index)
-                if (mutableState.value.commentCount <= 0) {
+                if (!resolvedSong.isLocalSong && mutableState.value.commentCount <= 0) {
                     loadComments(isRefresh = true)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1523,6 +1542,41 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 updatePositionSnapshot(positionMs = mutablePositionFlow.value.positionMs, isPlaying = false)
             }
         }
+    }
+
+    private fun formatLocalQualityCapsule(song: Song): String {
+        val track = runCatching { VipManager.localMusic.findTrackBySongId(song.id) }.getOrNull()
+        if (track != null) return track.playerQualityCapsuleLabel
+        val fmt = song.localFormat.uppercase(java.util.Locale.ROOT).ifBlank { "LOCAL" }
+        val sr = if (song.sampleRateHz > 0) {
+            com.concept.music.data.model.LocalMusicQueryEngine.formatSampleRateShort(song.sampleRateHz)
+        } else ""
+        return when {
+            song.isHiRes -> when {
+                sr.isNotBlank() && song.bitDepth > 0 -> "Hi-Res $sr/${song.bitDepth}bit"
+                sr.isNotBlank() -> "Hi-Res $sr"
+                else -> "Hi-Res $fmt"
+            }
+            song.isLossless -> when {
+                song.bitrateKbps > 0 -> "$fmt ${song.bitrateKbps}k"
+                sr.isNotBlank() -> "$fmt $sr"
+                else -> "$fmt 无损"
+            }
+            song.bitrateKbps > 0 -> "$fmt ${song.bitrateKbps}k"
+            else -> fmt
+        }
+    }
+
+    /**
+     * 为当前正在播放的歌曲强制重新加载歌词（例如刚为本地歌曲手动绑定独立 .lrc/.krc 文件或导入独立歌词目录后）。
+     */
+    fun reloadCurrentSongLyric(targetSongId: String? = null) {
+        val active = mutableState.value.currentSong ?: return
+        if (targetSongId != null && active.id != targetSongId && active.id.removePrefix("local_") != targetSongId.removePrefix("local_")) {
+            return
+        }
+        VipManager.lyric.invalidateSongCache(active.id)
+        loadLyric(active)
     }
 
     private fun loadLyric(song: Song) {
@@ -1962,12 +2016,17 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setPreferredQuality(quality: AudioQuality) {
         if (mutableState.value.preferredQuality == quality) return
+        val currentSong = mutableState.value.currentSong
         mutableState.value = mutableState.value.copy(
             preferredQuality = quality,
-            currentQualityLabel = quality.label
+            currentQualityLabel = if (currentSong?.isLocalSong == true) {
+                formatLocalQualityCapsule(currentSong)
+            } else {
+                quality.label
+            }
         )
         persistPlaybackStateAsync()
-        val currentSong = mutableState.value.currentSong ?: return
+        if (currentSong == null || currentSong.isLocalSong) return
         val currentPosition = currentSmoothPositionMs().takeIf { it > 0L } ?: mutableState.value.currentPositionMs
         VipManager.music.clearSongPlaybackCache(currentSong)
         val updatedSong = currentSong.copy(playUrl = "")
@@ -2637,6 +2696,15 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun loadComments(isRefresh: Boolean = false) {
         val song = mutableState.value.commentTargetSong ?: mutableState.value.currentSong ?: return
+        if (song.isLocalSong) {
+            mutableState.value = mutableState.value.copy(
+                comments = emptyList(),
+                commentsLoading = false,
+                commentsHasMore = false,
+                commentCount = 0
+            )
+            return
+        }
         if (!isRefresh && (mutableState.value.commentsLoading || !mutableState.value.commentsHasMore)) return
         if (isRefresh) {
             commentsJob?.cancel()
@@ -2918,6 +2986,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                             val nextMediaId = mediaId(nextSong)
                             val resolvedQuality = nextResult.actualQuality
                             val isTrulyHiRes = resolvedQuality == AudioQuality.HI_RES ||
+                                (nextSong.isLocalSong && nextSong.isHiRes) ||
+                                (nextSong.isCloudSong && nextSong.isHiRes) ||
                                 (nextSong.isHiRes && nextSong.hashHiRes.isNotBlank() && !nextSong.hashHiRes.equals(nextSong.hash320, ignoreCase = true))
                             val resolvedNextSong = nextSong.copy(
                                 playUrl = nextResult.url,

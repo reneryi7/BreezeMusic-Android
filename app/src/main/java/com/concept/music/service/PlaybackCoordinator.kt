@@ -358,8 +358,8 @@ object PlaybackCoordinator {
                 AmbientSoundManager.prepareForAppMusicPlayback()
                 player.prepare()
                 player.play()
-                // 异步同步云端播放历史（排除云盘本地文件），确保跨设备继续播放队列及时更新
-                if (!targetSong.isCloudSong) {
+                // 异步同步云端播放历史（排除云盘与本地音频文件），确保跨设备继续播放队列及时更新
+                if (!targetSong.isCloudSong && !targetSong.isLocalSong) {
                     mainScope.launch(Dispatchers.IO) {
                         runCatching { VipManager.music.uploadPlayHistory(targetSong) }
                     }

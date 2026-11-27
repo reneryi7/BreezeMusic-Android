@@ -6,7 +6,10 @@ import androidx.compose.runtime.Immutable
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheEvictor
@@ -382,8 +385,55 @@ object AudioCacheManager {
         }
     }
 
+    /**
+     * 按 URI Scheme 自动分流的数据源：
+     * - `content://`、`file://`、`android.resource://` 直接路由至 Media3 `DefaultDataSource`（本地文件/SAF 直读），
+     *   绕过 `SimpleCache` 与公网 HTTP 拦截器，确保纯离线模式畅播且不重复占用音频缓存空间；
+     * - `http://` / `https://` 仍走受控 `CacheDataSource` + `SafeOkHttpAudioDataSource`。
+     */
+    private class SchemeRoutingDataSource(
+        private val localSource: DataSource,
+        private val remoteSource: DataSource
+    ) : DataSource {
+        private var activeSource: DataSource? = null
+
+        override fun addTransferListener(transferListener: TransferListener) {
+            localSource.addTransferListener(transferListener)
+            remoteSource.addTransferListener(transferListener)
+        }
+
+        override fun open(dataSpec: DataSpec): Long {
+            val scheme = dataSpec.uri.scheme?.lowercase(Locale.ROOT).orEmpty()
+            val target = if (scheme == "content" || scheme == "file" || scheme == "android.resource" || scheme.isEmpty()) {
+                localSource
+            } else {
+                remoteSource
+            }
+            activeSource = target
+            return target.open(dataSpec)
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            return activeSource?.read(buffer, offset, length) ?: androidx.media3.common.C.RESULT_END_OF_INPUT
+        }
+
+        override fun getUri(): android.net.Uri? = activeSource?.uri
+
+        override fun getResponseHeaders(): Map<String, List<String>> =
+            activeSource?.responseHeaders ?: emptyMap()
+
+        override fun close() {
+            try {
+                activeSource?.close()
+            } finally {
+                activeSource = null
+            }
+        }
+    }
+
     fun getDataSourceFactory(context: Context): DataSource.Factory {
-        val cache = getCache(context)
+        val appCtx = context.applicationContext
+        val cache = getCache(appCtx)
         val guardedUpstreamFactory = DataSource.Factory { SafeOkHttpAudioDataSource() }
 
         // 优先使用 MediaItem.setCustomCacheKey 注入的业务唯一键；兜底提取 query 中的 hash/quality/IsFreePart
@@ -413,12 +463,20 @@ object AudioCacheManager {
             .setCache(cache)
             .setFragmentSize(32L * 1024L * 1024L)
 
-        return CacheDataSource.Factory()
+        val remoteCacheFactory = CacheDataSource.Factory()
             .setCache(cache)
             .setCacheKeyFactory(cacheKeyFactory)
             .setCacheWriteDataSinkFactory(cacheWriteDataSinkFactory)
             .setUpstreamDataSourceFactory(guardedUpstreamFactory)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
+        val localDirectFactory = DefaultDataSource.Factory(appCtx)
+        return DataSource.Factory {
+            SchemeRoutingDataSource(
+                localSource = localDirectFactory.createDataSource(),
+                remoteSource = remoteCacheFactory.createDataSource()
+            )
+        }
     }
 
     private fun computeDetailedStats(appCtx: Context): DetailedCacheStats {

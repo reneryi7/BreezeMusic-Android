@@ -105,6 +105,15 @@ class LibraryViewModel(
     private val _cloudDiskError = MutableStateFlow<String?>(null)
     val cloudDiskError = _cloudDiskError.asStateFlow()
 
+    // 本地音乐曲库（多目录 SAF 增量扫描 + Hi-Res/无损识别 + 独立歌词匹配 + 默认显示页偏好）
+    val localFolders = VipManager.localMusic.folders
+    val localLyricFolders = VipManager.localMusic.lyricFolders
+    val localTracks = VipManager.localMusic.tracks
+    val localSummary = VipManager.localMusic.summary
+    val localScanProgress = VipManager.localMusic.scanProgress
+    val localCloudDefaultTab = VipManager.localMusic.defaultTab
+    val localOnlineLyricFallback = VipManager.localMusic.onlineLyricFallbackEnabled
+
     // 微风本机听歌排行（近一周 0 / 近一月 2 / 总排行 1，纯微风使用记录 + 歌手榜与累计时长）
     private val _listenRankWeek = MutableStateFlow<List<ListenRankItem>>(emptyList())
     val listenRankWeek = _listenRankWeek.asStateFlow()
@@ -2384,6 +2393,123 @@ class LibraryViewModel(
             val errMsg = result.exceptionOrNull()?.message
             withContext(Dispatchers.Main) {
                 onResult(ok, if (ok) "已将「${device.deviceName.ifBlank { device.mid }}」移出登录状态" else (errMsg ?: "踢出设备失败，请稍后重试"))
+            }
+        }
+    }
+
+    // ==================== 本地音乐与歌词目录管理 ====================
+
+    fun setLocalCloudDefaultTab(tab: com.concept.music.data.model.LocalCloudDefaultTab) {
+        VipManager.localMusic.setDefaultTab(tab)
+    }
+
+    fun setLocalOnlineLyricFallback(enabled: Boolean) {
+        VipManager.localMusic.setOnlineLyricFallbackEnabled(enabled)
+    }
+
+    fun importLocalMusicFolder(
+        treeUri: android.net.Uri,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val res = VipManager.localMusic.addAndScanMusicFolder(treeUri)
+            res.onSuccess { folder ->
+                val detail = buildString {
+                    append("已导入「${folder.displayName}」· 共 ${folder.trackCount} 首")
+                    if (folder.hiResCount > 0 || folder.losslessCount > 0) {
+                        append("（${folder.hiResCount} 首 Hi-Res · ${folder.losslessCount} 首无损）")
+                    }
+                }
+                onResult(true, detail)
+            }.onFailure { err ->
+                onResult(false, err.message ?: "导入音乐文件夹失败")
+            }
+        }
+    }
+
+    fun rescanLocalMusicFolder(
+        folderId: String,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val res = VipManager.localMusic.rescanFolder(folderId)
+            res.onSuccess { folder ->
+                onResult(true, "已刷新「${folder.displayName}」· ${folder.trackCount} 首歌曲")
+            }.onFailure { err ->
+                onResult(false, err.message ?: "重新扫描失败")
+            }
+        }
+    }
+
+    fun rescanAllLocalMusic(onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            val res = VipManager.localMusic.rescanAllFolders()
+            res.onSuccess { total ->
+                onResult(true, "扫描完成 · 共识别 $total 首本地歌曲")
+            }.onFailure { err ->
+                onResult(false, err.message ?: "扫描本地曲库失败")
+            }
+        }
+    }
+
+    fun removeLocalMusicFolder(
+        folderId: String,
+        onResult: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            VipManager.localMusic.removeMusicFolder(folderId)
+            onResult("已移除该本地音乐目录（不会删除手机原文件）")
+        }
+    }
+
+    fun removeLocalTrack(
+        trackId: String,
+        onResult: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            VipManager.localMusic.removeTrack(trackId)
+            onResult("已从本地曲库列表移除")
+        }
+    }
+
+    fun importLocalLyricFolder(
+        treeUri: android.net.Uri,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val res = VipManager.localMusic.addLyricFolder(treeUri)
+            res.onSuccess { folder ->
+                VipManager.lyric.clearCache()
+                onResult(true, "已导入歌词目录「${folder.displayName}」· 索引 ${folder.lyricFileCount} 份歌词")
+            }.onFailure { err ->
+                onResult(false, err.message ?: "导入歌词目录失败")
+            }
+        }
+    }
+
+    fun removeLocalLyricFolder(
+        folderId: String,
+        onResult: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            VipManager.localMusic.removeLyricFolder(folderId)
+            VipManager.lyric.clearCache()
+            onResult("已移除独立歌词目录")
+        }
+    }
+
+    fun bindLocalLyricToSong(
+        songId: String,
+        lyricUri: android.net.Uri,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val ok = VipManager.localMusic.bindManualLyricToTrack(songId, lyricUri)
+            if (ok) {
+                VipManager.lyric.invalidateSongCache(songId)
+                onResult(true, "已为该歌曲绑定独立歌词")
+            } else {
+                onResult(false, "绑定独立歌词失败，请确认权限已开启")
             }
         }
     }

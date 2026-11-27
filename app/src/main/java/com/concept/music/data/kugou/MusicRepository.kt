@@ -2188,6 +2188,25 @@ class MusicApiRepository(
         preferredQuality: AudioQuality = song.highestQuality,
         useAccompaniment: Boolean = false
     ): PlaybackResult {
+        if (song.isLocalSong) {
+            val resolvedUri = song.localUri.ifBlank { song.playUrl }
+            if (resolvedUri.isBlank()) {
+                throw IllegalStateException("本地音频文件路径已失效，请重新扫描文件夹")
+            }
+            val nativeQuality = song.actualPlayQuality ?: when {
+                song.isHiRes -> AudioQuality.HI_RES
+                song.isLossless -> AudioQuality.LOSSLESS
+                song.bitrateKbps >= 256 || song.quality == "320" -> AudioQuality.HIGH
+                else -> AudioQuality.STANDARD
+            }
+            return PlaybackResult(
+                url = resolvedUri,
+                actualQuality = nativeQuality,
+                bitrateKbps = song.bitrateKbps,
+                fileSizeByte = song.fileSizeByte,
+                resolvedHash = song.id
+            )
+        }
         if (song.isCloudSong) {
             val cloudScope = accounts.context()?.session?.userId ?: "guest"
             val cloudCacheKey = "cloud_${cloudScope}_${song.hash.trim().lowercase()}_cloud"
@@ -8300,6 +8319,47 @@ class MusicApiRepository(
      * 歌曲技术参数与音频详情（严格对齐当前实际播放档位或音源最高已验证档位，消除音质标签与码率/大小不匹配的矛盾）
      */
     fun songDetail(song: Song): SongDetailInfo {
+        if (song.isLocalSong) {
+            val track = com.concept.music.data.vip.VipManager.localMusic.findTrackBySongId(song.id)
+            val fmt = (track?.format?.ifBlank { null } ?: song.localFormat.ifBlank { "LOCAL" })
+                .uppercase(java.util.Locale.ROOT)
+            val srHz = track?.sampleRateHz?.takeIf { it > 0 } ?: song.sampleRateHz
+            val bitDepth = track?.bitDepth?.takeIf { it > 0 } ?: song.bitDepth
+            val bitrate = track?.bitrateKbps?.takeIf { it > 0 } ?: song.bitrateKbps
+            val sizeBytes = track?.fileSizeBytes?.takeIf { it > 0L } ?: song.fileSizeByte
+            val folderLabel = (track?.folderName?.ifBlank { null } ?: song.localFolderName)
+                .ifBlank { "本地曲库" }
+            val sampleRateStr = buildList {
+                if (srHz > 0) add(String.format(java.util.Locale.US, "%.1f kHz", srHz / 1000.0))
+                if (bitDepth > 0) add("$bitDepth bit")
+            }.joinToString(" / ").ifBlank { "容器原生规格 ($fmt)" }
+            val qualityDesc = when {
+                song.isHiRes -> "Hi-Res 高解析度本地母带 ($fmt · $sampleRateStr)"
+                song.isLossless -> "本地无损音频 ($fmt · $sampleRateStr)"
+                else -> "本地音频 ($fmt${if (bitrate > 0) " · ${bitrate}kbps" else ""})"
+            }
+            val lyricSourceLabel = when {
+                track?.manualLyricUri?.isNotBlank() == true -> "手动绑定独立歌词"
+                track?.sidecarLyricUri?.isNotBlank() == true -> "同目录同名歌词"
+                track?.embeddedLyric?.isNotBlank() == true -> "音频内嵌歌词"
+                else -> "本地文件"
+            }
+            val fileSizeStr = if (sizeBytes > 0L) {
+                com.concept.music.data.model.LocalMusicQueryEngine.formatBytes(sizeBytes)
+            } else "未知大小"
+            return SongDetailInfo(
+                song = song,
+                albumName = (track?.album?.ifBlank { null } ?: song.album).ifBlank { "未知专辑" },
+                singerName = song.artist.ifBlank { "未知歌手" },
+                publishTime = (track?.year?.ifBlank { null } ?: song.publishDate).ifBlank { "本地文件" },
+                company = "本地目录 · $folderLabel（$lyricSourceLabel）",
+                audioQuality = qualityDesc,
+                sampleRate = sampleRateStr,
+                bitRate = if (bitrate > 0) "$bitrate kbps" else "原生编码 ($fmt)",
+                fileSize = fileSizeStr,
+                fileHash = track?.fileName?.ifBlank { song.id } ?: song.id
+            )
+        }
         val cachedMeta = listOf(song.id, song.hash, song.hash128, song.hash320, song.hashFlac, song.hashHiRes)
             .map { it.trim().lowercase() }
             .firstNotNullOfOrNull { if (it.isNotBlank()) songTechMetaCache[it] else null }
@@ -8447,6 +8507,9 @@ class MusicApiRepository(
      * 2. /kmr/v2/albums (module/album.js) 与 /kmr/v2/audio (module/krm_audio.js) 获取 publish_company 与 publish_date
      */
     suspend fun fetchSongDetail(song: Song): SongDetailInfo = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        if (song.isLocalSong) {
+            return@withContext songDetail(song)
+        }
         val session = accounts.context()?.session
         val enrichedSongDef = async {
             runCatching { enrichSongsPrivilegeLite(listOf(song)).firstOrNull() }.getOrNull() ?: song

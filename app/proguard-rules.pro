@@ -2,6 +2,7 @@
 -keep class com.concept.music.data.model.** { *; }
 -keep class com.concept.music.data.recommendation.** { *; }
 -keep class com.concept.music.data.repository.LocalListen* { *; }
+-keep class com.concept.music.data.repository.PersistedLocalMusicIndex { *; }
 -keep class com.concept.music.data.kugou.SavedAccount { *; }
 -keep class com.concept.music.data.kugou.KugouSession { *; }
 -keep class com.concept.music.data.kugou.DeviceIdentity { *; }

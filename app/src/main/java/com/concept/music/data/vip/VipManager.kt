@@ -8,6 +8,7 @@ import com.concept.music.data.recommendation.RecommendationPreferenceRepository
 import com.concept.music.data.recommendation.SongTagMetadataCache
 import com.concept.music.data.repository.DiscoverLocalCache
 import com.concept.music.data.repository.LocalListenStatsRepository
+import com.concept.music.data.repository.LocalMusicRepository
 import com.concept.music.data.repository.PlaybackHistoryRepository
 import com.concept.music.data.repository.PlaylistCoverOverrideRepository
 import com.concept.music.data.repository.SearchHistoryRepository
@@ -28,6 +29,7 @@ object VipManager {
     lateinit var lyric: LyricRepository; private set
     lateinit var history: PlaybackHistoryRepository; private set
     var listenStats: LocalListenStatsRepository = LocalListenStatsRepository(null); private set
+    var localMusic: LocalMusicRepository = LocalMusicRepository(null); private set
     var searchHistoryRepo: SearchHistoryRepository = SearchHistoryRepository(null); private set
     var discoverCache: DiscoverLocalCache = DiscoverLocalCache(null); private set
     var playlistCoverOverrides: PlaylistCoverOverrideRepository = PlaylistCoverOverrideRepository(null); private set
@@ -66,6 +68,7 @@ object VipManager {
         lyric = LyricRepository(transport, store::device)
         history = PlaybackHistoryRepository(appCtx)
         listenStats = LocalListenStatsRepository(appCtx)
+        localMusic = LocalMusicRepository(appCtx)
         searchHistoryRepo = SearchHistoryRepository(appCtx)
         discoverCache = DiscoverLocalCache(appCtx)
         playlistCoverOverrides = PlaylistCoverOverrideRepository(appCtx)

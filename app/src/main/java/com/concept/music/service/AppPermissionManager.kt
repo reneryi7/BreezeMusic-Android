@@ -68,6 +68,15 @@ enum class AppPermissionType(
         privacyCommitment = "仅在您主动触发封面/头像保存、海报导出或本地文件保存时向目标路径写入文件，绝不扫描、读取或上传您手机中的私人照片与无关文件。",
         disabledImpactDescription = "关闭后将无法向手机存储或系统相册保存高清歌曲/专辑/歌单封面、歌手头像、歌词海报及登录二维码等本地导出文件。"
     ),
+    LOCAL_AUDIO_IMPORT(
+        key = "perm_local_audio_import",
+        title = "本地音乐与歌词目录读取",
+        badge = "本地曲库",
+        manifestPermissionName = "READ_MEDIA_AUDIO · READ_EXTERNAL_STORAGE · SAF DocumentTree",
+        purposeDescription = "用于通过系统文件夹选择器（SAF）与音频读取权限扫描您主动选定的本地音乐文件夹与独立歌词目录，离线解析 FLAC / WAV / Hi-Res / ALAC / MP3 / AAC 的真实采样率、位深、内嵌封面与歌词。",
+        privacyCommitment = "仅访问您主动选定授权的文件夹与歌词文件，所有音频扫描、解码与封面提取均在设备端纯离线完成，绝不上传任何本地文件信息。",
+        disabledImpactDescription = "关闭后将暂停新增扫描与导入本地音乐文件夹或独立歌词目录（已导入索引保持可见，重新开启后即可继续导入与刷新）。"
+    ),
     MUSIC_DOWNLOAD(
         key = "perm_music_download",
         title = "音乐下载与歌词保存",
@@ -128,6 +137,7 @@ data class AppPermissionState(
     val notificationMediaEnabled: Boolean = true,
     val systemOverlayEnabled: Boolean = true,
     val storageExportEnabled: Boolean = true,
+    val localAudioImportEnabled: Boolean = true,
     val musicDownloadEnabled: Boolean = false,
     val backgroundGuardianEnabled: Boolean = true,
     val motionOrientationEnabled: Boolean = true,
@@ -139,6 +149,7 @@ data class AppPermissionState(
         AppPermissionType.NOTIFICATION_MEDIA -> notificationMediaEnabled
         AppPermissionType.SYSTEM_OVERLAY -> systemOverlayEnabled
         AppPermissionType.STORAGE_EXPORT -> storageExportEnabled
+        AppPermissionType.LOCAL_AUDIO_IMPORT -> localAudioImportEnabled
         AppPermissionType.MUSIC_DOWNLOAD -> musicDownloadEnabled
         AppPermissionType.BACKGROUND_GUARDIAN -> backgroundGuardianEnabled
         AppPermissionType.MOTION_ORIENTATION -> motionOrientationEnabled
@@ -157,6 +168,7 @@ data class AppPermissionState(
         AppPermissionType.NOTIFICATION_MEDIA -> copy(notificationMediaEnabled = enabled)
         AppPermissionType.SYSTEM_OVERLAY -> copy(systemOverlayEnabled = enabled)
         AppPermissionType.STORAGE_EXPORT -> copy(storageExportEnabled = enabled)
+        AppPermissionType.LOCAL_AUDIO_IMPORT -> copy(localAudioImportEnabled = enabled)
         AppPermissionType.MUSIC_DOWNLOAD -> copy(musicDownloadEnabled = enabled)
         AppPermissionType.BACKGROUND_GUARDIAN -> copy(backgroundGuardianEnabled = enabled)
         AppPermissionType.MOTION_ORIENTATION -> copy(motionOrientationEnabled = enabled)
@@ -204,6 +216,7 @@ object AppPermissionManager {
             notificationMediaEnabled = p.getBoolean(AppPermissionType.NOTIFICATION_MEDIA.key, true),
             systemOverlayEnabled = p.getBoolean(AppPermissionType.SYSTEM_OVERLAY.key, true),
             storageExportEnabled = p.getBoolean(AppPermissionType.STORAGE_EXPORT.key, true),
+            localAudioImportEnabled = p.getBoolean(AppPermissionType.LOCAL_AUDIO_IMPORT.key, true),
             musicDownloadEnabled = p.getBoolean(AppPermissionType.MUSIC_DOWNLOAD.key, false),
             backgroundGuardianEnabled = p.getBoolean(AppPermissionType.BACKGROUND_GUARDIAN.key, true),
             motionOrientationEnabled = p.getBoolean(AppPermissionType.MOTION_ORIENTATION.key, legacyMotionEnabled),
@@ -374,6 +387,33 @@ object AppPermissionManager {
         }
     }
 
+    fun hasLocalAudioReadPermission(context: Context): Boolean {
+        return runCatching {
+            when {
+                Build.VERSION.SDK_INT >= 33 -> {
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.READ_MEDIA_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                }
+                else -> {
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    ) == PackageManager.PERMISSION_GRANTED
+                }
+            }
+        }.getOrDefault(false)
+    }
+
+    fun requiredLocalAudioRuntimePermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            arrayOf(Manifest.permission.READ_MEDIA_AUDIO)
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
     fun querySystemGrantStatus(context: Context, type: AppPermissionType): SystemPermissionGrantStatus {
         return when (type) {
             AppPermissionType.NETWORK_ACCESS -> SystemPermissionGrantStatus(
@@ -421,6 +461,23 @@ object AppPermissionManager {
                     },
                     isSystemGranted = granted || Build.VERSION.SDK_INT >= 29,
                     actionButtonLabel = "存储权限设置"
+                )
+            }
+            AppPermissionType.LOCAL_AUDIO_IMPORT -> {
+                val audioGranted = hasLocalAudioReadPermission(context)
+                val safCount = runCatching {
+                    com.concept.music.data.vip.VipManager.localMusic.getAuthorizedFolderCount()
+                }.getOrDefault(0)
+                val statusText = when {
+                    audioGranted && safCount > 0 -> "音频权限已授权 · 已选 $safCount 个目录"
+                    audioGranted -> "系统音频读取已授权 · 按需选择目录"
+                    safCount > 0 -> "已通过 SAF 授权 $safCount 个目录"
+                    else -> "按需选择文件夹或授予音频读取权限"
+                }
+                SystemPermissionGrantStatus(
+                    statusLabel = statusText,
+                    isSystemGranted = audioGranted || safCount > 0,
+                    actionButtonLabel = "系统权限设置"
                 )
             }
             AppPermissionType.MUSIC_DOWNLOAD -> {
@@ -575,6 +632,9 @@ object AppPermissionManager {
                 }.onFailure {
                     openAppDetailsSettings(context)
                 }
+            }
+            AppPermissionType.LOCAL_AUDIO_IMPORT -> {
+                openAppDetailsSettings(context)
             }
             AppPermissionType.STORAGE_EXPORT,
             AppPermissionType.MUSIC_DOWNLOAD -> {

@@ -63,7 +63,9 @@ fun SongActionBottomSheet(
     onOpenArtist: (() -> Unit)? = null,
     onOpenAlbum: (() -> Unit)? = null,
     onOpenSongDetail: (() -> Unit)? = null,
-    onRemoveFromCurrentPlaylist: (() -> Unit)? = null
+    onRemoveFromCurrentPlaylist: (() -> Unit)? = null,
+    onBindLocalLyric: (() -> Unit)? = null,
+    onRemoveLocalSong: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -81,7 +83,7 @@ fun SongActionBottomSheet(
     }
 
     LaunchedEffect(song.id, song.hash, song.album, song.albumId, song.albumAudioId, song.audioId) {
-        if (resolvedAlbumName.isBlank()) {
+        if (!song.isLocalSong && resolvedAlbumName.isBlank()) {
             val (fetchedName, fetchedId) = runCatching {
                 VipManager.music.resolveSongAlbumMeta(song)
             }.getOrDefault("" to resolvedAlbumId)
@@ -243,19 +245,31 @@ fun SongActionBottomSheet(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (song.isHiRes) {
+                                if (song.isLocalSong) {
+                                    BadgeTag(
+                                        text = song.localQualityBadgeLabel,
+                                        color = if (song.isHiRes) VipGold else if (song.isLossless) ConceptCyanAccent else ConceptPrimary
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                } else if (song.isHiRes) {
                                     BadgeTag(text = "Hi-Res", color = VipGold)
                                     Spacer(modifier = Modifier.width(4.dp))
                                 } else if (song.isLossless) {
                                     BadgeTag(text = "SQ", color = ConceptPrimary)
                                     Spacer(modifier = Modifier.width(4.dp))
                                 }
-                                if (song.isVip) {
+                                if (song.isVip && !song.isLocalSong) {
                                     BadgeTag(text = "VIP", color = VipGold)
                                     Spacer(modifier = Modifier.width(4.dp))
                                 }
                                 Text(
-                                    text = if (resolvedAlbumName.isNotBlank()) "${song.artist} · $resolvedAlbumName" else song.artist,
+                                    text = if (song.isLocalSong && song.localFolderName.isNotBlank()) {
+                                        "${song.artist} · ${song.localFolderName}"
+                                    } else if (resolvedAlbumName.isNotBlank()) {
+                                        "${song.artist} · $resolvedAlbumName"
+                                    } else {
+                                        song.artist
+                                    },
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     ),
@@ -265,24 +279,26 @@ fun SongActionBottomSheet(
                             }
                         }
 
-                        IconButton(
-                            onClick = {
-                                if (onShareSong != null) {
-                                    dismissWithAction { onShareSong() }
-                                } else {
-                                    val payload = com.concept.music.data.share.KugouShareManager.buildSongSharePayload(song)
-                                    dismissWithAction {
-                                        com.concept.music.data.share.KugouShareManager.shareViaSystemSheet(context, payload)
+                        if (!song.isLocalSong) {
+                            IconButton(
+                                onClick = {
+                                    if (onShareSong != null) {
+                                        dismissWithAction { onShareSong() }
+                                    } else {
+                                        val payload = com.concept.music.data.share.KugouShareManager.buildSongSharePayload(song)
+                                        dismissWithAction {
+                                            com.concept.music.data.share.KugouShareManager.shareViaSystemSheet(context, payload)
+                                        }
                                     }
                                 }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Share,
+                                    contentDescription = "分享歌曲",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp)
+                                )
                             }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Share,
-                                contentDescription = "分享歌曲",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp)
-                            )
                         }
                     }
 
@@ -309,103 +325,150 @@ fun SongActionBottomSheet(
                         onClick = { dismissWithAction { onPlayNext() } }
                     )
 
-                    val permissionState by AppPermissionManager.state.collectAsState()
-                    if (onDownloadSong != null && permissionState.musicDownloadEnabled) {
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.Download,
-                            title = "下载歌曲",
-                            tint = ConceptMintAccent,
-                            onClick = { dismissWithAction { onDownloadSong() } }
-                        )
-                    }
-
-                    SongActionMenuItem(
-                        icon = Icons.Rounded.Image,
-                        title = "保存歌曲封面",
-                        tint = ConceptCyanAccent,
-                        onClick = {
-                            dismissWithAction {
-                                (onSaveSongCover ?: defaultSaveSongCoverAction).invoke()
-                            }
+                    if (song.isLocalSong) {
+                        if (onBindLocalLyric != null) {
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Lyrics,
+                                title = "绑定独立歌词文件 (.lrc / .krc)",
+                                tint = ConceptCyanAccent,
+                                onClick = { dismissWithAction { onBindLocalLyric() } }
+                            )
                         }
-                    )
+                        if (song.coverUrl.isNotBlank()) {
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Image,
+                                title = "保存内嵌高清封面",
+                                tint = ConceptMintAccent,
+                                onClick = {
+                                    dismissWithAction {
+                                        (onSaveSongCover ?: defaultSaveSongCoverAction).invoke()
+                                    }
+                                }
+                            )
+                        }
+                        if (onOpenSongDetail != null) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Info,
+                                title = "音频技术参数与文件信息",
+                                onClick = { dismissWithAction { onOpenSongDetail() } }
+                            )
+                        }
+                        if (onRemoveLocalSong != null) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.DeleteOutline,
+                                title = "从本地曲库列表移除（不删源文件）",
+                                tint = MaterialTheme.colorScheme.error,
+                                textColor = MaterialTheme.colorScheme.error,
+                                onClick = { dismissWithAction { onRemoveLocalSong() } }
+                            )
+                        }
+                    } else {
+                        val permissionState by AppPermissionManager.state.collectAsState()
+                        if (onDownloadSong != null && permissionState.musicDownloadEnabled) {
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Download,
+                                title = "下载歌曲",
+                                tint = ConceptMintAccent,
+                                onClick = { dismissWithAction { onDownloadSong() } }
+                            )
+                        }
 
-                    SongActionMenuItem(
-                        icon = if (isFavorite) Icons.Rounded.HeartBroken else Icons.Rounded.FavoriteBorder,
-                        title = if (isFavorite) "从「我喜欢的音乐」移除" else "收藏到「我喜欢的音乐」",
-                        tint = if (isFavorite) Color(0xFFFF5252) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
-                        onClick = { dismissWithAction { onToggleFavorite() } }
-                    )
-
-                    SongActionMenuItem(
-                        icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
-                        title = "添加到其他歌单...",
-                        onClick = { dismissWithAction { onAddToPlaylist() } }
-                    )
-
-                    val hasDiscoveryGroup = onOpenComments != null ||
-                        (onOpenArtist != null && song.artist.isNotBlank()) ||
-                        onOpenAlbum != null
-                    if (hasDiscoveryGroup) {
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                    }
-
-                    if (onOpenComments != null) {
                         SongActionMenuItem(
-                            icon = Icons.AutoMirrored.Rounded.Comment,
-                            title = "查看歌曲评论",
-                            onClick = { dismissWithAction { onOpenComments() } }
+                            icon = Icons.Rounded.Image,
+                            title = "保存歌曲封面",
+                            tint = ConceptCyanAccent,
+                            onClick = {
+                                dismissWithAction {
+                                    (onSaveSongCover ?: defaultSaveSongCoverAction).invoke()
+                                }
+                            }
                         )
-                    }
 
-                    if (onOpenArtist != null && song.artist.isNotBlank()) {
-                        val artistNames = remember(song.artist) { parseSongArtistNames(song.artist) }
                         SongActionMenuItem(
-                            icon = Icons.Rounded.Person,
-                            title = if (artistNames.size >= 2) {
-                                "查看歌手 (${artistNames.size}位)：${artistNames.joinToString(" / ")}"
-                            } else {
-                                "查看歌手：${song.artist}"
-                            },
-                            onClick = { dismissWithAction { onOpenArtist() } }
+                            icon = if (isFavorite) Icons.Rounded.HeartBroken else Icons.Rounded.FavoriteBorder,
+                            title = if (isFavorite) "从「我喜欢的音乐」移除" else "收藏到「我喜欢的音乐」",
+                            tint = if (isFavorite) Color(0xFFFF5252) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                            onClick = { dismissWithAction { onToggleFavorite() } }
                         )
-                    }
 
-                    if (onOpenAlbum != null) {
                         SongActionMenuItem(
-                            icon = Icons.Rounded.Album,
-                            title = "查看专辑：${resolvedAlbumName.ifBlank { "未知专辑" }}",
-                            onClick = { dismissWithAction { onOpenAlbum() } }
+                            icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
+                            title = "添加到其他歌单...",
+                            onClick = { dismissWithAction { onAddToPlaylist() } }
                         )
-                    }
 
-                    if (onOpenSongDetail != null) {
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.Info,
-                            title = "音频技术参数与特征码",
-                            onClick = { dismissWithAction { onOpenSongDetail() } }
-                        )
-                    }
+                        val hasDiscoveryGroup = onOpenComments != null ||
+                            (onOpenArtist != null && song.artist.isNotBlank()) ||
+                            onOpenAlbum != null
+                        if (hasDiscoveryGroup) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
 
-                    if (onRemoveFromCurrentPlaylist != null) {
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                        SongActionMenuItem(
-                            icon = Icons.Rounded.DeleteOutline,
-                            title = "从当前歌单中移除",
-                            tint = MaterialTheme.colorScheme.error,
-                            textColor = MaterialTheme.colorScheme.error,
-                            onClick = { dismissWithAction { onRemoveFromCurrentPlaylist() } }
-                        )
+                        if (onOpenComments != null) {
+                            SongActionMenuItem(
+                                icon = Icons.AutoMirrored.Rounded.Comment,
+                                title = "查看歌曲评论",
+                                onClick = { dismissWithAction { onOpenComments() } }
+                            )
+                        }
+
+                        if (onOpenArtist != null && song.artist.isNotBlank()) {
+                            val artistNames = remember(song.artist) { parseSongArtistNames(song.artist) }
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Person,
+                                title = if (artistNames.size >= 2) {
+                                    "查看歌手 (${artistNames.size}位)：${artistNames.joinToString(" / ")}"
+                                } else {
+                                    "查看歌手：${song.artist}"
+                                },
+                                onClick = { dismissWithAction { onOpenArtist() } }
+                            )
+                        }
+
+                        if (onOpenAlbum != null) {
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Album,
+                                title = "查看专辑：${resolvedAlbumName.ifBlank { "未知专辑" }}",
+                                onClick = { dismissWithAction { onOpenAlbum() } }
+                            )
+                        }
+
+                        if (onOpenSongDetail != null) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.Info,
+                                title = "音频技术参数与特征码",
+                                onClick = { dismissWithAction { onOpenSongDetail() } }
+                            )
+                        }
+
+                        if (onRemoveFromCurrentPlaylist != null) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            SongActionMenuItem(
+                                icon = Icons.Rounded.DeleteOutline,
+                                title = "从当前歌单中移除",
+                                tint = MaterialTheme.colorScheme.error,
+                                textColor = MaterialTheme.colorScheme.error,
+                                onClick = { dismissWithAction { onRemoveFromCurrentPlaylist() } }
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))

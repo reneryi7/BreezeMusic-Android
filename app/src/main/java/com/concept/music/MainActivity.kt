@@ -81,6 +81,7 @@ import com.concept.music.ui.library.ArtistDetailScreen
 import com.concept.music.ui.library.CloudDiskScreen
 import com.concept.music.ui.library.LibraryScreen
 import com.concept.music.ui.library.ListenRankScreen
+import com.concept.music.ui.library.LocalAndCloudMusicScreen
 import com.concept.music.ui.library.PlaylistDetailScreen
 import com.concept.music.ui.library.PlaylistOrderSortSheet
 import com.concept.music.ui.navigation.BottomNavBar
@@ -306,6 +307,22 @@ fun MainContent(
     var detailSheetSong by remember { mutableStateOf<Song?>(null) }
     var songToDownload by remember { mutableStateOf<Song?>(null) }
     var songToShare by remember { mutableStateOf<Song?>(null) }
+    var songPendingManualLyricBind by remember { mutableStateOf<Song?>(null) }
+
+    val manualLyricFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val target = songPendingManualLyricBind
+        songPendingManualLyricBind = null
+        if (uri != null && target != null) {
+            libraryViewModel.bindLocalLyricToSong(target.id, uri) { ok, msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                if (ok) {
+                    musicPlayerViewModel.reloadCurrentSongLyric(target.id)
+                }
+            }
+        }
+    }
     var playlistToShare by remember { mutableStateOf<com.concept.music.data.model.Playlist?>(null) }
     var detectedSharedTarget by remember { mutableStateOf<com.concept.music.data.share.ResolvedSharedMusicTarget?>(null) }
     var multiArtistPickerSong by remember { mutableStateOf<Song?>(null) }
@@ -991,13 +1008,14 @@ fun MainContent(
                     )
                 }
 
-                // 音乐云盘独立页面
+                // 本地/云盘双页中心独立页面（兼容保留 "cloud_disk" 路由名）
                 composable("cloud_disk") {
-                    CloudDiskScreen(
+                    LocalAndCloudMusicScreen(
                         viewModel = libraryViewModel,
                         currentPlayingSongId = currentSong?.id,
                         isPlaying = isPlaying,
                         onBack = { navController.popBackStack() },
+                        onLogin = openLogin,
                         onPlaySong = { song, list ->
                             musicPlayerViewModel.playSong(song, list)
                         },
@@ -1008,6 +1026,9 @@ fun MainContent(
                         onOpenSongActions = { song ->
                             actionSheetSong = song
                             actionSheetRemoveCallback = null
+                        },
+                        onLocalLyricsUpdated = {
+                            musicPlayerViewModel.reloadCurrentSongLyric()
                         }
                     )
                 }
@@ -1495,7 +1516,25 @@ fun MainContent(
                 onOpenSongDetail = {
                     detailSheetSong = targetSong
                 },
-                onRemoveFromCurrentPlaylist = actionSheetRemoveCallback
+                onRemoveFromCurrentPlaylist = actionSheetRemoveCallback,
+                onBindLocalLyric = if (targetSong.isLocalSong) {
+                    {
+                        songPendingManualLyricBind = targetSong
+                        runCatching {
+                            manualLyricFilePicker.launch(arrayOf("*/*"))
+                        }.onFailure {
+                            songPendingManualLyricBind = null
+                            Toast.makeText(context, "无法打开系统文件选择器", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } else null,
+                onRemoveLocalSong = if (targetSong.isLocalSong) {
+                    {
+                        libraryViewModel.removeLocalTrack(targetSong.id) { msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } else null
             )
         }
 

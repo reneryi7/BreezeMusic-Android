@@ -19,6 +19,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
@@ -108,6 +109,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
@@ -362,6 +364,7 @@ fun NowPlayingSheet(
     val view = LocalView.current
     var showLyricView by remember { mutableStateOf(false) }
     var isLandscapeMode by remember { mutableStateOf(false) }
+    var isExitingLandscapeTransition by remember { mutableStateOf(false) }
     var enteredLandscapeViaSensor by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
@@ -387,6 +390,7 @@ fun NowPlayingSheet(
 
     val enterLandscape: (Boolean) -> Unit = { fromSensor ->
         if (!showLyricView) {
+            isExitingLandscapeTransition = false
             isLandscapeMode = true
             enteredLandscapeViaSensor = fromSensor
             if (!isLargeScreen) {
@@ -404,6 +408,12 @@ fun NowPlayingSheet(
             // 平板本身处于横屏状态时，点击左上角返回直接收起播放页回到上一界面
             onDismiss()
         } else {
+            val shouldHoldUntilPortrait = !isLargeScreen &&
+                configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                configuration.screenWidthDp > configuration.screenHeightDp
+            if (shouldHoldUntilPortrait) {
+                isExitingLandscapeTransition = true
+            }
             isLandscapeMode = false
             enteredLandscapeViaSensor = false
             if (isLargeScreen) {
@@ -490,6 +500,17 @@ fun NowPlayingSheet(
 
     val isWindowActuallyLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
         configuration.screenWidthDp > configuration.screenHeightDp
+    // 手机端退出横屏时等待窗口真正转回竖屏再挂载竖屏布局（最长 360ms 超时兜底），避免竖屏标题栏先在横屏宽下实例化再骤缩导致跑马灯偏出裁剪区
+    LaunchedEffect(isExitingLandscapeTransition, isWindowActuallyLandscape) {
+        if (isExitingLandscapeTransition) {
+            if (!isWindowActuallyLandscape) {
+                isExitingLandscapeTransition = false
+            } else {
+                delay(360L)
+                isExitingLandscapeTransition = false
+            }
+        }
+    }
     // 平板竖屏点击「横屏播放」按钮时：将全屏画布旋转 90° 横向铺满整个屏幕（完全复刻图四状态，无任何上下黑边），把平板横过来即可沉浸使用
     val isForcedRotatedTabletLandscape = isLargeScreen && !showLyricView && isLandscapeMode && !isWindowActuallyLandscape
     val effectiveLandscape = if (adaptiveInfo.isTabletLandscapePlayer) {
@@ -497,7 +518,7 @@ fun NowPlayingSheet(
     } else if (isLargeScreen) {
         !showLyricView && (isWindowActuallyLandscape || isLandscapeMode)
     } else {
-        !showLyricView && isWindowActuallyLandscape && isLandscapeMode
+        !showLyricView && isWindowActuallyLandscape && (isLandscapeMode || isExitingLandscapeTransition)
     }
 
     // 平板强制横屏旋转状态下：跟随重力感应自动适配正反横向握持（90° / -90°）
@@ -944,7 +965,13 @@ fun NowPlayingSheet(
                                 onDismiss()
                             }
                         },
-                        onQualityClick = { showQualityDialog = true },
+                        onQualityClick = {
+                            if (song.isLocalSong) {
+                                showDetailSheet = true
+                            } else {
+                                showQualityDialog = true
+                            }
+                        },
                         onUnlockFullTrack = {
                             onUnlockFullTrack()
                             Toast.makeText(context, "已解锁本曲完整播放", Toast.LENGTH_SHORT).show()
@@ -1820,6 +1847,7 @@ private fun RedesignedTopHeaderBar(
     }
     val isGoldQuality = qualityLabel.startsWith("Hi-Res", ignoreCase = true)
     val isLargeScreen = com.concept.music.ui.theme.LocalConceptAdaptiveInfo.current.isLargeScreenDevice
+    val configuration = LocalConfiguration.current
 
     Column(
         modifier = Modifier
@@ -1830,7 +1858,7 @@ private fun RedesignedTopHeaderBar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (isLargeScreen) 42.dp else 32.dp),
+                .heightIn(min = if (isLargeScreen) 44.dp else 36.dp),
             contentAlignment = Alignment.Center
         ) {
             IconButton(
@@ -1847,35 +1875,52 @@ private fun RedesignedTopHeaderBar(
                 )
             }
 
-            AnimatedContent(
-                targetState = title,
-                transitionSpec = {
-                    (fadeIn(tween(220, easing = FastOutSlowInEasing)) +
-                        slideInVertically(tween(240, easing = FastOutSlowInEasing)) { it / 3 })
-                        .togetherWith(
-                            fadeOut(tween(150, easing = FastOutSlowInEasing)) +
-                                slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 3 }
-                        )
-                },
-                label = "headerSongTitleTransition",
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = if (isLargeScreen) 56.dp else 44.dp)
-            ) { displayTitle ->
-                Text(
-                    text = displayTitle,
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
-                        fontSize = if (isLargeScreen) 24.sp else 20.sp,
-                        letterSpacing = 0.2.sp
-                    ),
-                    maxLines = 1,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .basicMarquee()
-                )
+                    .padding(horizontal = if (isLargeScreen) 56.dp else 44.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                AnimatedContent(
+                    targetState = title,
+                    contentAlignment = Alignment.Center,
+                    transitionSpec = {
+                        (fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                            slideInVertically(tween(240, easing = FastOutSlowInEasing)) { it / 3 })
+                            .togetherWith(
+                                fadeOut(tween(150, easing = FastOutSlowInEasing)) +
+                                    slideOutVertically(tween(180, easing = FastOutSlowInEasing)) { -it / 3 }
+                            )
+                            .using(SizeTransform(clip = false))
+                    },
+                    label = "headerSongTitleTransition",
+                    modifier = Modifier.fillMaxWidth()
+                ) { displayTitle ->
+                    key(configuration.orientation, configuration.screenWidthDp, displayTitle) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = displayTitle,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White,
+                                    fontSize = if (isLargeScreen) 24.sp else 20.sp,
+                                    letterSpacing = 0.2.sp,
+                                    textMotion = TextMotion.Animated
+                                ),
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.basicMarquee(
+                                    iterations = Int.MAX_VALUE,
+                                    initialDelayMillis = 1200,
+                                    velocity = 28.dp
+                                )
+                            )
+                        }
+                    }
+                }
             }
 
             IconButton(

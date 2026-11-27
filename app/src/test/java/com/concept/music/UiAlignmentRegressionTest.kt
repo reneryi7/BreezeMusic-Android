@@ -1162,8 +1162,8 @@ class UiAlignmentRegressionTest {
         com.concept.music.service.AppPermissionManager.resetForTest()
         try {
             val initialState = com.concept.music.service.AppPermissionManager.state.value
-            assertEquals(9, initialState.totalCount)
-            assertEquals(8, initialState.enabledCount)
+            assertEquals(10, initialState.totalCount)
+            assertEquals(9, initialState.enabledCount)
             assertFalse(
                 "音乐下载与歌词保存独立开关默认应为关闭状态，需用户手动开启",
                 initialState.isEnabled(com.concept.music.service.AppPermissionType.MUSIC_DOWNLOAD)
@@ -1216,11 +1216,11 @@ class UiAlignmentRegressionTest {
                 com.concept.music.service.AppPermissionType.MOTION_ORIENTATION,
                 false
             )
-            assertEquals(5, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
+            assertEquals(6, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
 
             // 4. 一键恢复开启全部权限
             com.concept.music.service.AppPermissionManager.enableAllPermissions(null)
-            assertEquals(9, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
+            assertEquals(10, com.concept.music.service.AppPermissionManager.state.value.enabledCount)
         } finally {
             com.concept.music.service.AppPermissionManager.resetForTest()
         }
