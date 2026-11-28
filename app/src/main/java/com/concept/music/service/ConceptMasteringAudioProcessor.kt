@@ -918,8 +918,11 @@ class ConceptMasteringAudioProcessor : BaseAudioProcessor() {
         val encoding = inputAudioFormat.encoding
         val channels = inputAudioFormat.channelCount
 
-        // 非破坏性只读采样当前音频帧频谱能量，使「律动光晕」背景在任意音效状态（含 OFF 直通）下都能同频律动
-        sampleRhythmTelemetryFromBuffer(inputBuffer, encoding, channels, sampleRate)
+        // 非破坏性只读采样当前音频帧频谱能量，使「律动光晕」背景在任意音效状态（含 OFF 直通）下都能同频律动；
+        // 车机独立包在熄屏/后台或非律动背景时由 telemetrySamplingEnabled 直接跳过采样以节省 CPU
+        if (AudioRhythmTelemetry.telemetrySamplingEnabled) {
+            sampleRhythmTelemetryFromBuffer(inputBuffer, encoding, channels, sampleRate)
+        }
 
         val state = AudioEffectManager.state.value
         val balance = state.channelBalance.coerceIn(-1f, 1f)

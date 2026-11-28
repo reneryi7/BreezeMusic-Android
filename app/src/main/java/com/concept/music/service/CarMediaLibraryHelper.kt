@@ -244,6 +244,103 @@ object CarMediaLibraryHelper {
     const val TAB_RECENT_HISTORY = "breeze_tab_recent_history"
     const val PREFIX_PLAYLIST = "breeze_playlist:"
     const val PREFIX_TRACK = "breeze_car_track|"
+    const val PREFIX_VOICE_SEARCH = "breeze_voice_search:"
+
+    private val voiceSearchResultsByKey = ConcurrentHashMap<String, List<MediaItem>>()
+
+    /**
+     * 规范化解析车载语音助手（小迪 / 小爱 / 小艺 / Google Assistant）下发的点歌查询与结构化 Extras：
+     * - 优先组合 `EXTRA_MEDIA_ARTIST` + `EXTRA_MEDIA_TITLE` / `EXTRA_MEDIA_ALBUM`；
+     * - 自动剥离口语前缀（“播放”“放一首”“我想听”等）；
+     * - 返回空串时代表“随便放点音乐”，上层将自动切入猜你喜欢私人 FM 或恢复上次播放队列。
+     */
+    fun extractVoiceSearchKeyword(
+        rawQuery: String?,
+        artistExtra: String? = null,
+        titleExtra: String? = null,
+        albumExtra: String? = null
+    ): String {
+        val cleanArtist = artistExtra?.trim().orEmpty()
+        val cleanTitle = titleExtra?.trim().orEmpty()
+        val cleanAlbum = albumExtra?.trim().orEmpty()
+        val structured = listOf(cleanArtist, cleanTitle, cleanAlbum)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" ")
+            .trim()
+        val base = structured.ifBlank { rawQuery?.trim().orEmpty() }
+        if (base.isBlank()) return ""
+        val stripped = base
+            .replace(Regex("^(?:请|帮我|给我)*\\s*(?:打开微风音乐(?:车机)?|用微风音乐(?:车机)?)?\\s*(?:播放|放一首|放首|放点|来一首|来首|我想听|听一下|听一首|搜一下|搜索)\\s*"), "")
+            .replace(Regex("(?:的歌|这首歌|的音乐)$"), "")
+            .trim()
+        val genericMusicQueries = setOf("音乐", "歌曲", "歌", "好听的歌", "随便听听", "music", "songs", "play music")
+        if (stripped.lowercase(Locale.ROOT) in genericMusicQueries) {
+            return ""
+        }
+        return stripped
+    }
+
+    fun extractVoiceSearchKeyword(rawQuery: String?, extras: Bundle?): String {
+        return extractVoiceSearchKeyword(
+            rawQuery = rawQuery,
+            artistExtra = extras?.getString(android.provider.MediaStore.EXTRA_MEDIA_ARTIST),
+            titleExtra = extras?.getString(android.provider.MediaStore.EXTRA_MEDIA_TITLE),
+            albumExtra = extras?.getString(android.provider.MediaStore.EXTRA_MEDIA_ALBUM)
+        )
+    }
+
+    suspend fun searchVoiceTracks(
+        context: Context,
+        rawQuery: String?,
+        extras: Bundle? = null
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        VipManager.initialize(context.applicationContext)
+        val activeUid = runCatching { VipManager.accounts.state.value.currentId }.getOrNull()
+        clearLookupCachesIfAccountChanged(activeUid)
+
+        val keyword = extractVoiceSearchKeyword(rawQuery, extras)
+        val cacheKey = rawQuery?.trim().orEmpty()
+        val parentId = "$PREFIX_VOICE_SEARCH${keyword.ifBlank { "fm_fallback" }}"
+        val songs: List<Song> = if (keyword.isBlank()) {
+            val fmCached = VipManager.discoverCache.getPersonalFm(activeUid)
+            fmCached.ifEmpty {
+                suspendRunCatching { VipManager.music.personalFm() }.getOrDefault(emptyList())
+            }.take(30)
+        } else {
+            suspendRunCatching { VipManager.music.searchSongs(keyword, page = 1, pageSize = 25).songs }
+                .getOrDefault(emptyList())
+                .take(25)
+        }
+        queueLookupByParentId[parentId] = songs
+        val items = songs.map { buildPlayableSongMediaItem(parentId, it) }
+        voiceSearchResultsByKey[cacheKey] = items
+        items
+    }
+
+    fun getCachedVoiceSearchResults(rawQuery: String?): List<MediaItem> {
+        return voiceSearchResultsByKey[rawQuery?.trim().orEmpty()].orEmpty()
+    }
+
+    suspend fun resolveVoicePlayQueue(
+        context: Context,
+        rawQuery: String?,
+        extras: Bundle? = null
+    ): Pair<List<Song>, Boolean> = withContext(Dispatchers.IO) {
+        VipManager.initialize(context.applicationContext)
+        val activeUid = runCatching { VipManager.accounts.state.value.currentId }.getOrNull()
+        val keyword = extractVoiceSearchKeyword(rawQuery, extras)
+        if (keyword.isBlank()) {
+            val fm = VipManager.discoverCache.getPersonalFm(activeUid).ifEmpty {
+                suspendRunCatching { VipManager.music.personalFm() }.getOrDefault(emptyList())
+            }.take(30)
+            return@withContext fm to true
+        }
+        val found = suspendRunCatching { VipManager.music.searchSongs(keyword, page = 1, pageSize = 25).songs }
+            .getOrDefault(emptyList())
+            .take(25)
+        found to false
+    }
 
     // 主流国内外车联投屏与车载原生媒体中心包名白名单
     val TRUSTED_CAR_HOST_PACKAGES: Set<String> = setOf(

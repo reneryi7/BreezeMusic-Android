@@ -73,12 +73,17 @@ object BreezeWidgetManager {
     @Volatile
     var onCyclePlayModeCommand: (() -> Unit)? = null
 
-    internal val providerSpecs: List<Pair<BreezeWidgetSizeClass, Class<*>>> = listOf(
-        BreezeWidgetSizeClass.CARD_4X2 to ConceptMusicWidgetProvider::class.java,
-        BreezeWidgetSizeClass.CAPSULE_4X1 to BreezeCompactWidgetProvider::class.java,
-        BreezeWidgetSizeClass.SQUARE_2X2 to BreezeSquareWidgetProvider::class.java,
-        BreezeWidgetSizeClass.STAGE_4X4 to BreezeStageWidgetProvider::class.java
-    )
+    internal val providerSpecs: List<Pair<BreezeWidgetSizeClass, Class<*>>>
+        get() = if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+            listOf(BreezeWidgetSizeClass.CARD_4X2 to ConceptMusicWidgetProvider::class.java)
+        } else {
+            listOf(
+                BreezeWidgetSizeClass.CARD_4X2 to ConceptMusicWidgetProvider::class.java,
+                BreezeWidgetSizeClass.CAPSULE_4X1 to BreezeCompactWidgetProvider::class.java,
+                BreezeWidgetSizeClass.SQUARE_2X2 to BreezeSquareWidgetProvider::class.java,
+                BreezeWidgetSizeClass.STAGE_4X4 to BreezeStageWidgetProvider::class.java
+            )
+        }
 
     fun providerClassFor(sizeClass: BreezeWidgetSizeClass): Class<*> {
         return providerSpecs.firstOrNull { it.first == sizeClass }?.second

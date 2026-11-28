@@ -1136,7 +1136,7 @@ class UiAlignmentRegressionTest {
         assertEquals(16, com.concept.music.ui.settings.PROJECT_CHANGELOG_HISTORY.size)
         val latestRelease = com.concept.music.ui.settings.PROJECT_CHANGELOG_HISTORY.first()
         val initialRelease = com.concept.music.ui.settings.PROJECT_CHANGELOG_HISTORY.last()
-        assertEquals("v${BuildConfig.VERSION_NAME.removeSuffix("-tablet")}", latestRelease.version)
+        assertEquals("v${BuildConfig.VERSION_NAME.removeSuffix("-tablet").removeSuffix("-car")}", latestRelease.version)
         assertEquals("v1.0.0", initialRelease.version)
         assertTrue(latestRelease.moduleGroups.size >= 3)
         assertTrue(initialRelease.moduleGroups.size >= 4)
@@ -1381,6 +1381,10 @@ class UiAlignmentRegressionTest {
                 lyricEnabled = false,
                 lyricLocked = false
             )
+            if (BuildConfig.IS_CAR_FLAVOR) {
+                assertTrue("车机独立包已裁切手机桌面悬浮歌词按钮，通知栏不应注入该自定义操作", layoutOffUnlocked.isEmpty())
+                return
+            }
             assertEquals(2, layoutOffUnlocked.size)
             assertEquals("开启桌面歌词", layoutOffUnlocked[0].displayName.toString())
             assertEquals(
@@ -1610,7 +1614,7 @@ class UiAlignmentRegressionTest {
         val history = com.concept.music.ui.settings.PROJECT_CHANGELOG_HISTORY
         assertEquals("更新日志完整记录全部 16 个发布版本 (v1.0.0 ~ v1.5.0)", 16, history.size)
         val latest = history.first()
-        assertEquals("v${BuildConfig.VERSION_NAME.removeSuffix("-tablet")}", latest.version)
+        assertEquals("v${BuildConfig.VERSION_NAME.removeSuffix("-tablet").removeSuffix("-car")}", latest.version)
         assertTrue(latest.moduleGroups.size >= 3)
         assertEquals("v1.0.0", history.last().version)
         assertEquals(0L, com.concept.music.ui.components.SPLASH_ICON_HOLD_DURATION_MS)

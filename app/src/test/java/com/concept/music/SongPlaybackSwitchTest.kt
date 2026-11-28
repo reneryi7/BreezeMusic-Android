@@ -611,8 +611,13 @@ class SongPlaybackSwitchTest {
 
     @Test
     fun testAllowPlayWithOtherAppsAndWiredHeadsetControlSettingsToggle() = runTest(testDispatcher) {
-        assertFalse(viewModel.uiState.value.allowPlayWithOtherApps)
-        assertEquals(com.concept.music.service.AudioFocusMode.EXCLUSIVE, viewModel.uiState.value.audioFocusMode)
+        if (BuildConfig.IS_CAR_FLAVOR) {
+            assertTrue(viewModel.uiState.value.allowPlayWithOtherApps)
+            assertEquals(com.concept.music.service.AudioFocusMode.DUCK, viewModel.uiState.value.audioFocusMode)
+        } else {
+            assertFalse(viewModel.uiState.value.allowPlayWithOtherApps)
+            assertEquals(com.concept.music.service.AudioFocusMode.EXCLUSIVE, viewModel.uiState.value.audioFocusMode)
+        }
 
         viewModel.setAudioFocusMode(com.concept.music.service.AudioFocusMode.DUCK)
         assertTrue(viewModel.uiState.value.allowPlayWithOtherApps)

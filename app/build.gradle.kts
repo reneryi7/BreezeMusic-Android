@@ -29,11 +29,13 @@ android {
         }
     }
 
-    // 手机版 (phone) 与平板版 (tablet) 签名配置：
+    // 手机版 (phone)、平板版 (tablet) 与车机版 (car) 签名配置：
     // 1. 手机版通过本地隔离的 keystore.properties 绑定高强度口令保护的 app/keystore/breezemusic-phone.jks (phoneSign)，
     //    保留与 v1.0.0 ~ v1.3.5 一致的证书指纹以确保所有手机端及国产 ROM 平滑覆盖升级零冲突；外部克隆者无本地凭据时自动回退 debug 签名。
     // 2. 平板版默认使用独立的 app/keystore/breezemusic-tablet.jks (tabletSign) 签名，并配合独立包名后缀 .tablet，
     //    从签名与包名双维度彻底隔离，杜绝与手机版产生 INSTALL_FAILED_UPDATE_INCOMPATIBLE 签名冲突。
+    // 3. 车机独立版默认使用独立的 app/keystore/breezemusic-car.jks (carSign) 签名，并配合独立包名后缀 .car，
+    //    与手机/平板三端完全共存零冲突；外部克隆无本地凭据时同样自动回退 debug 签名。
     signingConfigs {
         create("phoneSign") {
             val phoneStorePath = keystoreProps.getProperty("phone.storeFile")
@@ -79,11 +81,34 @@ android {
                 keyPassword = resolvedKeyPassword
             }
         }
+        create("carSign") {
+            val carStorePath = keystoreProps.getProperty("car.storeFile")
+                ?: System.getenv("CAR_KEYSTORE_PATH")
+                ?: "keystore/breezemusic-car.jks"
+            val resolvedCarStore = file(carStorePath)
+            val resolvedStorePassword = (keystoreProps.getProperty("car.storePassword")
+                ?: System.getenv("CAR_KEYSTORE_PASSWORD"))?.takeIf { it.isNotBlank() }
+            val resolvedKeyAlias = (keystoreProps.getProperty("car.keyAlias")
+                ?: System.getenv("CAR_KEY_ALIAS"))?.takeIf { it.isNotBlank() }
+            val resolvedKeyPassword = (keystoreProps.getProperty("car.keyPassword")
+                ?: System.getenv("CAR_KEY_PASSWORD"))?.takeIf { it.isNotBlank() }
+            if (resolvedCarStore.exists() &&
+                resolvedStorePassword != null &&
+                resolvedKeyAlias != null &&
+                resolvedKeyPassword != null
+            ) {
+                storeFile = resolvedCarStore
+                storePassword = resolvedStorePassword
+                keyAlias = resolvedKeyAlias
+                keyPassword = resolvedKeyPassword
+            }
+        }
     }
 
-    // 双端平台构建变体（Product Flavors）：
+    // 三端平台构建变体（Product Flavors）：
     // - phone：面向安卓手机构建（applicationId = com.concept.music），未配置外部正式证书凭据时仅在本地开发回退 debug 签名
     // - tablet：面向安卓平板与大屏设备构建（applicationId = com.concept.music.tablet），绑定 tabletSign 独立签名证书
+    // - car：面向安卓智能车机独立构建（applicationId = com.concept.music.car），绑定 carSign 独立签名证书与流光玻璃座舱 UI
     flavorDimensions += "device"
     productFlavors {
         create("phone") {
@@ -102,6 +127,7 @@ android {
             }
             buildConfigField("String", "DEVICE_FLAVOR", "\"phone\"")
             buildConfigField("boolean", "IS_TABLET_FLAVOR", "false")
+            buildConfigField("boolean", "IS_CAR_FLAVOR", "false")
         }
         create("tablet") {
             dimension = "device"
@@ -118,18 +144,36 @@ android {
             }
             buildConfigField("String", "DEVICE_FLAVOR", "\"tablet\"")
             buildConfigField("boolean", "IS_TABLET_FLAVOR", "true")
+            buildConfigField("boolean", "IS_CAR_FLAVOR", "false")
+        }
+        create("car") {
+            dimension = "device"
+            applicationIdSuffix = ".car"
+            versionNameSuffix = "-car"
+            val carSignCfg = signingConfigs.getByName("carSign")
+            val isCarSignReady = carSignCfg.storeFile?.exists() == true &&
+                !carSignCfg.storePassword.isNullOrBlank() &&
+                !carSignCfg.keyPassword.isNullOrBlank()
+            signingConfig = if (isCarSignReady) {
+                carSignCfg
+            } else {
+                signingConfigs.getByName("debug")
+            }
+            buildConfigField("String", "DEVICE_FLAVOR", "\"car\"")
+            buildConfigField("boolean", "IS_TABLET_FLAVOR", "false")
+            buildConfigField("boolean", "IS_CAR_FLAVOR", "true")
         }
     }
 
     buildTypes {
         debug {
-            // 置空 buildType 级默认签名，使 phoneDebug 与 tabletDebug 各自继承所属 Flavor 的签名
+            // 置空 buildType 级默认签名，使 phoneDebug / tabletDebug / carDebug 各自继承所属 Flavor 的签名
             signingConfig = null
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            // 置空 buildType 级默认签名，使 phoneRelease 与 tabletRelease 各自使用所属 Flavor 的签名
+            // 置空 buildType 级默认签名，使 phoneRelease / tabletRelease / carRelease 各自使用所属 Flavor 的签名
             signingConfig = null
             val requestedTasks = gradle.startParameter.taskNames.joinToString(" ")
             val isRunningReleaseTask = Regex("(?:assemble|bundle|package).*Release", RegexOption.IGNORE_CASE)
@@ -137,7 +181,8 @@ android {
             if (isRunningReleaseTask) {
                 val phoneReady = !signingConfigs.getByName("phoneSign").storePassword.isNullOrBlank()
                 val tabletReady = !signingConfigs.getByName("tabletSign").storePassword.isNullOrBlank()
-                if (!phoneReady || !tabletReady) {
+                val carReady = !signingConfigs.getByName("carSign").storePassword.isNullOrBlank()
+                if (!phoneReady || !tabletReady || !carReady) {
                     val msg = "Release signing credentials missing in keystore.properties / environment; falling back to debug keystore for local verification only."
                     if (System.getenv("REQUIRE_RELEASE_SIGNING")?.equals("true", ignoreCase = true) == true) {
                         throw GradleException("REQUIRE_RELEASE_SIGNING=true: $msg")

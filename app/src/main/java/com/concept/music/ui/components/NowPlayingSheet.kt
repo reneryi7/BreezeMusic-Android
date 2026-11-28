@@ -1352,7 +1352,7 @@ fun NowPlayingSheet(
 }
 
 @Composable
-private fun NowPlayingSelectableBackground(
+internal fun NowPlayingSelectableBackground(
     coverUrl: String,
     backgroundStyle: PlayerBackgroundStyle,
     isPlaying: Boolean,
@@ -1363,13 +1363,16 @@ private fun NowPlayingSelectableBackground(
     meshColorTertiary: Color = Color(0xFF191B38),
     accentPrimary: Color,
     accentSecondary: Color,
-    accentTertiary: Color = ConceptVioletAccent
+    accentTertiary: Color = ConceptVioletAccent,
+    maxFps: Int = 0,
+    enableAnimatedEffect: Boolean = true
 ) {
     val context = LocalContext.current
+    val isLifecycleStarted = rememberIsLifecycleStarted()
 
     // 播放 <-> 暂停连续动量因子：暂停时从 1f 丝滑减速至 0f (880ms)，恢复播放时从 0f 原位柔和加速至 1f，彻底消除暂停/播放切换时的位置跳变
     val playMomentum by animateFloatAsState(
-        targetValue = if (isPlaying) 1f else 0f,
+        targetValue = if (isPlaying && isLifecycleStarted && enableAnimatedEffect) 1f else 0f,
         animationSpec = tween(durationMillis = 880, easing = FastOutSlowInEasing),
         label = "bgPlayMomentum"
     )
@@ -1378,25 +1381,47 @@ private fun NowPlayingSelectableBackground(
     var secPhase by remember { mutableFloatStateOf(1.45f) }
     var pulsePhase by remember { mutableFloatStateOf(0f) }
 
-    // 律动光晕模式专用的 60fps 实时音频能量追踪状态（读取 ConceptMasteringAudioProcessor 实时计算的歌曲低/中/高频与节拍脉冲）
+    // 律动光晕模式专用的实时音频能量追踪状态（读取 ConceptMasteringAudioProcessor 实时计算的歌曲低/中/高频与节拍脉冲）
     var liveBassEnergy by remember { mutableFloatStateOf(0.08f) }
     var liveMidEnergy by remember { mutableFloatStateOf(0.06f) }
     var liveHighEnergy by remember { mutableFloatStateOf(0.05f) }
     var liveBeatImpulse by remember { mutableFloatStateOf(0f) }
 
-    val isAnimatedBackground = backgroundStyle == PlayerBackgroundStyle.FLUID_AURORA ||
-        backgroundStyle == PlayerBackgroundStyle.RHYTHM_HALO ||
-        backgroundStyle == PlayerBackgroundStyle.STARLIGHT_NEBULA
+    val isAnimatedBackground = enableAnimatedEffect && (
+        backgroundStyle == PlayerBackgroundStyle.FLUID_AURORA ||
+            backgroundStyle == PlayerBackgroundStyle.RHYTHM_HALO ||
+            backgroundStyle == PlayerBackgroundStyle.STARLIGHT_NEBULA
+        )
 
-    LaunchedEffect(backgroundStyle, isPlaying, playMomentum > 0.002f) {
-        if (isAnimatedBackground && (isPlaying || playMomentum > 0.002f || liveBassEnergy > 0.09f || liveBeatImpulse > 0.005f)) {
+    // 车机独立包按需开关 DSP 频谱遥测：仅在前台可见且处于「律动光晕」动态模式时采样三频 RMS，切后台或换背景直接零算力旁路
+    DisposableEffect(isLifecycleStarted, backgroundStyle, enableAnimatedEffect) {
+        if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+            com.concept.music.service.AudioRhythmTelemetry.telemetrySamplingEnabled =
+                isLifecycleStarted && enableAnimatedEffect && backgroundStyle == PlayerBackgroundStyle.RHYTHM_HALO
+        }
+        onDispose {
+            if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                com.concept.music.service.AudioRhythmTelemetry.telemetrySamplingEnabled = false
+            }
+        }
+    }
+
+    LaunchedEffect(backgroundStyle, isPlaying, playMomentum > 0.002f, isLifecycleStarted, enableAnimatedEffect, maxFps) {
+        if (isLifecycleStarted && isAnimatedBackground && (isPlaying || playMomentum > 0.002f || liveBassEnergy > 0.09f || liveBeatImpulse > 0.005f)) {
             var waveClock = 0f
             var lastNanos = 0L
+            var lastEmittedNanos = 0L
+            val minFrameIntervalNanos = if (maxFps > 0) (1_000_000_000L / maxFps.coerceIn(10, 120)) else 0L
             val twoPi = (2.0 * PI).toFloat()
             while (isActive) {
                 var keepRunning = false
                 withFrameNanos { nanos ->
-                    val dt = if (lastNanos == 0L) 0.016f else ((nanos - lastNanos) / 1_000_000_000f).coerceIn(0.004f, 0.05f)
+                    if (minFrameIntervalNanos > 0L && lastEmittedNanos > 0L && (nanos - lastEmittedNanos) < minFrameIntervalNanos) {
+                        keepRunning = true
+                        return@withFrameNanos
+                    }
+                    lastEmittedNanos = nanos
+                    val dt = if (lastNanos == 0L) 0.016f else ((nanos - lastNanos) / 1_000_000_000f).coerceIn(0.004f, 0.12f)
                     lastNanos = nanos
                     val m = playMomentum.coerceIn(0f, 1f)
 

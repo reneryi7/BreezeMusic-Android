@@ -240,8 +240,13 @@ object ThemeManager {
         val appCtx = context.applicationContext ?: context
         val p = appCtx.getSharedPreferences("concept_theme_prefs", Context.MODE_PRIVATE)
         prefs = p
-        val savedMode = p.getString("theme_mode", AppThemeMode.DARK_ABYSS_BLUE.name) ?: AppThemeMode.DARK_ABYSS_BLUE.name
-        val resolvedMode = runCatching { AppThemeMode.valueOf(savedMode) }.getOrDefault(AppThemeMode.DARK_ABYSS_BLUE)
+        val defaultMode = if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+            AppThemeMode.SYSTEM
+        } else {
+            AppThemeMode.DARK_ABYSS_BLUE
+        }
+        val savedMode = p.getString("theme_mode", defaultMode.name) ?: defaultMode.name
+        val resolvedMode = runCatching { AppThemeMode.valueOf(savedMode) }.getOrDefault(defaultMode)
         _themeMode.value = resolvedMode
         _dynamicColor.value = p.getBoolean("dynamic_color", false)
         syncSystemSplashAndNightMode(context, resolvedMode, forcePersist = false)

@@ -483,6 +483,8 @@ class PlaybackService : MediaLibraryService() {
     private var hasActiveDuckFocus: Boolean = false
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var bgAutoAdvanceRunnable: Runnable? = null
+    private var carNetworkRetryRunnable: Runnable? = null
+    private var carNetworkRetryCount: Int = 0
     private var initialDeviceEnumerationDone: Boolean = false
     private val connectedWiredIds = mutableSetOf<Int>()
     private val connectedBluetoothIds = mutableSetOf<Int>()
@@ -703,6 +705,7 @@ class PlaybackService : MediaLibraryService() {
 
         const val ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC = "com.concept.music.action.TOGGLE_DESKTOP_LYRIC"
         const val ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC_LOCK = "com.concept.music.action.TOGGLE_DESKTOP_LYRIC_LOCK"
+        const val ACTION_CAR_BOOT_AUTO_RESUME = "com.concept.music.action.CAR_BOOT_AUTO_RESUME"
 
         val SESSION_COMMAND_TOGGLE_DESKTOP_LYRIC: SessionCommand
             get() = SessionCommand(ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC, Bundle())
@@ -711,13 +714,16 @@ class PlaybackService : MediaLibraryService() {
 
         /**
          * 构建适配 Android 13~16 系统媒体通知栏与 OPPO ColorOS 流体云（Fluid Cloud）/ 灵动岛的自定义控制按钮布局：
-         * - 按钮 1（左侧扩展槽位）：桌面歌词开关（词），支持 App 置于后台时快捷开启/关闭桌面歌词；
-         * - 按钮 2（右侧扩展槽位）：桌面歌词锁定/解锁（锁），支持通过流体云或通知栏一键解锁/锁定桌面歌词，从而省去屏幕上的悬浮小锁图标。
+         * - 车机独立包（IS_CAR_FLAVOR）已剥离跨应用悬浮窗桌面歌词，返回空列表以保持车机系统媒体通知干净纯粹；
+         * - 手机/平板保留桌面歌词开关与锁定双按钮。
          */
         fun buildNotificationCustomLayout(
             lyricEnabled: Boolean = SystemLyricBridge.state.value.floatingCapsuleEnabled,
             lyricLocked: Boolean = SystemLyricBridge.state.value.floatingCapsuleLocked
         ): List<CommandButton> {
+            if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                return emptyList()
+            }
             if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.NOTIFICATION_MEDIA)) {
                 return emptyList()
             }
@@ -1207,12 +1213,19 @@ class PlaybackService : MediaLibraryService() {
         activeServiceInstance = this
         fallbackAppContext = applicationContext
         com.concept.music.data.vip.VipManager.initialize(applicationContext)
+        val isStandaloneCar = com.concept.music.BuildConfig.IS_CAR_FLAVOR
+        if (isStandaloneCar) {
+            // 车机冷启动后台服务场景（语音点歌/点火续播）先于 Activity 启动时，确保 64-bit 声学与导航闪避立刻就绪
+            runCatching { CarSessionManager.init(applicationContext) }
+        }
 
         val prefs = applicationContext.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
         val pauseOnHeadsetDisconnect = prefs.getBoolean("pause_on_headset_disconnect", true)
         val allowPlayWithOtherApps = prefs.getBoolean("allow_play_with_other_apps", false)
         val savedFocusModeName = prefs.getString("audio_focus_mode", null)
-        val initialFocusMode = if (savedFocusModeName != null) {
+        val initialFocusMode = if (isStandaloneCar && CarSessionManager.state.value.smartNavDuckingEnabled) {
+            AudioFocusMode.DUCK
+        } else if (savedFocusModeName != null) {
             runCatching { AudioFocusMode.valueOf(savedFocusModeName) }.getOrDefault(
                 if (allowPlayWithOtherApps) AudioFocusMode.MIX else AudioFocusMode.EXCLUSIVE
             )
@@ -1268,10 +1281,10 @@ class PlaybackService : MediaLibraryService() {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 30_000,
-                /* maxBufferMs = */ 120_000,
-                /* bufferForPlaybackMs = */ 280,
-                /* bufferForPlaybackAfterRebufferMs = */ 800
+                /* minBufferMs = */ if (isStandaloneCar) 45_000 else 30_000,
+                /* maxBufferMs = */ if (isStandaloneCar) 180_000 else 120_000,
+                /* bufferForPlaybackMs = */ if (isStandaloneCar) 400 else 280,
+                /* bufferForPlaybackAfterRebufferMs = */ if (isStandaloneCar) 1_200 else 800
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -1283,25 +1296,37 @@ class PlaybackService : MediaLibraryService() {
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, initialFocusMode == AudioFocusMode.EXCLUSIVE)
             .setHandleAudioBecomingNoisy(
-                pauseOnHeadsetDisconnect && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
+                !isStandaloneCar && pauseOnHeadsetDisconnect && AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
             )
             .setLoadControl(loadControl)
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
+            .apply {
+                if (isStandaloneCar) {
+                    setWakeMode(C.WAKE_MODE_NETWORK)
+                }
+            }
             .build()
         player = exoPlayer
 
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 isAppPlaybackActive = isPlaying
+                if (isPlaying) {
+                    carNetworkRetryCount = 0
+                    carNetworkRetryRunnable?.let { mainHandler?.removeCallbacks(it) }
+                    carNetworkRetryRunnable = null
+                }
                 val currentItem = exoPlayer.currentMediaItem
                 val playerDur = exoPlayer.duration.takeIf { it > 0L } ?: 0L
-                ListenStatsCoordinator.onPlayingStateChanged(
-                    isPlaying = isPlaying,
-                    mediaId = currentItem?.mediaId,
-                    songFallback = buildFallbackSongFromMediaItem(currentItem, playerDur),
-                    durationMs = playerDur,
-                    speed = exoPlayer.playbackParameters.speed
-                )
+                if (!com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                    ListenStatsCoordinator.onPlayingStateChanged(
+                        isPlaying = isPlaying,
+                        mediaId = currentItem?.mediaId,
+                        songFallback = buildFallbackSongFromMediaItem(currentItem, playerDur),
+                        durationMs = playerDur,
+                        speed = exoPlayer.playbackParameters.speed
+                    )
+                }
                 if (isPlaying) {
                     if (currentAudioFocusMode == AudioFocusMode.DUCK) {
                         // 仅当当前未持有 DUCK 焦点时才申请，避免缓冲/切歌瞬间强抢导航语音焦点
@@ -1312,8 +1337,10 @@ class PlaybackService : MediaLibraryService() {
                     } else {
                         audioFocusDuckGain = 1.0f
                     }
-                    startBackgroundDesktopLyricProgressTicker()
-                    scheduleListenStatsTick()
+                    if (!com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                        startBackgroundDesktopLyricProgressTicker()
+                        scheduleListenStatsTick()
+                    }
                 } else {
                     // 仅在真正暂停/停止（!playWhenReady）时弃焦；缓冲与切歌过渡期间保持现有焦点与闪避状态
                     if (currentAudioFocusMode == AudioFocusMode.DUCK && !exoPlayer.playWhenReady) {
@@ -1321,10 +1348,37 @@ class PlaybackService : MediaLibraryService() {
                     }
                     stopBackgroundDesktopLyricProgressTicker()
                     stopListenStatsTick()
-                    SystemLyricBridge.syncProgressFromService(exoPlayer.currentPosition, false)
+                    if (!com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                        SystemLyricBridge.syncProgressFromService(exoPlayer.currentPosition, false)
+                    }
                 }
                 refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = false)
                 refreshMediaSessionCustomLayoutInternal()
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                if (!com.concept.music.BuildConfig.IS_CAR_FLAVOR) return
+                // 车机休眠唤醒或穿越隧道/地库后 4G 模块尚未就绪时执行指数退避静默重连（1s -> 2.5s -> 5s）
+                if (carNetworkRetryCount < 3 && exoPlayer.currentMediaItem != null) {
+                    val delayMs = when (carNetworkRetryCount) {
+                        0 -> 1_000L
+                        1 -> 2_500L
+                        else -> 5_000L
+                    }
+                    carNetworkRetryCount += 1
+                    carNetworkRetryRunnable?.let { mainHandler?.removeCallbacks(it) }
+                    val retryRunnable = Runnable {
+                        val activeP = player ?: return@Runnable
+                        if (activeP === exoPlayer && activeP.currentMediaItem != null) {
+                            runCatching {
+                                activeP.prepare()
+                                activeP.playWhenReady = true
+                            }
+                        }
+                    }
+                    carNetworkRetryRunnable = retryRunnable
+                    mainHandler?.postDelayed(retryRunnable, delayMs)
+                }
             }
 
             override fun onPositionDiscontinuity(
@@ -1689,6 +1743,114 @@ class PlaybackService : MediaLibraryService() {
                         }
                     }
                     future.set(out)
+                }
+                return future
+            }
+
+            override fun onSearch(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                query: String,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<Void>> {
+                if (!isVerifiedSystemOrSelfController(browser) && !isVerifiedCarHostController(browser)) {
+                    return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_PERMISSION_DENIED))
+                }
+                val future = SettableFuture.create<LibraryResult<Void>>()
+                libraryScope.launch {
+                    val items = runCatching {
+                        CarMediaLibraryHelper.searchVoiceTracks(applicationContext, query, params?.extras)
+                    }.getOrDefault(emptyList())
+                    runCatching {
+                        session.notifySearchResultChanged(browser, query, items.size, params)
+                    }
+                    future.set(LibraryResult.ofVoid(params))
+                }
+                return future
+            }
+
+            override fun onGetSearchResult(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                query: String,
+                page: Int,
+                pageSize: Int,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+                if (!isVerifiedSystemOrSelfController(browser) && !isVerifiedCarHostController(browser)) {
+                    return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_PERMISSION_DENIED))
+                }
+                val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
+                libraryScope.launch {
+                    val cached = CarMediaLibraryHelper.getCachedVoiceSearchResults(query)
+                    val allItems = if (cached.isNotEmpty()) {
+                        cached
+                    } else {
+                        runCatching {
+                            CarMediaLibraryHelper.searchVoiceTracks(applicationContext, query, params?.extras)
+                        }.getOrDefault(emptyList())
+                    }
+                    val paged = if (page >= 0 && pageSize > 0 && pageSize < Int.MAX_VALUE / 2) {
+                        val from = (page.toLong() * pageSize.toLong()).coerceAtMost(allItems.size.toLong()).toInt()
+                        val to = ((page.toLong() + 1L) * pageSize.toLong()).coerceAtMost(allItems.size.toLong()).toInt()
+                        if (from < to) allItems.subList(from, to) else emptyList()
+                    } else {
+                        allItems
+                    }
+                    future.set(LibraryResult.ofItemList(ImmutableList.copyOf(paged), params))
+                }
+                return future
+            }
+
+            @OptIn(UnstableApi::class)
+            override fun onPlaybackResumption(
+                mediaSession: MediaSession,
+                controller: MediaSession.ControllerInfo
+            ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                if (!isVerifiedSystemOrSelfController(controller) && !isVerifiedCarHostController(controller)) {
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(emptyList(), C.INDEX_UNSET, C.TIME_UNSET)
+                    )
+                }
+                val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+                libraryScope.launch {
+                    val resumed = runCatching {
+                        val appCtx = applicationContext
+                        val p = appCtx.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+                        val uid = runCatching { com.concept.music.data.vip.VipManager.accounts.state.value.currentId ?: "guest" }
+                            .getOrDefault("guest")
+                        val rawJson = p.getString("saved_queue_json_$uid", null)
+                            ?: p.getString("saved_queue_json", null)
+                        val queue = if (!rawJson.isNullOrBlank()) {
+                            runCatching {
+                                val type = object : com.google.gson.reflect.TypeToken<List<com.concept.music.data.model.Song>>() {}.type
+                                com.concept.music.data.kugou.KugouSigner.gson
+                                    .fromJson<List<com.concept.music.data.model.Song>>(rawJson, type)
+                                    ?.map { it.sanitizeFromJson() }
+                                    .orEmpty()
+                            }.getOrDefault(emptyList())
+                        } else emptyList()
+                        val idx = p.getInt("saved_current_index_$uid", p.getInt("saved_current_index", 0))
+                            .coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+                        val savedPos = p.getLong("saved_position_ms_$uid", p.getLong("saved_position_ms", 0L))
+                            .coerceAtLeast(0L)
+                        val targetSong = queue.getOrNull(idx)
+                        if (targetSong != null) {
+                            val resolved = CarMediaLibraryHelper.resolvePlayableItemForCarSelection(appCtx, targetSong)
+                            if (resolved != null) {
+                                PlaybackCoordinator.adoptCarSelectedSongInBackground(
+                                    context = appCtx,
+                                    resolvedSong = resolved.first,
+                                    queue = queue,
+                                    isPersonalFm = false
+                                )
+                                MediaSession.MediaItemsWithStartPosition(listOf(resolved.second), 0, savedPos)
+                            } else null
+                        } else null
+                    }.getOrNull()
+                    future.set(
+                        resumed ?: MediaSession.MediaItemsWithStartPosition(emptyList(), C.INDEX_UNSET, C.TIME_UNSET)
+                    )
                 }
                 return future
             }
@@ -2203,7 +2365,8 @@ class PlaybackService : MediaLibraryService() {
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_TOGGLE_FAVORITE,
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_CYCLE_PLAY_MODE,
                 ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC,
-                ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC_LOCK
+                ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC_LOCK,
+                ACTION_CAR_BOOT_AUTO_RESUME
             )
         ) {
             // PlaybackService 为 exported="true"，自定义内部控制 Action 必须校验本应用私有 IPC 能力令牌防外部应用伪造调用
@@ -2234,6 +2397,22 @@ class PlaybackService : MediaLibraryService() {
                     SystemLyricBridge.handleNotificationToggleLock(applicationContext)
                     refreshMediaSessionCustomLayoutInternal()
                 }
+                ACTION_CAR_BOOT_AUTO_RESUME -> {
+                    // 若由 Android 8~13 的 startForegroundService 拉起，立即更新媒体前台通知以满足 5 秒 FGS 契约，避免隧道/弱网启动触发 RemoteServiceException
+                    mediaSession?.let { activeSession ->
+                        runCatching { onUpdateNotification(activeSession, true) }
+                    }
+                    // 车机点火开机后预留 2.2s 等待车载功放与 4G 模块就绪再恢复续播；若无持久化队列则干净退场
+                    mainHandler?.postDelayed({
+                        val p = player ?: return@postDelayed
+                        if (!p.isPlaying) {
+                            val started = PlaybackCoordinator.handleResumeOnHeadsetConnected(applicationContext, p)
+                            if (!started && !p.isPlaying && !p.playWhenReady) {
+                                runCatching { stopSelf() }
+                            }
+                        }
+                    }, 2_200L)
+                }
             }
         }
         return res
@@ -2257,6 +2436,9 @@ class PlaybackService : MediaLibraryService() {
     override fun onDestroy() {
         bgAutoAdvanceRunnable?.let { mainHandler?.removeCallbacks(it) }
         bgAutoAdvanceRunnable = null
+        carNetworkRetryRunnable?.let { mainHandler?.removeCallbacks(it) }
+        carNetworkRetryRunnable = null
+        carNetworkRetryCount = 0
         stopCarAvrcpLyricTicker()
         stopBackgroundDesktopLyricProgressTicker()
         stopListenStatsTick()

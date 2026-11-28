@@ -102,6 +102,7 @@ class CarInterconnectTest {
         AudioEffectManager.resetForTest()
         CarSessionManager.resetForTest()
         CarSessionManager.isTabletFlavorOverrideForTest = false
+        CarSessionManager.isCarFlavorOverrideForTest = false
         PlaybackService.audioFocusDuckGain = 1.0f
         PlaybackService.updateAudioFocusMode(AudioFocusMode.EXCLUSIVE)
         PlaybackService.updateSteeringWheelZeroLatency(false)

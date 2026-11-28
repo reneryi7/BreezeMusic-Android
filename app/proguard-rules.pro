@@ -11,6 +11,7 @@
 -keep enum com.concept.music.service.CarCabinAcousticMode { *; }
 -keep enum com.concept.music.service.CarInterludeStyle { *; }
 -keep enum com.concept.music.service.CarConnectionSource { *; }
+-keep enum com.concept.music.ui.theme.CarPerformanceMode { *; }
 -keep class com.concept.music.data.kugou.SavedAccount { *; }
 -keep class com.concept.music.data.kugou.KugouSession { *; }
 -keep class com.concept.music.data.kugou.DeviceIdentity { *; }

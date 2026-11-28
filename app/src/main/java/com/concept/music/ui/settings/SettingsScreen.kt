@@ -350,6 +350,7 @@ internal fun resolveUpdateCheckFromApiOrRedirect(
                     .take(10)
 
                 val isTabletFlavor = runCatching { BuildConfig.IS_TABLET_FLAVOR }.getOrDefault(false)
+                val isCarFlavor = runCatching { BuildConfig.IS_CAR_FLAVOR }.getOrDefault(false)
                 val assets = json.getAsJsonArray("assets")
                 val apkAssets = assets?.asSequence()
                     ?.mapNotNull { el -> runCatching { el.asJsonObject }.getOrNull() }
@@ -363,16 +364,28 @@ internal fun resolveUpdateCheckFromApiOrRedirect(
                     ?.toList()
                     .orEmpty()
 
-                val preferredApkUrl = if (isTabletFlavor) {
-                    apkAssets.firstOrNull { (name, _) ->
-                        name.contains("tablet", ignoreCase = true) || name.contains("pad", ignoreCase = true)
-                    }?.second ?: apkAssets.firstOrNull()?.second
-                } else {
-                    apkAssets.firstOrNull { (name, _) ->
-                        name.contains("phone", ignoreCase = true)
-                    }?.second ?: apkAssets.firstOrNull { (name, _) ->
-                        !name.contains("tablet", ignoreCase = true) && !name.contains("pad", ignoreCase = true)
-                    }?.second ?: apkAssets.firstOrNull()?.second
+                val preferredApkUrl = when {
+                    isCarFlavor -> {
+                        apkAssets.firstOrNull { (name, _) ->
+                            name.contains("-car", ignoreCase = true) || name.contains("_car", ignoreCase = true) ||
+                                name.contains("car.", ignoreCase = true) || name.contains("auto", ignoreCase = true)
+                        }?.second ?: apkAssets.firstOrNull()?.second
+                    }
+                    isTabletFlavor -> {
+                        apkAssets.firstOrNull { (name, _) ->
+                            name.contains("tablet", ignoreCase = true) || name.contains("pad", ignoreCase = true)
+                        }?.second ?: apkAssets.firstOrNull()?.second
+                    }
+                    else -> {
+                        apkAssets.firstOrNull { (name, _) ->
+                            name.contains("phone", ignoreCase = true)
+                        }?.second ?: apkAssets.firstOrNull { (name, _) ->
+                            !name.contains("tablet", ignoreCase = true) &&
+                                !name.contains("pad", ignoreCase = true) &&
+                                !name.contains("-car", ignoreCase = true) &&
+                                !name.contains("_car", ignoreCase = true)
+                        }?.second ?: apkAssets.firstOrNull()?.second
+                    }
                 }
                 val apkDownloadUrl = preferredApkUrl ?: htmlUrl
 
@@ -540,7 +553,7 @@ internal fun evaluateUpdateProbeConsensus(outcomes: List<UpdateProbeOutcome>): U
  * - 采用 `supervisorScope` + `Channel` 并行发起探测，同时对所有响应流施加大小上限、DNS 重绑定拦截与官方 GitHub Release 路径钉扎；
  * - 仅将 GitHub 官方直连通道标记为权威源，第三方镜像代理需跨独立运营方双通道共识或权威源确认，防止单一恶意镜像投毒伪造更新。
  */
-private suspend fun checkGitHubLatestRelease(
+internal suspend fun checkGitHubLatestRelease(
     localVersionName: String = BuildConfig.VERSION_NAME
 ): UpdateCheckResult = withContext(Dispatchers.IO) {
     if (!AppPermissionManager.isPermissionEnabled(AppPermissionType.NETWORK_ACCESS)) {

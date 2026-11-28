@@ -381,12 +381,21 @@ object PlaybackCoordinator {
         }
         val savedSpeed = prefs.getFloat("playback_speed", 1.0f).coerceIn(0.5f, 2.0f)
         val savedPitch = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.5f, 2.0f)
+        // offsetDelta == 0（车机点火/耳机插拔后台恢复续播当前曲目）时保留熄火前的毫秒级断点进度，切歌时归零
+        val resumePositionMs = if (offsetDelta == 0) {
+            prefs.getLong("saved_position_ms_$userScopeKey", prefs.getLong("saved_position_ms", 0L))
+                .coerceAtLeast(0L)
+        } else {
+            0L
+        }
 
         persistAsync(prefs) {
             putInt("saved_current_index_$userScopeKey", targetIdx)
             putInt("saved_current_index", targetIdx)
-            putLong("saved_position_ms_$userScopeKey", 0L)
-            putLong("saved_position_ms", 0L)
+            if (offsetDelta != 0) {
+                putLong("saved_position_ms_$userScopeKey", 0L)
+                putLong("saved_position_ms", 0L)
+            }
         }
 
         bgResolveJob?.cancel()
@@ -426,7 +435,11 @@ object PlaybackCoordinator {
                     .build()
                 ListenStatsCoordinator.registerSongs(queue)
                 ListenStatsCoordinator.prepareMediaItemLoad(targetSong, preserveSession = false)
-                player.setMediaItem(item)
+                if (resumePositionMs > 0L) {
+                    player.setMediaItem(item, resumePositionMs)
+                } else {
+                    player.setMediaItem(item)
+                }
                 player.playbackParameters = androidx.media3.common.PlaybackParameters(savedSpeed, savedPitch)
                 player.repeatMode = if (playMode == PlayMode.REPEAT_ONE) {
                     Player.REPEAT_MODE_ONE
@@ -455,7 +468,7 @@ object PlaybackCoordinator {
                     isPlaying = true,
                     isFavorite = isLikedNow,
                     playMode = playMode,
-                    positionMs = 0L,
+                    positionMs = resumePositionMs,
                     durationMs = targetSong.durationMs,
                     clearLyrics = true
                 )

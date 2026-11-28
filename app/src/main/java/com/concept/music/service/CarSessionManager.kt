@@ -85,6 +85,7 @@ enum class CarCabinAcousticMode(
 
 enum class CarConnectionSource(val label: String) {
     NONE("未连接车机"),
+    STANDALONE_CAR_UNIT("智能座舱原生直连"),
     PROJECTION_HOST("车联投屏互联"),
     CONFIRMED_BLUETOOTH("车载蓝牙直连"),
     MANUAL_PREVIEW("手动车载预览")
@@ -216,6 +217,11 @@ object CarSessionManager {
     private const val KEY_PENDING_SNAPSHOT_JSON = "car_pending_everyday_snapshot_json"
 
     internal var isTabletFlavorOverrideForTest: Boolean? = null
+    internal var isCarFlavorOverrideForTest: Boolean? = null
+
+    fun isStandaloneCarFlavor(): Boolean {
+        return isCarFlavorOverrideForTest ?: BuildConfig.IS_CAR_FLAVOR
+    }
 
     fun isPhoneCarFeatureSupported(): Boolean {
         val isTablet = isTabletFlavorOverrideForTest ?: BuildConfig.IS_TABLET_FLAVOR
@@ -390,6 +396,14 @@ object CarSessionManager {
         if (prefs == null) {
             prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         }
+        if (isStandaloneCarFlavor()) {
+            if (!isInitialized) {
+                isInitialized = true
+                loadPersistedSettings()
+            }
+            activateStandaloneCarSessionInternal()
+            return
+        }
         if (isInitialized) {
             reevaluateActiveConnections(appCtx, newlyAddedBluetooth = false, isInitialBoot = false)
             return
@@ -404,6 +418,7 @@ object CarSessionManager {
         prefs = null
         isInitialized = false
         isTabletFlavorOverrideForTest = null
+        isCarFlavorOverrideForTest = null
         synchronized(activeProjectionCounts) {
             activeProjectionCounts.clear()
         }
@@ -434,15 +449,35 @@ object CarSessionManager {
         if (!isPhoneCarFeatureSupported()) {
             _state.value = _state.value.copy(featureEnabled = false, isCarModeActive = false)
             AudioEffectManager.clearCarCabinOverlay()
+        } else if (isStandaloneCarFlavor()) {
+            activateStandaloneCarSessionInternal()
         } else {
             // 冷启动自愈校验：若未连接任何车机但存在遗留快照，立即回滚日常音效与焦点
             restoreEverydaySnapshotIfPending()
         }
     }
 
+    private fun activateStandaloneCarSessionInternal() {
+        val wasActive = _state.value.isCarModeActive
+        _state.update {
+            it.copy(
+                featureEnabled = true,
+                isCarModeActive = true,
+                activeConnectionSource = CarConnectionSource.STANDALONE_CAR_UNIT,
+                activeCarDeviceName = "智能座舱原生直连",
+                pendingPromptCandidate = null
+            )
+        }
+        syncActiveCarParametersToAudioEngine()
+        if (!wasActive) {
+            onCarModeChangedCallback?.invoke(true)
+        }
+    }
+
     private fun loadPersistedSettings() {
         val p = prefs ?: return
-        val enabled = p.getBoolean(KEY_FEATURE_ENABLED, true)
+        val standaloneCar = isStandaloneCarFlavor()
+        val enabled = if (standaloneCar) true else p.getBoolean(KEY_FEATURE_ENABLED, true)
         val cabinMode = runCatching {
             CarCabinAcousticMode.valueOf(
                 p.getString(KEY_CABIN_MODE, CarCabinAcousticMode.DRIVER_SWEET_SPOT.name)
@@ -452,15 +487,17 @@ object CarSessionManager {
         val smartDuck = p.getBoolean(KEY_SMART_DUCK_ENABLED, true)
         val duckGain = p.getFloat(KEY_NAV_DUCK_GAIN, 0.28f).coerceIn(0.15f, 0.50f)
         val spectralDuck = p.getBoolean(KEY_SPECTRAL_DUCK_ENABLED, true)
-        val btLyric = p.getBoolean(KEY_BT_LYRIC_ENABLED, true)
+        // 车机独立包运行在本机，仪表盘/系统原生卡片歌词推送默认关闭（设置可选）；手机端蓝牙 AVRCP 歌词默认开启
+        val btLyric = p.getBoolean(KEY_BT_LYRIC_ENABLED, !standaloneCar)
         val interludeStyle = runCatching {
             CarInterludeStyle.valueOf(
                 p.getString(KEY_INTERLUDE_STYLE, CarInterludeStyle.BREATHING_NOTES.name)
                     ?: CarInterludeStyle.BREATHING_NOTES.name
             )
         }.getOrDefault(CarInterludeStyle.BREATHING_NOTES)
-        val lyricOffset = p.getLong(KEY_CAR_LYRIC_OFFSET_MS, -250L).coerceIn(-1500L, 1000L)
-        val autoPlayCar = p.getBoolean(KEY_AUTO_PLAY_CAR, false)
+        val defaultOffset = if (standaloneCar) 0L else -250L
+        val lyricOffset = p.getLong(KEY_CAR_LYRIC_OFFSET_MS, defaultOffset).coerceIn(-1500L, 1000L)
+        val autoPlayCar = p.getBoolean(KEY_AUTO_PLAY_CAR, standaloneCar)
         val zeroLatency = p.getBoolean(KEY_STEERING_ZERO_LATENCY, true)
 
         val knownJson = p.getString(KEY_KNOWN_DEVICES_JSON, null)
@@ -702,6 +739,10 @@ object CarSessionManager {
         newlyAddedBluetooth: Boolean,
         isInitialBoot: Boolean
     ) {
+        if (isStandaloneCarFlavor()) {
+            activateStandaloneCarSessionInternal()
+            return
+        }
         val cur = _state.value
         val wasActive = cur.isCarModeActive
 

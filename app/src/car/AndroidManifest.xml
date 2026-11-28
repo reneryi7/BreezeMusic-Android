@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 兼顾国产标准 Android 车机（DiLink / Flyme Auto / 理想 / 后装大屏）与 AAOS，绝不强制 required=true 阻断安装 -->
+    <uses-feature
+        android:name="android.hardware.type.automotive"
+        android:required="false" />
+
+    <!-- 车机独立包彻底剥离手机端跨应用悬浮窗与防遮挡叠加权限 -->
+    <uses-permission
+        android:name="android.permission.SYSTEM_ALERT_WINDOW"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.HIDE_OVERLAY_WINDOWS"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:node="remove" />
+
+    <application>
+        <activity
+            android:name=".MainActivity"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|uiMode"
+            tools:replace="android:configChanges">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.APP_MUSIC" />
+            </intent-filter>
+            <!-- 车机原生语音点歌标准入口（适配小迪 / 小爱 / 小艺 / 车机语音助理） -->
+            <intent-filter>
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- 受控车辆点火/开机自启续播接收器（仅在用户开启「点火自动续播」时唤醒播放服务） -->
+        <receiver
+            android:name=".service.CarBootAutoResumeReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 车机端仅保留专版 4×2 暗色流光玻璃桌面播控卡，移除其余 3 款手机/平板小组件避免车机桌面选取器冗杂 -->
+        <receiver
+            android:name=".widget.BreezeCompactWidgetProvider"
+            tools:node="remove" />
+        <receiver
+            android:name=".widget.BreezeSquareWidgetProvider"
+            tools:node="remove" />
+        <receiver
+            android:name=".widget.BreezeStageWidgetProvider"
+            tools:node="remove" />
+    </application>
+
+</manifest>

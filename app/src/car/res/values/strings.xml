@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">微风音乐车机</string>
+    <string name="widget_label_card_4x2">微风车机 · 4×2 流光玻璃播控卡</string>
+    <string name="widget_desc_card_4x2">专为智能座舱打造的暗色流光玻璃 4×2 桌面播控卡，高对比度大按钮盲操</string>
+    <string name="widget_idle_subtitle">微风音乐车机 · 上车即享无损好歌</string>
+    <string name="widget_idle_lyric">点击打开流光玻璃座舱</string>
+</resources>

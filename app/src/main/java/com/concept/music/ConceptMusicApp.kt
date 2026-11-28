@@ -1,24 +1,29 @@
 package com.concept.music
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.os.Build
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
+import coil.imageLoader
 import coil.memory.MemoryCache
 import com.concept.music.data.kugou.NetworkClientProvider
 import com.concept.music.data.vip.VipManager
 import com.concept.music.service.AmbientSoundManager
+import com.concept.music.service.CarSessionManager
 import com.concept.music.service.FocusPodManager
 import com.concept.music.service.MusicDownloadManager
 import com.concept.music.service.SystemLyricBridge
 import com.concept.music.service.VipGuardianManager
+import com.concept.music.ui.theme.CarPerformanceManager
 import com.concept.music.ui.theme.ThemeManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.Dispatcher
 import java.util.concurrent.TimeUnit
@@ -27,26 +32,62 @@ import javax.net.ssl.SSLException
 class ConceptMusicApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
+        if (BuildConfig.IS_CAR_FLAVOR) {
+            CarPerformanceManager.init(this)
+        }
         ThemeManager.init(this)
         com.concept.music.service.AppPermissionManager.init(this)
         VipManager.initialize(this)
         val appCtx = applicationContext
-        // 将音效、桌面歌词与下载等组件的磁盘配置读取全部下沉至后台 IO 线程池，缩短冷启动图标页停留时间
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO).launch {
+        // 将音效、桌面歌词与下载等组件的磁盘配置读取全部下沉至后台 IO 线程池，缩短冷启动图标页停留时间；
+        // 车机独立包（IS_CAR_FLAVOR）彻底跳过悬浮歌词/下载/白噪音/专注舱初始化，并将 VIP 守护延后 8 秒错峰执行，优先保障点火即播。
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { com.concept.music.service.AudioEffectManager.init(appCtx) }
-            runCatching { SystemLyricBridge.init(appCtx) }
-            runCatching { MusicDownloadManager.init(appCtx) }
-            runCatching { AmbientSoundManager.init(appCtx) }
-            runCatching { FocusPodManager.init(appCtx) }
-            runCatching { VipGuardianManager.init(appCtx) }
             runCatching { com.concept.music.widget.BreezeWidgetPrefs.init(appCtx) }
+            if (BuildConfig.IS_CAR_FLAVOR) {
+                runCatching { CarSessionManager.init(appCtx) }
+                delay(8_000L)
+                runCatching { VipGuardianManager.init(appCtx) }
+            } else {
+                runCatching { SystemLyricBridge.init(appCtx) }
+                runCatching { MusicDownloadManager.init(appCtx) }
+                runCatching { AmbientSoundManager.init(appCtx) }
+                runCatching { FocusPodManager.init(appCtx) }
+                runCatching { VipGuardianManager.init(appCtx) }
+            }
         }
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (BuildConfig.IS_CAR_FLAVOR) {
+            runCatching { CarPerformanceManager.refreshHardwareAndThermal(this) }
+        }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            runCatching { com.concept.music.ui.components.coverPaletteMemoryCache.clear() }
+        }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == ComponentCallbacks2.TRIM_MEMORY_COMPLETE ||
+            level == ComponentCallbacks2.TRIM_MEMORY_MODERATE
+        ) {
+            runCatching { imageLoader.memoryCache?.clear() }
+            runCatching { VipManager.music.clearRuntimeMetadataCache() }
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        runCatching { com.concept.music.ui.components.coverPaletteMemoryCache.clear() }
+        runCatching { imageLoader.memoryCache?.clear() }
+        runCatching { VipManager.music.clearRuntimeMetadataCache() }
+    }
+
     override fun newImageLoader(): ImageLoader {
+        val isCar = BuildConfig.IS_CAR_FLAVOR
+        val carCaps = if (isCar) CarPerformanceManager.capabilities.value else null
         val imageDispatcher = Dispatcher().apply {
-            maxRequests = 32
-            maxRequestsPerHost = 10
+            maxRequests = if (isCar) 12 else 32
+            maxRequestsPerHost = if (isCar) 4 else 10
         }
 
         // 复用全局共享连接池，减少 TLS 握手与 Socket 创建开销；
@@ -119,10 +160,13 @@ class ConceptMusicApp : Application(), ImageLoaderFactory {
             .allowHardware(false)
             .bitmapConfig(android.graphics.Bitmap.Config.ARGB_8888)
             .components {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    add(ImageDecoderDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
+                // 车机独立包无评论区表情包，跳过 GIF 动图解码器降低内存与初始化开销
+                if (!isCar) {
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
                 }
                 add(coil.intercept.Interceptor { chain ->
                     val result = chain.proceed(chain.request)
@@ -137,16 +181,22 @@ class ConceptMusicApp : Application(), ImageLoaderFactory {
             }
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.25)
+                    .maxSizePercent(carCaps?.coilMemoryCachePercent ?: 0.25)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizePercent(0.05)
+                    .apply {
+                        if (isCar) {
+                            maxSizeBytes(40L * 1024L * 1024L)
+                        } else {
+                            maxSizePercent(0.05)
+                        }
+                    }
                     .build()
             }
-            .crossfade(true)
+            .crossfade(if (isCar) 140 else 220)
             .respectCacheHeaders(false)
             .build()
     }

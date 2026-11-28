@@ -183,13 +183,17 @@ object AudioCacheManager {
     private val _detailedStats = MutableStateFlow(DetailedCacheStats())
     val detailedStats = _detailedStats.asStateFlow()
 
-    private val _cacheLimit = MutableStateFlow(AudioCacheLimit.GB_1)
+    private val defaultCacheLimit: AudioCacheLimit
+        get() = if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) AudioCacheLimit.GB_2 else AudioCacheLimit.GB_1
+
+    private val _cacheLimit = MutableStateFlow(defaultCacheLimit)
     val cacheLimit = _cacheLimit.asStateFlow()
 
     fun loadSavedCacheLimit(context: Context): AudioCacheLimit {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_AUDIO_CACHE_LIMIT, AudioCacheLimit.GB_1.name) ?: AudioCacheLimit.GB_1.name
-        val resolved = runCatching { AudioCacheLimit.valueOf(raw) }.getOrDefault(AudioCacheLimit.GB_1)
+        val fallback = defaultCacheLimit
+        val raw = prefs.getString(KEY_AUDIO_CACHE_LIMIT, fallback.name) ?: fallback.name
+        val resolved = runCatching { AudioCacheLimit.valueOf(raw) }.getOrDefault(fallback)
         _cacheLimit.value = resolved
         return resolved
     }
@@ -477,6 +481,52 @@ object AudioCacheManager {
                 remoteSource = remoteCacheFactory.createDataSource()
             )
         }
+    }
+
+    /**
+     * 车机地库/隧道弱网防断流预缓存：
+     * 在当前曲目播放稳定后，低优先级将下一首在线音频的前段或整曲静默拉入 Media3 `SimpleCache`，
+     * 若目标缓存键已达到目标字节数则 O(1) 跳过，绝不重复消耗流量。
+     */
+    suspend fun precacheAudioStream(
+        context: Context,
+        url: String,
+        cacheKey: String,
+        maxBytes: Long = 3L * 1024L * 1024L
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (url.isBlank() || cacheKey.isBlank()) return@withContext false
+        if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
+            return@withContext false
+        }
+        val appCtx = context.applicationContext
+        runCatching {
+            val cache = getCache(appCtx)
+            val alreadyCachedBytes = cache.getCachedBytes(cacheKey, 0L, maxBytes)
+            if (alreadyCachedBytes >= (maxBytes * 0.85).toLong()) {
+                return@runCatching true
+            }
+            val ds = getDataSourceFactory(appCtx).createDataSource()
+            val spec = DataSpec.Builder()
+                .setUri(android.net.Uri.parse(url))
+                .setKey(cacheKey)
+                .setPosition(0L)
+                .setLength(maxBytes)
+                .build()
+            try {
+                ds.open(spec)
+                val buf = ByteArray(16 * 1024)
+                var totalRead = 0L
+                while (totalRead < maxBytes) {
+                    val toRead = minOf(buf.size.toLong(), maxBytes - totalRead).toInt()
+                    val n = ds.read(buf, 0, toRead)
+                    if (n == androidx.media3.common.C.RESULT_END_OF_INPUT || n <= 0) break
+                    totalRead += n
+                }
+                totalRead > 0L
+            } finally {
+                runCatching { ds.close() }
+            }
+        }.getOrDefault(false)
     }
 
     private fun computeDetailedStats(appCtx: Context): DetailedCacheStats {

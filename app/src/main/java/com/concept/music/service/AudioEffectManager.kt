@@ -134,6 +134,12 @@ data class CustomPeqSlot(
  * 供播放页「律动光晕 (RHYTHM_HALO)」背景与「参量均衡器」频谱分析仪实现跟不同歌曲同频共振的真实律动。
  */
 object AudioRhythmTelemetry {
+    /**
+     * 车机独立包按需遥测门控：仅在前台可见且使用「律动光晕」背景时采样三频 RMS，
+     * 切后台导航/熄屏或切换其他背景时直接跳过 PCM 能量计算以节省音频渲染线程 CPU。
+     */
+    @Volatile var telemetrySamplingEnabled: Boolean = !com.concept.music.BuildConfig.IS_CAR_FLAVOR
+
     @Volatile var bassEnergy: Float = 0f
     @Volatile var midEnergy: Float = 0f
     @Volatile var highEnergy: Float = 0f

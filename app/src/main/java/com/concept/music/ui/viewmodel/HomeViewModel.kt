@@ -397,24 +397,27 @@ class HomeViewModel : ViewModel() {
                         VipManager.discoverCache.savePersonalFm(currentUserId, fm)
                     }
                 }
-                val newSongJob = launch {
-                    if (isBackgroundRevalidate) delay(60L)
-                    val period = _selectedNewSongPeriod.value
-                    if (_currentNewSongs.value.isEmpty()) {
-                        _newSongsLoading.value = true
-                    }
-                    val list = runCatching { VipManager.music.newSongExpress(periodKey = period) }.getOrDefault(emptyList())
-                    if (accountState.value.currentId == currentUserId && list.isNotEmpty()) {
-                        newSongCache[period] = list
-                        if (_currentNewSongs.value != list) {
-                            _currentNewSongs.value = list
+                val isCarFlavor = com.concept.music.BuildConfig.IS_CAR_FLAVOR
+                val newSongJob = if (!isCarFlavor) {
+                    launch {
+                        if (isBackgroundRevalidate) delay(60L)
+                        val period = _selectedNewSongPeriod.value
+                        if (_currentNewSongs.value.isEmpty()) {
+                            _newSongsLoading.value = true
                         }
-                        VipManager.discoverCache.saveNewSongs(period, list)
+                        val list = runCatching { VipManager.music.newSongExpress(periodKey = period) }.getOrDefault(emptyList())
+                        if (accountState.value.currentId == currentUserId && list.isNotEmpty()) {
+                            newSongCache[period] = list
+                            if (_currentNewSongs.value != list) {
+                                _currentNewSongs.value = list
+                            }
+                            VipManager.discoverCache.saveNewSongs(period, list)
+                        }
+                        _newSongsLoading.value = false
                     }
-                    _newSongsLoading.value = false
-                }
+                } else null
                 val radioJob = launch {
-                    if (isBackgroundRevalidate) delay(90L)
+                    if (isCarFlavor) delay(1_200L) else if (isBackgroundRevalidate) delay(90L)
                     val radios = runCatching { VipManager.music.fmChannels() }.getOrDefault(emptyList())
                     if (accountState.value.currentId == currentUserId && radios.isNotEmpty()) {
                         if (_fmChannels.value.map { it.id } != radios.map { it.id }) {
@@ -424,7 +427,7 @@ class HomeViewModel : ViewModel() {
                     }
                 }
                 val rankJob = launch {
-                    if (isBackgroundRevalidate) delay(120L)
+                    if (isCarFlavor) delay(1_600L) else if (isBackgroundRevalidate) delay(120L)
                     val rankList = runCatching { VipManager.music.rankList() }.getOrDefault(emptyList())
                     if (accountState.value.currentId == currentUserId && rankList.isNotEmpty()) {
                         if (_ranks.value.map { it.rankId } != rankList.map { it.rankId }) {
@@ -433,15 +436,17 @@ class HomeViewModel : ViewModel() {
                         VipManager.discoverCache.saveRanks(rankList)
                     }
                 }
-                if (accountState.value.auth == AuthState.READY && _dailyHistoryEntries.value.isEmpty()) {
+                if (!isCarFlavor && accountState.value.auth == AuthState.READY && _dailyHistoryEntries.value.isEmpty()) {
                     loadDailyHistoryList(force = false)
                 }
                 dailyJob.join()
                 fmJob.join()
-                newSongJob.join()
+                newSongJob?.join()
                 radioJob.join()
                 rankJob.join()
-                scheduleStaggeredSilentPreload(currentUserId)
+                if (!isCarFlavor) {
+                    scheduleStaggeredSilentPreload(currentUserId)
+                }
             } catch (e: Exception) {
                 if (accountState.value.currentId == currentUserId && !hasAnyContentLoaded()) {
                     _error.value = e.message ?: "发现页内容加载失败"

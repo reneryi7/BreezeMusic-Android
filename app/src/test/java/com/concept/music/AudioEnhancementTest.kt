@@ -456,6 +456,8 @@ class AudioEnhancementTest {
 
     @Test
     fun testConceptMasteringAudioProcessorLittleEndianAndBitPerfectBypass() {
+        com.concept.music.service.AudioEffectManager.resetForTest()
+        com.concept.music.service.PlaybackService.audioFocusDuckGain = 1.0f
         val processor = com.concept.music.service.ConceptMasteringAudioProcessor()
         val format = androidx.media3.common.audio.AudioProcessor.AudioFormat(44100, 2, androidx.media3.common.C.ENCODING_PCM_16BIT)
         val outFormat = processor.configure(format)
@@ -604,6 +606,8 @@ class AudioEnhancementTest {
     @Test
     fun testAudiophilePeqAndExpandedAcousticFieldTuningAndRhythmTelemetry() {
         val manager = com.concept.music.service.AudioEffectManager
+        val prevTelemetryEnabled = com.concept.music.service.AudioRhythmTelemetry.telemetrySamplingEnabled
+        com.concept.music.service.AudioRhythmTelemetry.telemetrySamplingEnabled = true
         try {
             manager.resetCurrentPresetToDefault()
             // 1. 验证发烧级目标曲线一键加载（哈曼曲线）
@@ -684,6 +688,7 @@ class AudioEnhancementTest {
             assertTrue("重低音 80% 时应自动启用负向防削波余量补偿", com.concept.music.service.AudioRhythmTelemetry.headroomGainDb < -0.5f)
             assertTrue("实时音频律动遥测应捕获低频能量", com.concept.music.service.AudioRhythmTelemetry.bassEnergy > 0.02f)
         } finally {
+            com.concept.music.service.AudioRhythmTelemetry.telemetrySamplingEnabled = prevTelemetryEnabled
             manager.resetCurrentPresetToDefault()
             manager.setEnabled(false)
         }

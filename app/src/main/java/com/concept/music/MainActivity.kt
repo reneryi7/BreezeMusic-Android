@@ -115,6 +115,15 @@ class MainActivity : ComponentActivity() {
     companion object {
         internal val incomingSharedTextFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
         internal val openNowPlayingRequestFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        internal val incomingVoiceSearchFlow = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, Bundle?>?>(null)
+    }
+
+    private fun handleIncomingVoiceSearchIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        if (intent.action != android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH) return
+        val rawQuery = intent.getStringExtra(android.app.SearchManager.QUERY).orEmpty().trim()
+        val extrasCopy = intent.extras?.let { Bundle(it) }
+        incomingVoiceSearchFlow.value = rawQuery to extrasCopy
     }
 
     private fun handleIncomingWidgetIntent(intent: android.content.Intent?) {
@@ -152,11 +161,14 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingWidgetIntent(intent)
-        handleIncomingShareIntent(intent)
+        handleIncomingVoiceSearchIntent(intent)
+        if (!BuildConfig.IS_CAR_FLAVOR) {
+            handleIncomingShareIntent(intent)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 读取 App 内部独立主题设置（完全独立于手机系统深浅模式）
+        // 读取 App 内部独立主题设置（车机包默认跟随车灯日夜，手机/平板默认幽邃微蓝）
         val isAppDark = com.concept.music.ui.theme.ThemeManager.isDarkTheme(this)
         val activeThemeMode = com.concept.music.ui.theme.ThemeManager.themeMode.value
         setTheme(if (isAppDark) R.style.Theme_ConceptMusic_Dark else R.style.Theme_ConceptMusic_Light)
@@ -182,11 +194,14 @@ class MainActivity : ComponentActivity() {
         com.concept.music.ui.theme.ThemeManager.syncSystemSplashAndNightMode(this, activeThemeMode)
         super.onCreate(savedInstanceState)
         handleIncomingWidgetIntent(intent)
-        handleIncomingShareIntent(intent)
-        // 严格区分手机版安装包 (phone) 与平板版安装包 (tablet)：
-        // - 平板版安装包 (BuildConfig.IS_TABLET_FLAVOR == true)：遵循 Android 16 (API 36) 大屏规范，支持全方向自由旋转与分屏多窗口
-        // - 手机版安装包 (BuildConfig.IS_TABLET_FLAVOR == false)：主界面及常规页面严格锁定竖屏，仅在播放页进入横屏时切换
-        if (!BuildConfig.IS_TABLET_FLAVOR) {
+        handleIncomingVoiceSearchIntent(intent)
+        if (!BuildConfig.IS_CAR_FLAVOR) {
+            handleIncomingShareIntent(intent)
+        }
+        // 严格区分手机版 (phone)、平板版 (tablet) 与车机独立版 (car)：
+        // - 平板版与车机独立版：放开全方向自由旋转与分屏多窗口自适应（兼容比亚迪 DiLink 旋转屏与高德/百度 1/3 分屏）
+        // - 手机版：主界面及常规页面严格锁定竖屏，仅在播放页进入横屏时切换
+        if (!BuildConfig.IS_TABLET_FLAVOR && !BuildConfig.IS_CAR_FLAVOR) {
             runCatching { requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
         } else {
             runCatching { requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
@@ -208,10 +223,26 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ConceptMusicTheme {
-                // 系统级 Starting Window 已统一为 96dp 黄金比例圆角图标（ic_splash_window_icon_light/dark），
-                // 移除冗余的第二层 Compose 开屏页 PureSplashIconView（消除大图标跳小图标的双开屏现象与 850ms+240ms 阻塞延迟），
-                // 首帧渲染完成即刻无缝直达应用主界面。
-                MainContent()
+                // 通过 Gradle Flavor SourceSet 路由：phone/tablet 挂载 MainContent()，car 挂载 CarCockpitRoot()
+                AppRootEntry()
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (BuildConfig.IS_CAR_FLAVOR) {
+            val isDarkNow = com.concept.music.ui.theme.ThemeManager.isDarkTheme(this)
+            if (isDarkNow) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                    navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                )
+            } else {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+                    navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                )
             }
         }
     }
@@ -219,7 +250,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         requestHighRefreshRateDisplayMode()
-        SystemLyricBridge.onHostResumed(this)
+        if (BuildConfig.IS_CAR_FLAVOR) {
+            com.concept.music.ui.theme.CarPerformanceManager.refreshHardwareAndThermal(this)
+        } else {
+            SystemLyricBridge.onHostResumed(this)
+        }
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {

@@ -1108,7 +1108,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             bluetoothEnabled = savedAutoPlayBt
         )
         PlaybackService.updateKeepPlayingOnTaskRemoved(savedKeepPlayingTaskRemoved)
-        val savedAutoPlay = prefs.getBoolean("auto_play_on_startup", false)
+        val savedAutoPlay = prefs.getBoolean("auto_play_on_startup", com.concept.music.BuildConfig.IS_CAR_FLAVOR)
 
         val userScopeKey = currentUser ?: "guest"
         val savedActiveQueueId = prefs.getString("saved_active_queue_id", "").orEmpty()
@@ -3151,8 +3151,30 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                             }
                             prefetchedNextQueueIndex = nextIndex
                             prefetchedNextSongKey = "${nextSong.id}_${nextSong.hash}"
-                            ListenStatsCoordinator.registerSong(resolvedNextSong)
+                            if (!com.concept.music.BuildConfig.IS_CAR_FLAVOR) {
+                                ListenStatsCoordinator.registerSong(resolvedNextSong)
+                            }
                             player.addMediaItem(nextItem)
+                            if (com.concept.music.BuildConfig.IS_CAR_FLAVOR &&
+                                playerOverride == null &&
+                                !resolvedNextSong.isLocalSong
+                            ) {
+                                // 车机地库/隧道弱网防断流：当前曲目播放 12 秒后静默将下一首预缓存入 SimpleCache
+                                val precacheUrl = nextResult.url
+                                val precacheKey = nextCacheKey
+                                val precacheLimit = if (stNow.wifiOnlyLossless) 2L * 1024L * 1024L else 8L * 1024L * 1024L
+                                viewModelScope.launch(Dispatchers.IO) {
+                                    delay(12_000L)
+                                    if (mutableState.value.isPlaying) {
+                                        AudioCacheManager.precacheAudioStream(
+                                            context = getApplication(),
+                                            url = precacheUrl,
+                                            cacheKey = precacheKey,
+                                            maxBytes = precacheLimit
+                                        )
+                                    }
+                                }
+                            }
                             if (playerOverride == null && !useAccompany) {
                                 viewModelScope.launch(Dispatchers.IO) {
                                     val warmCandidates = buildList {
