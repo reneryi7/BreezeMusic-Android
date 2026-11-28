@@ -887,7 +887,44 @@ class PlaybackService : MediaLibraryService() {
             AudioDeviceInfo.TYPE_BLE_HEADSET,
             AudioDeviceInfo.TYPE_BLE_SPEAKER,
             AudioDeviceInfo.TYPE_BLE_BROADCAST -> true
-            else -> false
+            else -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && type == AudioDeviceInfo.TYPE_HEARING_AID
+        }
+
+        internal fun resolveActiveBluetoothAudioOutput(am: AudioManager, fallbackConnected: Boolean): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val routed = runCatching {
+                    val attrs = android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                    am.getAudioDevicesForAttributes(attrs)
+                }.getOrNull()
+                if (!routed.isNullOrEmpty()) {
+                    return routed.any { isBluetoothAudioDeviceType(it.type) }
+                }
+            }
+            return fallbackConnected
+        }
+
+        /**
+         * 实时刷新并回补蓝牙音频输出路由连接状态（解决冷启动 ViewModel 先于/晚于 Service 初始化、
+         * 或系统媒体输出切换器在不中断蓝牙连接的情况下切回扬声器导致的状态滞后）。
+         */
+        fun refreshBluetoothConnectionSnapshot(context: Context): Boolean {
+            val am = runCatching {
+                context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            }.getOrNull() ?: return isBluetoothAudioOutputConnected
+            val connectedByEnumeration = runCatching {
+                am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    .any { it.isSink && isBluetoothAudioDeviceType(it.type) }
+            }.getOrDefault(isBluetoothAudioOutputConnected)
+            val activeBt = resolveActiveBluetoothAudioOutput(am, connectedByEnumeration)
+            if (isBluetoothAudioOutputConnected != activeBt) {
+                isBluetoothAudioOutputConnected = activeBt
+                onBluetoothConnectionChanged?.invoke(activeBt)
+                SystemLyricBridge.refreshBackgroundEffectiveOffset(context.applicationContext)
+            }
+            return activeBt
         }
 
         internal fun isCarBusAudioDeviceType(type: Int): Boolean {
@@ -1123,9 +1160,10 @@ class PlaybackService : MediaLibraryService() {
                 if (isBluetoothAudioDeviceType(dev.type)) connectedBluetoothIds.add(dev.id)
                 if (isCarBusAudioDeviceType(dev.type)) connectedCarBusIds.add(dev.id)
             }
-            val btConnected = connectedBluetoothIds.isNotEmpty()
+            val btConnected = resolveActiveBluetoothAudioOutput(am, connectedBluetoothIds.isNotEmpty())
             isBluetoothAudioOutputConnected = btConnected
             onBluetoothConnectionChanged?.invoke(btConnected)
+            SystemLyricBridge.refreshBackgroundEffectiveOffset(applicationContext)
         }
 
         val callback = object : AudioDeviceCallback() {
@@ -1153,10 +1191,11 @@ class PlaybackService : MediaLibraryService() {
                     }
                 }
                 initialDeviceEnumerationDone = true
-                val btConnectedNow = connectedBluetoothIds.isNotEmpty()
+                val btConnectedNow = resolveActiveBluetoothAudioOutput(am, connectedBluetoothIds.isNotEmpty())
                 if (isBluetoothAudioOutputConnected != btConnectedNow) {
                     isBluetoothAudioOutputConnected = btConnectedNow
                     onBluetoothConnectionChanged?.invoke(btConnectedNow)
+                    SystemLyricBridge.refreshBackgroundEffectiveOffset(applicationContext)
                 }
 
                 val newlyAddedCarSink = newlyAddedBluetooth || newlyAddedCarBus
@@ -1189,10 +1228,11 @@ class PlaybackService : MediaLibraryService() {
                     connectedBluetoothIds.remove(dev.id)
                     connectedCarBusIds.remove(dev.id)
                 }
-                val btConnectedNow = connectedBluetoothIds.isNotEmpty()
+                val btConnectedNow = resolveActiveBluetoothAudioOutput(am, connectedBluetoothIds.isNotEmpty())
                 if (isBluetoothAudioOutputConnected != btConnectedNow) {
                     isBluetoothAudioOutputConnected = btConnectedNow
                     onBluetoothConnectionChanged?.invoke(btConnectedNow)
+                    SystemLyricBridge.refreshBackgroundEffectiveOffset(applicationContext)
                 }
                 CarSessionManager.reevaluateActiveConnections(
                     context = applicationContext,
@@ -1427,6 +1467,7 @@ class PlaybackService : MediaLibraryService() {
                 if (exoPlayer.isPlaying) {
                     scheduleListenStatsTick()
                 }
+                refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = false)
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1491,6 +1532,7 @@ class PlaybackService : MediaLibraryService() {
             }
         }
         CarSessionManager.onCarModeChangedCallback = {
+            SystemLyricBridge.refreshBackgroundEffectiveOffset(applicationContext)
             refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush = true)
         }
         setupAudioDeviceMonitor()
@@ -2014,11 +2056,11 @@ class PlaybackService : MediaLibraryService() {
                 .build()
         }
 
-        fun pushAvrcpMetadataIfChanged(force: Boolean = false) {
+        fun pushAvrcpMetadataIfChanged(force: Boolean = false): Long {
             val carLyricActive = isCarBluetoothLyricActive()
             if (!carLyricActive) {
                 if (!wasCarBluetoothLyricActive) {
-                    return
+                    return 0L
                 }
                 wasCarBluetoothLyricActive = false
                 lastPushedAvrTitle = ""
@@ -2034,18 +2076,26 @@ class PlaybackService : MediaLibraryService() {
                         listener.onEvents(this, events)
                     }
                 }
-                return
+                return 0L
             }
             wasCarBluetoothLyricActive = true
-            val nowElapsed = safeServiceElapsedRealtime()
-            if (!force && lastPushElapsedMs > 0L && (nowElapsed - lastPushElapsedMs) < 400L) {
-                return
-            }
             val updatedMeta = mediaMetadata
             val nextTitle = updatedMeta.title?.toString().orEmpty()
             val nextArtist = updatedMeta.artist?.toString().orEmpty()
-            if (!force && nextTitle == lastPushedAvrTitle && nextArtist == lastPushedAvrArtist) {
-                return
+            val contentChanged = nextTitle != lastPushedAvrTitle || nextArtist != lastPushedAvrArtist
+            val nowElapsed = safeServiceElapsedRealtime()
+            val elapsedSinceLast = if (lastPushElapsedMs > 0L) (nowElapsed - lastPushElapsedMs).coerceAtLeast(0L) else -1L
+            val throttleAction = CarAvrcpLyricFormatter.computeAvrcpThrottleActionMs(
+                force = force,
+                contentChanged = contentChanged,
+                elapsedSinceLastPushMs = elapsedSinceLast
+            )
+            if (throttleAction < 0L) {
+                return 0L
+            }
+            if (throttleAction > 0L) {
+                // 新唱词落入防抖窗口：返回剩余等待毫秒数，交由调度器定时补发，绝不静默丢弃当前句
+                return throttleAction
             }
             lastPushedAvrTitle = nextTitle
             lastPushedAvrArtist = nextArtist
@@ -2060,6 +2110,7 @@ class PlaybackService : MediaLibraryService() {
                     listener.onEvents(this, events)
                 }
             }
+            return 0L
         }
     }
 
@@ -2074,17 +2125,22 @@ class PlaybackService : MediaLibraryService() {
     private fun resolveCarAdjustedLyricPositionMs(rawPosMs: Long): Long {
         val car = CarSessionManager.state.value
         val hwAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
-        // 若前台 ViewModel 已将车载偏移合并入 SystemLyricBridge.lyricOffsetMsSnapshot，直接使用；否则叠加车载校准值
-        val bridgeOffset = SystemLyricBridge.lyricOffsetMsSnapshot
-        val effectiveOffset = if (PlaybackCoordinator.onTogglePlayDelegate != null) {
-            bridgeOffset
+        // 直接实时合并基础手动偏移 + 权威车载偏移，彻底消除修改车机滑块瞬间的协程快照竞态
+        val baseSongOffset = if (PlaybackCoordinator.onTogglePlayDelegate != null) {
+            SystemLyricBridge.manualLyricOffsetMsSnapshot
         } else {
-            val baseSongOffset = runCatching {
+            runCatching {
                 applicationContext.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
                     .getLong("lyric_offset_ms", 0L)
             }.getOrDefault(0L)
-            baseSongOffset + (if (hwAllowed) car.carLyricOffsetMs else 0L)
         }
+        val carOffset = if (hwAllowed) {
+            car.carLyricOffsetMs.coerceIn(
+                CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+                CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS
+            )
+        } else 0L
+        val effectiveOffset = (baseSongOffset + carOffset).coerceIn(-10_000L, 10_000L)
         return (rawPosMs + effectiveOffset).coerceAtLeast(0L)
     }
 
@@ -2129,7 +2185,7 @@ class PlaybackService : MediaLibraryService() {
         override fun run() {
             val p = player ?: return
             if (!p.isPlaying || !isCarBluetoothLyricActive()) return
-            carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = false)
+            val retryThrottleDelayMs = carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = false) ?: 0L
             val activeMediaId = p.currentMediaItem?.mediaId.orEmpty()
             val bridgeSong = SystemLyricBridge.currentSongSnapshot
             val lyricData = if (bridgeSong != null && (activeMediaId.isBlank() || bridgeSong.id == activeMediaId)) {
@@ -2138,11 +2194,16 @@ class PlaybackService : MediaLibraryService() {
                 com.concept.music.data.model.LyricData.Empty
             }
             val adjustedPos = resolveCarAdjustedLyricPositionMs(p.currentPosition)
-            val delayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
+            val boundaryDelayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
                 lyricData = lyricData,
                 adjustedPositionMs = adjustedPos,
                 playbackSpeed = p.playbackParameters.speed
             )
+            val delayMs = if (retryThrottleDelayMs > 0L) {
+                minOf(retryThrottleDelayMs, boundaryDelayMs)
+            } else {
+                boundaryDelayMs
+            }
             mainHandler?.postDelayed(this, delayMs)
         }
     }
@@ -2150,7 +2211,7 @@ class PlaybackService : MediaLibraryService() {
     internal fun refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush: Boolean = false) {
         val h = mainHandler
         h?.removeCallbacks(carAvrcpLyricRunnable)
-        carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = forceImmediatePush)
+        val retryThrottleDelayMs = carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = forceImmediatePush) ?: 0L
         val p = player ?: return
         if (p.isPlaying && isCarBluetoothLyricActive()) {
             val activeMediaId = p.currentMediaItem?.mediaId.orEmpty()
@@ -2161,11 +2222,16 @@ class PlaybackService : MediaLibraryService() {
                 com.concept.music.data.model.LyricData.Empty
             }
             val adjustedPos = resolveCarAdjustedLyricPositionMs(p.currentPosition)
-            val delayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
+            val boundaryDelayMs = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
                 lyricData = lyricData,
                 adjustedPositionMs = adjustedPos,
                 playbackSpeed = p.playbackParameters.speed
             )
+            val delayMs = if (retryThrottleDelayMs > 0L) {
+                minOf(retryThrottleDelayMs, boundaryDelayMs)
+            } else {
+                boundaryDelayMs
+            }
             h?.postDelayed(carAvrcpLyricRunnable, delayMs)
         }
     }

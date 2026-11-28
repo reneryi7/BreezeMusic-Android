@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -49,6 +50,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,6 +71,8 @@ import com.concept.music.service.HeadsetClickSensitivity
 import com.concept.music.service.MusicDownloadManager
 import com.concept.music.service.DownloadTaskStatus
 import com.concept.music.ui.theme.*
+import com.concept.music.ui.viewmodel.BLUETOOTH_LYRIC_OFFSET_MAX_MS
+import com.concept.music.ui.viewmodel.BLUETOOTH_LYRIC_OFFSET_MIN_MS
 import com.concept.music.ui.viewmodel.CoverStyle
 import com.concept.music.ui.viewmodel.LyricAlignment
 import com.concept.music.ui.viewmodel.MusicPlayerViewModel
@@ -2280,6 +2284,89 @@ fun SettingsScreen(
     }
 }
 
+@Composable
+internal fun LyricOffsetCustomInputDialog(
+    title: String,
+    directionHint: String,
+    currentMs: Long,
+    minMs: Long,
+    maxMs: Long,
+    accentColor: Color = ConceptPrimary,
+    onConfirm: (Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var inputText by remember(currentMs) { mutableStateOf(currentMs.toString()) }
+    val parsed = inputText.trim().toLongOrNull()
+    val isOutOfRange = parsed != null && (parsed < minMs || parsed > maxMs)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = conceptSheetContainerColor(),
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(24.dp),
+        title = {
+            Text(
+                text = title,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 16.5.sp
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = directionHint,
+                    fontSize = 12.sp,
+                    lineHeight = 16.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = { raw ->
+                        val cleaned = raw.filterIndexed { index, c ->
+                            c.isDigit() || (index == 0 && (c == '-' || c == '+'))
+                        }
+                        if (cleaned.length <= 7) {
+                            inputText = cleaned
+                        }
+                    },
+                    singleLine = true,
+                    label = { Text("偏移毫秒 (${minMs} ~ +${maxMs} ms)") },
+                    suffix = { Text("ms", fontWeight = FontWeight.Bold) },
+                    isError = inputText.isNotBlank() && (parsed == null || isOutOfRange),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (isOutOfRange) {
+                    Text(
+                        text = "请输入 $minMs 到 +$maxMs 之间的整数毫秒值",
+                        fontSize = 11.5.sp,
+                        color = ConceptCoralAccent
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = parsed != null && !isOutOfRange,
+                onClick = {
+                    if (parsed != null) {
+                        onConfirm(parsed.coerceIn(minMs, maxMs))
+                        onDismiss()
+                    }
+                }
+            ) {
+                Text("应用", color = accentColor, fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BluetoothLyricCompensationSection(
@@ -2289,9 +2376,11 @@ private fun BluetoothLyricCompensationSection(
     onEnabledChange: (Boolean) -> Unit,
     onOffsetChange: (Long) -> Unit
 ) {
+    var showCustomInput by remember { mutableStateOf(false) }
+
     SettingToggleRow(
         title = "蓝牙音频输出延迟补偿",
-        subtitle = "连接蓝牙耳机或音箱时，自动为 KRC 逐字歌词套用延迟偏移量，断开蓝牙自动恢复 0ms",
+        subtitle = "连接蓝牙耳机或音箱时，自动为 KRC 逐字歌词与桌面歌词套用偏移量，断开蓝牙自动恢复 0ms",
         checked = enabled,
         onCheckedChange = onEnabledChange
     )
@@ -2306,33 +2395,107 @@ private fun BluetoothLyricCompensationSection(
             Text(
                 text = if (isBluetoothConnected) "蓝牙音频已连接 · 补偿生效中" else "当前未连接蓝牙 · 连上后自动生效",
                 style = MaterialTheme.typography.bodySmall,
-                color = if (isBluetoothConnected) ConceptCyanAccent else MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (isBluetoothConnected) ConceptCyanAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
-            Text(
-                text = "${if (offsetMs > 0) "+" else ""}${offsetMs} ms",
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = ConceptPrimary
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = ConceptPrimary.copy(alpha = 0.14f),
+                modifier = Modifier.softCardClickable(
+                    shape = RoundedCornerShape(10.dp),
+                    onClick = { showCustomInput = true }
                 )
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "${if (offsetMs > 0) "+" else ""}${offsetMs} ms",
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            color = ConceptPrimary
+                        )
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = "手动输入毫秒",
+                        tint = ConceptPrimary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "声音慢/歌词偏快 → 调负值（延后歌词）；歌词偏慢 → 调正值（提前歌词）；点右侧数值可手动输入",
+            style = MaterialTheme.typography.bodySmall,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Slider(
+            value = offsetMs.toFloat().coerceIn(
+                BLUETOOTH_LYRIC_OFFSET_MIN_MS.toFloat(),
+                BLUETOOTH_LYRIC_OFFSET_MAX_MS.toFloat()
+            ),
+            onValueChange = { raw ->
+                val stepped = ((raw / 50f).roundToInt() * 50L).coerceIn(
+                    BLUETOOTH_LYRIC_OFFSET_MIN_MS,
+                    BLUETOOTH_LYRIC_OFFSET_MAX_MS
+                )
+                onOffsetChange(stepped)
+            },
+            valueRange = BLUETOOTH_LYRIC_OFFSET_MIN_MS.toFloat()..BLUETOOTH_LYRIC_OFFSET_MAX_MS.toFloat(),
+            colors = SliderDefaults.colors(thumbColor = ConceptPrimary, activeTrackColor = ConceptPrimary)
+        )
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            ConceptBorderlessChoicePill(
+                selected = false,
+                label = "延后 200ms",
+                accentColor = ConceptPrimary,
+                onClick = { onOffsetChange(offsetMs - 200L) }
+            )
+            ConceptBorderlessChoicePill(
+                selected = false,
+                label = "延后 50ms",
+                accentColor = ConceptPrimary,
+                onClick = { onOffsetChange(offsetMs - 50L) }
+            )
+            ConceptBorderlessChoicePill(
+                selected = offsetMs == -200L,
+                label = "默认 -200ms",
+                accentColor = ConceptPrimary,
+                onClick = { onOffsetChange(-200L) }
+            )
+            ConceptBorderlessChoicePill(
+                selected = false,
+                label = "提前 50ms",
+                accentColor = ConceptPrimary,
+                onClick = { onOffsetChange(offsetMs + 50L) }
+            )
+            ConceptBorderlessChoicePill(
+                selected = false,
+                label = "提前 200ms",
+                accentColor = ConceptPrimary,
+                onClick = { onOffsetChange(offsetMs + 200L) }
             )
         }
 
-        Slider(
-            value = offsetMs.toFloat().coerceIn(-600f, 600f),
-            onValueChange = { raw ->
-                val stepped = ((raw / 25f).roundToInt() * 25L).coerceIn(-600L, 600L)
-                onOffsetChange(stepped)
-            },
-            valueRange = -600f..600f,
-            steps = 47,
-            colors = SliderDefaults.colors(thumbColor = ConceptPrimary, activeTrackColor = ConceptPrimary)
-        )
+        Spacer(modifier = Modifier.height(8.dp))
 
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            listOf(-300L, -200L, -150L, -100L, 0L, 100L).forEach { presetMs ->
+            listOf(-2000L, -1000L, -500L, -250L, 0L, 500L, 1000L).forEach { presetMs ->
                 ConceptBorderlessChoicePill(
                     selected = offsetMs == presetMs,
                     label = if (presetMs > 0) "+${presetMs}ms" else "${presetMs}ms",
@@ -2341,6 +2504,19 @@ private fun BluetoothLyricCompensationSection(
                 )
             }
         }
+    }
+
+    if (showCustomInput) {
+        LyricOffsetCustomInputDialog(
+            title = "手动设置蓝牙延迟补偿",
+            directionHint = "声音慢/歌词偏快请填负数（如 -800 延后歌词等待声音）；歌词偏慢请填正数（如 +500 提前歌词）。",
+            currentMs = offsetMs,
+            minMs = BLUETOOTH_LYRIC_OFFSET_MIN_MS,
+            maxMs = BLUETOOTH_LYRIC_OFFSET_MAX_MS,
+            accentColor = ConceptPrimary,
+            onConfirm = onOffsetChange,
+            onDismiss = { showCustomInput = false }
+        )
     }
 }
 

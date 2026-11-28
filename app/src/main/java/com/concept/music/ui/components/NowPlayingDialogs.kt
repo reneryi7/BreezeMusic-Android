@@ -105,6 +105,7 @@ internal fun LyricSettingsDialog(
     lineSpacing: Float,
     offsetMs: Long,
     bluetoothOffsetMs: Long = 0L,
+    isCarBluetoothOffset: Boolean = false,
     highlightTheme: LyricHighlightTheme,
     backgroundDim: Float,
     keepScreenOn: Boolean,
@@ -342,6 +343,7 @@ internal fun LyricSettingsDialog(
                                     alignment = alignment,
                                     offsetMs = offsetMs,
                                     bluetoothOffsetMs = bluetoothOffsetMs,
+                                    isCarBluetoothOffset = isCarBluetoothOffset,
                                     dynamicAccentColor = themeAccent,
                                     cardBg = glassCardBg,
                                     sheetBg = glassPillBg,
@@ -393,6 +395,7 @@ internal fun LyricSettingsDialog(
                             alignment = alignment,
                             offsetMs = offsetMs,
                             bluetoothOffsetMs = bluetoothOffsetMs,
+                            isCarBluetoothOffset = isCarBluetoothOffset,
                             dynamicAccentColor = themeAccent,
                             cardBg = glassCardBg,
                             sheetBg = glassPillBg,
@@ -445,6 +448,7 @@ private fun LyricThemeAndAlignCompactCard(
     alignment: LyricAlignment,
     offsetMs: Long,
     bluetoothOffsetMs: Long = 0L,
+    isCarBluetoothOffset: Boolean = false,
     dynamicAccentColor: Color,
     cardBg: Color,
     sheetBg: Color,
@@ -602,8 +606,10 @@ private fun LyricThemeAndAlignCompactCard(
                         softWrap = false
                     )
                     if (bluetoothOffsetMs != 0L) {
+                        val compLabel = if (isCarBluetoothOffset) "含车机补偿" else "含蓝牙补偿"
+                        val compSign = if (bluetoothOffsetMs > 0L) "+" else ""
                         Text(
-                            text = String.format(Locale.getDefault(), "含蓝牙补偿 %+.1fs", bluetoothOffsetMs / 1000f),
+                            text = "$compLabel ${compSign}${bluetoothOffsetMs}ms",
                             color = roles.primary.copy(alpha = 0.85f),
                             fontSize = if (isTablet) 11.sp else 9.5.sp,
                             maxLines = 1,

@@ -411,6 +411,7 @@ internal fun SettingsCarInterconnectSection(
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
+                    var showCarOffsetInput by remember { mutableStateOf(false) }
                     val offsetSign = if (carState.carLyricOffsetMs > 0) "+" else ""
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -418,33 +419,79 @@ internal fun SettingsCarInterconnectSection(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "车载蓝牙音频延迟校准",
+                            text = "车载蓝牙歌词延迟校准",
                             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
                         )
-                        Text(
-                            text = "${offsetSign}${carState.carLyricOffsetMs} ms",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 13.sp,
-                            color = ConceptCyanAccent
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = ConceptCyanAccent.copy(alpha = 0.14f),
+                            modifier = Modifier.softCardClickable(
+                                shape = RoundedCornerShape(10.dp),
+                                onClick = { showCarOffsetInput = true }
+                            )
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "${offsetSign}${carState.carLyricOffsetMs} ms",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 13.sp,
+                                    color = ConceptCyanAccent
+                                )
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "手动输入毫秒",
+                                    tint = ConceptCyanAccent,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
                     }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "车机歌词比歌声慢 → 调正值（提前推送）；车机声音比歌词慢 → 调负值（延后推送）；点右侧数值可手动输入",
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
-                        value = carState.carLyricOffsetMs.toFloat(),
+                        value = carState.carLyricOffsetMs.toFloat().coerceIn(
+                            CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS.toFloat(),
+                            CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS.toFloat()
+                        ),
                         onValueChange = {
-                            val snapped = ((it / 50f).roundToInt() * 50L).coerceIn(-1000L, 600L)
+                            val snapped = ((it / 50f).roundToInt() * 50L).coerceIn(
+                                CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+                                CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS
+                            )
                             CarSessionManager.setCarLyricOffsetMs(snapped)
                             onSyncLyricOffset()
                         },
-                        valueRange = -1000f..600f,
+                        valueRange = CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS.toFloat()..CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS.toFloat(),
                         colors = SliderDefaults.colors(
                             thumbColor = ConceptCyanAccent,
                             activeTrackColor = ConceptCyanAccent
                         )
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         ConceptBorderlessChoicePill(
                             selected = false,
-                            label = "提前 50ms",
+                            label = "延后 200ms",
+                            accentColor = ConceptCyanAccent,
+                            onClick = {
+                                CarSessionManager.setCarLyricOffsetMs(carState.carLyricOffsetMs - 200L)
+                                onSyncLyricOffset()
+                            }
+                        )
+                        ConceptBorderlessChoicePill(
+                            selected = false,
+                            label = "延后 50ms",
                             accentColor = ConceptCyanAccent,
                             onClick = {
                                 CarSessionManager.setCarLyricOffsetMs(carState.carLyricOffsetMs - 50L)
@@ -462,12 +509,54 @@ internal fun SettingsCarInterconnectSection(
                         )
                         ConceptBorderlessChoicePill(
                             selected = false,
-                            label = "延后 50ms",
+                            label = "提前 50ms",
                             accentColor = ConceptCyanAccent,
                             onClick = {
                                 CarSessionManager.setCarLyricOffsetMs(carState.carLyricOffsetMs + 50L)
                                 onSyncLyricOffset()
                             }
+                        )
+                        ConceptBorderlessChoicePill(
+                            selected = false,
+                            label = "提前 200ms",
+                            accentColor = ConceptCyanAccent,
+                            onClick = {
+                                CarSessionManager.setCarLyricOffsetMs(carState.carLyricOffsetMs + 200L)
+                                onSyncLyricOffset()
+                            }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(-2000L, -1000L, -500L, 0L, 500L, 1000L, 2000L).forEach { presetMs ->
+                            ConceptBorderlessChoicePill(
+                                selected = carState.carLyricOffsetMs == presetMs,
+                                label = if (presetMs > 0) "+${presetMs}ms" else "${presetMs}ms",
+                                accentColor = ConceptCyanAccent,
+                                onClick = {
+                                    CarSessionManager.setCarLyricOffsetMs(presetMs)
+                                    onSyncLyricOffset()
+                                }
+                            )
+                        }
+                    }
+
+                    if (showCarOffsetInput) {
+                        LyricOffsetCustomInputDialog(
+                            title = "手动设置车载蓝牙歌词校准",
+                            directionHint = "车机屏幕歌词慢于歌声请填正数（如 +1200 提前推送）；车机声音慢于歌词请填负数（如 -1200 延后推送）。",
+                            currentMs = carState.carLyricOffsetMs,
+                            minMs = CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+                            maxMs = CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS,
+                            accentColor = ConceptCyanAccent,
+                            onConfirm = { value ->
+                                CarSessionManager.setCarLyricOffsetMs(value)
+                                onSyncLyricOffset()
+                            },
+                            onDismiss = { showCarOffsetInput = false }
                         )
                     }
                 }

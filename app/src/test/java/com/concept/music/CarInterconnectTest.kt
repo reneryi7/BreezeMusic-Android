@@ -855,4 +855,64 @@ class CarInterconnectTest {
         forwardingPlayer.removeListener(downstreamListener)
         assertTrue("调用 removeListener 后底层监听列表必须清空", registeredListeners.isEmpty())
     }
+
+    @Test
+    fun `车载蓝牙延迟大范围校准与AVRCP精准唤醒及节流补发不吞句验证`() {
+        // 1. 验证 CarSessionManager 车机延迟校准上下限放宽至 -5000ms ~ +5000ms 并正确持久化与边界钳制
+        assertEquals(-5_000L, CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS)
+        assertEquals(5_000L, CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS)
+
+        val fakePrefs = InMemorySharedPreferences()
+        CarSessionManager.initWithSharedPreferencesForTest(fakePrefs)
+
+        CarSessionManager.setCarLyricOffsetMs(-4_250L)
+        assertEquals(-4_250L, CarSessionManager.state.value.carLyricOffsetMs)
+        CarSessionManager.initWithSharedPreferencesForTest(fakePrefs)
+        assertEquals("重启后应完整保留 -4250ms 车机校准值，不被旧 ±1500ms 截断", -4_250L, CarSessionManager.state.value.carLyricOffsetMs)
+
+        CarSessionManager.setCarLyricOffsetMs(3_600L)
+        assertEquals(3_600L, CarSessionManager.state.value.carLyricOffsetMs)
+
+        CarSessionManager.setCarLyricOffsetMs(-9_999L)
+        assertEquals(-5_000L, CarSessionManager.state.value.carLyricOffsetMs)
+
+        CarSessionManager.setCarLyricOffsetMs(9_999L)
+        assertEquals(5_000L, CarSessionManager.state.value.carLyricOffsetMs)
+
+        // 2. 验证临近下一句边界时不再被 260ms 人为拉长滞后
+        val tightLyric = LyricData(
+            isKrc = true,
+            lines = listOf(
+                LyricLine(10_000L, 1_500L, "第一句"),
+                LyricLine(11_500L, 2_000L, "第二句")
+            )
+        )
+        val nearBoundaryDelay = CarAvrcpLyricFormatter.computeNextWakeupDelayMs(
+            lyricData = tightLyric,
+            adjustedPositionMs = 11_440L,
+            playbackSpeed = 1.0f
+        )
+        assertEquals("距离下一句 60ms 时应精准在 60+15=75ms 后唤醒而非强推至 260ms", 75L, nearBoundaryDelay)
+
+        // 3. 验证 AVRCP 节流补发策略：内容变化落入 250ms 窗口内返回正等待时长以定时补发，绝不静默丢弃
+        assertEquals(-1L, CarAvrcpLyricFormatter.computeAvrcpThrottleActionMs(force = false, contentChanged = false, elapsedSinceLastPushMs = 100L))
+        assertEquals(0L, CarAvrcpLyricFormatter.computeAvrcpThrottleActionMs(force = true, contentChanged = false, elapsedSinceLastPushMs = 50L))
+        assertEquals(0L, CarAvrcpLyricFormatter.computeAvrcpThrottleActionMs(force = false, contentChanged = true, elapsedSinceLastPushMs = 260L))
+        val deferredMs = CarAvrcpLyricFormatter.computeAvrcpThrottleActionMs(force = false, contentChanged = true, elapsedSinceLastPushMs = 100L)
+        assertEquals("100ms 处的新唱词应返回 160ms 后精确补发", 160L, deferredMs)
+
+        // 4. 验证车机互联设置页已修正「延后=- / 提前=+」按钮方向并放宽滑块范围
+        val projectRoot = java.io.File(".").canonicalFile.let { dir ->
+            if (java.io.File(dir, "app/src/main").exists()) dir else dir.parentFile
+        }
+        val carSettingsCode = java.io.File(projectRoot, "app/src/main/java/com/concept/music/ui/settings/SettingsCarInterconnectScreen.kt").readText(Charsets.UTF_8)
+        assertFalse("车机滑块不应再硬编码收窄为 -1000f..600f", carSettingsCode.contains("valueRange = -1000f..600f"))
+        assertTrue("车机互联设置页应支持手动精确输入弹窗", carSettingsCode.contains("LyricOffsetCustomInputDialog"))
+        val delayBtnIdx = carSettingsCode.indexOf("label = \"延后 50ms\"")
+        val delayMinusIdx = carSettingsCode.indexOf("carLyricOffsetMs - 50L", startIndex = delayBtnIdx.coerceAtLeast(0))
+        val advanceBtnIdx = carSettingsCode.indexOf("label = \"提前 50ms\"")
+        val advancePlusIdx = carSettingsCode.indexOf("carLyricOffsetMs + 50L", startIndex = advanceBtnIdx.coerceAtLeast(0))
+        assertTrue("延后 50ms 按钮必须执行减法 (- 50L)", delayBtnIdx >= 0 && delayMinusIdx in delayBtnIdx..(delayBtnIdx + 260))
+        assertTrue("提前 50ms 按钮必须执行加法 (+ 50L)", advanceBtnIdx >= 0 && advancePlusIdx in advanceBtnIdx..(advanceBtnIdx + 260))
+    }
 }

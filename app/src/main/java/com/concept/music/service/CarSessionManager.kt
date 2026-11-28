@@ -202,6 +202,9 @@ data class CarInterconnectState(
  * 4. 上车原子落盘日常音效与音频焦点快照，下车或进程重启冷启动自动无感还原。
  */
 object CarSessionManager {
+    const val CAR_LYRIC_OFFSET_MIN_MS = -5_000L
+    const val CAR_LYRIC_OFFSET_MAX_MS = 5_000L
+
     private const val PREFS_NAME = "concept_car_interconnect_prefs"
     private const val KEY_FEATURE_ENABLED = "car_feature_enabled"
     private const val KEY_CABIN_MODE = "car_cabin_acoustic_mode"
@@ -496,7 +499,8 @@ object CarSessionManager {
             )
         }.getOrDefault(CarInterludeStyle.BREATHING_NOTES)
         val defaultOffset = if (standaloneCar) 0L else -250L
-        val lyricOffset = p.getLong(KEY_CAR_LYRIC_OFFSET_MS, defaultOffset).coerceIn(-1500L, 1000L)
+        val lyricOffset = p.getLong(KEY_CAR_LYRIC_OFFSET_MS, defaultOffset)
+            .coerceIn(CAR_LYRIC_OFFSET_MIN_MS, CAR_LYRIC_OFFSET_MAX_MS)
         val autoPlayCar = p.getBoolean(KEY_AUTO_PLAY_CAR, standaloneCar)
         val zeroLatency = p.getBoolean(KEY_STEERING_ZERO_LATENCY, true)
 
@@ -1184,7 +1188,7 @@ object CarSessionManager {
     }
 
     fun setCarLyricOffsetMs(offsetMs: Long) {
-        val clamped = offsetMs.coerceIn(-1500L, 1000L)
+        val clamped = offsetMs.coerceIn(CAR_LYRIC_OFFSET_MIN_MS, CAR_LYRIC_OFFSET_MAX_MS)
         prefs?.edit()?.putLong(KEY_CAR_LYRIC_OFFSET_MS, clamped)?.apply()
         _state.update { it.copy(carLyricOffsetMs = clamped) }
         onCarModeChangedCallback?.invoke(_state.value.isCarModeActive)

@@ -282,6 +282,7 @@ fun NowPlayingSheet(
     lyricOffsetMs: Long = 0L,
     manualLyricOffsetMs: Long = lyricOffsetMs,
     bluetoothLyricOffsetMs: Long = 0L,
+    isCarLyricCompensationActive: Boolean = false,
     lyricHighlightTheme: LyricHighlightTheme = LyricHighlightTheme.ICE_BLUE,
     lyricBackgroundDim: Float = 0.72f,
     lyricKeepScreenOn: Boolean = true,
@@ -339,6 +340,7 @@ fun NowPlayingSheet(
     onSwitchRecentQueue: (String) -> Unit = {},
     onDeleteRecentQueue: (String) -> Unit = {},
     onOpenArtist: (Song) -> Unit = {},
+    onOpenSingleArtist: ((artistName: String, resolvedArtistId: String?) -> Unit)? = null,
     onOpenAlbum: (Song) -> Unit = {},
     onPlayQueueSong: (Song) -> Unit,
     onRemoveFromQueue: (Song) -> Unit,
@@ -381,6 +383,9 @@ fun NowPlayingSheet(
     var showDownloadDialog by remember { mutableStateOf(false) }
     var showCoverPreviewDialog by remember { mutableStateOf(false) }
     var showArtistPickerDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(song.id) {
+        showArtistPickerDialog = false
+    }
     var tabletForcedRotationDeg by remember { mutableFloatStateOf(90f) }
     val adaptiveInfo = com.concept.music.ui.theme.LocalConceptAdaptiveInfo.current
     val isLargeScreen = adaptiveInfo.isLargeScreenDevice
@@ -1257,6 +1262,7 @@ fun NowPlayingSheet(
             lineSpacing = lyricLineSpacing,
             offsetMs = manualLyricOffsetMs,
             bluetoothOffsetMs = bluetoothLyricOffsetMs,
+            isCarBluetoothOffset = isCarLyricCompensationActive,
             highlightTheme = lyricHighlightTheme,
             backgroundDim = lyricBackgroundDim,
             keepScreenOn = lyricKeepScreenOn,
@@ -1342,7 +1348,11 @@ fun NowPlayingSheet(
                 accentColor = activeAccentColor,
                 onSelectArtist = { chosenName, resolvedId ->
                     showArtistPickerDialog = false
-                    onOpenArtist(song.copy(artist = chosenName, artistId = resolvedId.orEmpty()))
+                    if (onOpenSingleArtist != null) {
+                        onOpenSingleArtist(chosenName, resolvedId)
+                    } else {
+                        onOpenArtist(song.copy(artist = chosenName, artistId = resolvedId.orEmpty()))
+                    }
                 },
                 onDismiss = { showArtistPickerDialog = false }
             )

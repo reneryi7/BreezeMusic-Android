@@ -3,14 +3,18 @@ package com.concept.music.ui.components
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -27,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.concept.music.BuildConfig
 import com.concept.music.service.*
+import com.concept.music.ui.settings.LyricOffsetCustomInputDialog
 import com.concept.music.ui.theme.*
 import kotlin.math.roundToInt
 
@@ -200,6 +205,7 @@ fun CarModeQuickControlSheet(
     val context = LocalContext.current
     val carState by CarSessionManager.state.collectAsState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var showQuickCarOffsetDialog by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -222,6 +228,7 @@ fun CarModeQuickControlSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -364,6 +371,114 @@ fun CarModeQuickControlSheet(
                         )
                     }
 
+                    AnimatedVisibility(
+                        visible = carState.carBluetoothLyricEnabled,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val offsetSign = if (carState.carLyricOffsetMs > 0) "+" else ""
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "车机歌词延迟校准（负延后 · 正提前）",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White.copy(alpha = 0.80f)
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = ConceptCyanAccent.copy(alpha = 0.18f),
+                                    modifier = Modifier.softCardClickable(
+                                        shape = RoundedCornerShape(8.dp),
+                                        onClick = { showQuickCarOffsetDialog = true }
+                                    )
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Text(
+                                            text = "${offsetSign}${carState.carLyricOffsetMs} ms",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = ConceptCyanAccent
+                                        )
+                                        Icon(
+                                            imageVector = Icons.Rounded.Edit,
+                                            contentDescription = "手动输入毫秒",
+                                            tint = ConceptCyanAccent,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Slider(
+                                value = carState.carLyricOffsetMs.toFloat().coerceIn(
+                                    CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS.toFloat(),
+                                    CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS.toFloat()
+                                ),
+                                onValueChange = { raw ->
+                                    val snapped = ((raw / 50f).roundToInt() * 50L).coerceIn(
+                                        CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+                                        CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS
+                                    )
+                                    CarSessionManager.setCarLyricOffsetMs(snapped)
+                                    onSyncLyricOffset()
+                                },
+                                valueRange = CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS.toFloat()..CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS.toFloat(),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = ConceptCyanAccent,
+                                    activeTrackColor = ConceptCyanAccent,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                                )
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(
+                                    "-200" to (carState.carLyricOffsetMs - 200L),
+                                    "-50" to (carState.carLyricOffsetMs - 50L),
+                                    "默认" to -250L,
+                                    "+50" to (carState.carLyricOffsetMs + 50L),
+                                    "+200" to (carState.carLyricOffsetMs + 200L)
+                                ).forEach { (btnLabel, targetMs) ->
+                                    val isDefaultPill = btnLabel == "默认" && carState.carLyricOffsetMs == -250L
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isDefaultPill) ConceptCyanAccent.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.08f),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .softCardClickable(
+                                                shape = RoundedCornerShape(10.dp),
+                                                onClick = {
+                                                    CarSessionManager.setCarLyricOffsetMs(targetMs)
+                                                    onSyncLyricOffset()
+                                                }
+                                            )
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.padding(vertical = 7.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = btnLabel,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isDefaultPill) ConceptCyanAccent else Color.White.copy(alpha = 0.88f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
                     Row(
@@ -435,5 +550,21 @@ fun CarModeQuickControlSheet(
 
             Spacer(modifier = Modifier.height(6.dp))
         }
+    }
+
+    if (showQuickCarOffsetDialog) {
+        LyricOffsetCustomInputDialog(
+            title = "手动设置车载蓝牙歌词校准",
+            directionHint = "车机歌词慢于歌声请填正数（如 +1200 提前推送）；声音慢于歌词请填负数（如 -1200 延后推送）。",
+            currentMs = carState.carLyricOffsetMs,
+            minMs = CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+            maxMs = CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS,
+            accentColor = ConceptCyanAccent,
+            onConfirm = { value ->
+                CarSessionManager.setCarLyricOffsetMs(value)
+                onSyncLyricOffset()
+            },
+            onDismiss = { showQuickCarOffsetDialog = false }
+        )
     }
 }

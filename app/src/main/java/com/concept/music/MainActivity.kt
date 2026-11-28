@@ -1485,6 +1485,7 @@ fun MainContent(
                     showViperEffectOverlay = true
                 },
                 onOpenArtist = navigateToSongArtist,
+                onOpenSingleArtist = navigateToSingleArtist,
                 onOpenAlbum = navigateToSongAlbum
             )
         }
@@ -1937,6 +1938,7 @@ private fun IsolatedNowPlayingHost(
     onOpenComments: () -> Unit,
     onOpenViperEffectPage: () -> Unit,
     onOpenArtist: (Song) -> Unit = {},
+    onOpenSingleArtist: ((artistName: String, resolvedArtistId: String?) -> Unit)? = null,
     onOpenAlbum: (Song) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -1982,6 +1984,7 @@ private fun IsolatedNowPlayingHost(
         lyricOffsetMs = playerUiState.effectiveLyricOffsetMs,
         manualLyricOffsetMs = playerUiState.lyricOffsetMs,
         bluetoothLyricOffsetMs = playerUiState.effectiveLyricOffsetMs - playerUiState.lyricOffsetMs,
+        isCarLyricCompensationActive = playerUiState.isCarModeActive,
         lyricHighlightTheme = playerUiState.lyricHighlightTheme,
         lyricBackgroundDim = playerUiState.lyricBackgroundDim,
         lyricKeepScreenOn = playerUiState.lyricKeepScreenOn,
@@ -2041,8 +2044,9 @@ private fun IsolatedNowPlayingHost(
         onPlayQueueSong = { musicPlayerViewModel.playSong(it, playerUiState.playlistQueue) },
         onRemoveFromQueue = { musicPlayerViewModel.removeFromQueue(it) },
         onClearQueue = { musicPlayerViewModel.clearQueue() },
-        onOpenArtist = { onOpenArtist(currentSong) },
-        onOpenAlbum = { onOpenAlbum(currentSong) },
+        onOpenArtist = { selectedSong -> onOpenArtist(selectedSong) },
+        onOpenSingleArtist = onOpenSingleArtist,
+        onOpenAlbum = { selectedSong -> onOpenAlbum(selectedSong) },
         onSyncCarLyricOffset = { musicPlayerViewModel.notifyCarLyricOffsetChanged() },
         motionOrientationPermissionEnabled = playerUiState.motionOrientationPermissionEnabled
     )

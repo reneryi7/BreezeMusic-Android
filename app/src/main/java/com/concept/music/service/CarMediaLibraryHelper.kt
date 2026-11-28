@@ -194,7 +194,8 @@ object CarAvrcpLyricFormatter {
     /**
      * 计算距离下一次蓝牙歌词文本发生变化的精确毫秒数（息屏零轮询自适应调度）：
      * - 仅在下一句开唱边界或长间奏起点唤醒一次主线程；
-     * - 钳制在 `[260ms, 4500ms]`，兼顾拖动进度条后的自校准与息屏超低功耗。
+     * - 钳制在 `[40ms, 4500ms]`，消除原先 260ms 过高下限在边界附近引入的最高 +250ms 人为推送滞后，
+     *   兼顾拖动进度条后的自校准与息屏超低功耗。
      */
     fun computeNextWakeupDelayMs(
         lyricData: LyricData,
@@ -225,8 +226,28 @@ object CarAvrcpLyricFormatter {
             }
         }
 
-        val rawDeltaMs = ((nextTargetContentMs - adjustedPositionMs) / safeSpeed).toLong() + 25L
-        return rawDeltaMs.coerceIn(260L, 4_500L)
+        val rawDeltaMs = ((nextTargetContentMs - adjustedPositionMs) / safeSpeed).toLong() + 15L
+        return rawDeltaMs.coerceIn(40L, 4_500L)
+    }
+
+    /**
+     * 计算 AVRCP 元数据推送的防抖节流策略：
+     * - 返回 `-1L`：非强制推送且唱词内容无变化，无需推送；
+     * - 返回 `0L`：允许立即推送；
+     * - 返回 `> 0L`：新唱词落入最短推送间隔（默认 250ms）内，返回需延后补发的精确等待毫秒数，
+     *   由调度器定时补发而非静默丢弃，彻底根除快歌/短句吞句卡死数秒的问题。
+     */
+    fun computeAvrcpThrottleActionMs(
+        force: Boolean,
+        contentChanged: Boolean,
+        elapsedSinceLastPushMs: Long,
+        minPushIntervalMs: Long = 250L
+    ): Long {
+        if (!force && !contentChanged) return -1L
+        if (force || elapsedSinceLastPushMs < 0L || elapsedSinceLastPushMs >= minPushIntervalMs) {
+            return 0L
+        }
+        return (minPushIntervalMs - elapsedSinceLastPushMs + 10L).coerceAtLeast(20L)
     }
 }
 

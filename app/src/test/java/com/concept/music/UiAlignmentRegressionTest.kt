@@ -2091,4 +2091,63 @@ class UiAlignmentRegressionTest {
         assertEquals("v1.3.3", hasUpd.latestVersion)
         assertEquals("检查更新结果不再携带与输出 Markdown 更新内容", "", hasUpd.releaseNotes)
     }
+
+    @Test
+    fun `播放页多歌手弹窗防重复弹出与蓝牙耳机延迟大范围校准验证`() {
+        val projectRoot = java.io.File(".").canonicalFile.let { dir ->
+            if (java.io.File(dir, "app/src/main").exists()) dir else dir.parentFile
+        }
+
+        // 1. 验证 IsolatedNowPlayingHost 不再丢弃选中的单歌手参数重复传回原始 currentSong，且打通 onOpenSingleArtist 直达路径
+        val mainCode = java.io.File(projectRoot, "app/src/main/java/com/concept/music/MainActivity.kt").readText(Charsets.UTF_8)
+        assertFalse(
+            "IsolatedNowPlayingHost 严禁硬传 currentSong 导致多歌手弹窗二次弹出",
+            mainCode.contains("onOpenArtist = { onOpenArtist(currentSong) }")
+        )
+        assertTrue(
+            "IsolatedNowPlayingHost 应透传 selectedSong 给 onOpenArtist",
+            mainCode.contains("onOpenArtist = { selectedSong -> onOpenArtist(selectedSong) }")
+        )
+        assertTrue(
+            "MainActivity 应向 IsolatedNowPlayingHost 注入直达单歌手跳转回调 onOpenSingleArtist",
+            mainCode.contains("onOpenSingleArtist = navigateToSingleArtist")
+        )
+
+        val npCode = java.io.File(projectRoot, "app/src/main/java/com/concept/music/ui/components/NowPlayingSheet.kt").readText(Charsets.UTF_8)
+        assertTrue(
+            "NowPlayingSheet 多歌手弹窗选中后应优先直走 onOpenSingleArtist 彻底绕过二次拆分",
+            npCode.contains("onOpenSingleArtist(chosenName, resolvedId)")
+        )
+        assertTrue(
+            "NowPlayingSheet 切歌时应自动复位 showArtistPickerDialog = false",
+            npCode.contains("LaunchedEffect(song.id)") && npCode.contains("showArtistPickerDialog = false")
+        )
+
+        // 2. 验证蓝牙耳机延迟补偿与总生效偏移上下限均已放宽至 ±5000ms / ±10000ms
+        assertEquals(-5_000L, com.concept.music.ui.viewmodel.BLUETOOTH_LYRIC_OFFSET_MIN_MS)
+        assertEquals(5_000L, com.concept.music.ui.viewmodel.BLUETOOTH_LYRIC_OFFSET_MAX_MS)
+        assertEquals(-10_000L, com.concept.music.ui.viewmodel.EFFECTIVE_LYRIC_OFFSET_MIN_MS)
+        assertEquals(10_000L, com.concept.music.ui.viewmodel.EFFECTIVE_LYRIC_OFFSET_MAX_MS)
+
+        val highDelayBtState = PlayerUiState(
+            lyricOffsetMs = -3_500L,
+            bluetoothLyricOffsetEnabled = true,
+            bluetoothLyricOffsetMs = -4_800L,
+            isBluetoothAudioConnected = true
+        )
+        assertEquals("蓝牙大延迟与手动偏移叠加应支持到 -8300ms 而不被旧 ±6000ms 截断", -8_300L, highDelayBtState.effectiveLyricOffsetMs)
+
+        val extremePositiveState = PlayerUiState(
+            lyricOffsetMs = 7_500L,
+            bluetoothLyricOffsetEnabled = true,
+            bluetoothLyricOffsetMs = 4_500L,
+            isBluetoothAudioConnected = true
+        )
+        assertEquals("超出 ±10000ms 总上限时应安全钳制在 +10000ms", 10_000L, extremePositiveState.effectiveLyricOffsetMs)
+
+        // 3. 验证蓝牙耳机设置 UI 已放宽至共享常量并支持手动精确输入弹窗
+        val settingsCode = java.io.File(projectRoot, "app/src/main/java/com/concept/music/ui/settings/SettingsScreen.kt").readText(Charsets.UTF_8)
+        assertFalse("蓝牙耳机滑块不应再硬编码收窄为 -600f..600f", settingsCode.contains("valueRange = -600f..600f"))
+        assertTrue("蓝牙耳机设置页应接入统一上限与精确手动输入弹窗", settingsCode.contains("BLUETOOTH_LYRIC_OFFSET_MAX_MS") && settingsCode.contains("LyricOffsetCustomInputDialog"))
+    }
 }

@@ -419,8 +419,9 @@ object SystemLyricBridge {
         if (prefs != null) return
         val p = ctx.getSharedPreferences("concept_system_lyric", Context.MODE_PRIVATE)
         prefs = p
-        val playerPrefs = ctx.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
-        lyricOffsetMsSnapshot = playerPrefs.getLong("lyric_offset_ms", 0L).coerceIn(-10_000L, 10_000L)
+        val (manualOffset, effectiveOffset) = computePersistedBackgroundEffectiveOffset(ctx)
+        manualLyricOffsetMsSnapshot = manualOffset
+        lyricOffsetMsSnapshot = effectiveOffset
         val schemeName = p.getString("desktop_color_scheme", DesktopLyricColorScheme.ICE_BLUE.name)
             ?: DesktopLyricColorScheme.ICE_BLUE.name
         val modeName = p.getString("desktop_line_mode", DesktopLyricLineMode.DUAL_BILINGUAL.name)
@@ -586,7 +587,57 @@ object SystemLyricBridge {
     }
 
     @Volatile
+    var manualLyricOffsetMsSnapshot: Long = 0L
+
+    @Volatile
     var lyricOffsetMsSnapshot: Long = 0L
+
+    internal fun computePersistedBackgroundEffectiveOffset(context: Context): Pair<Long, Long> {
+        val playerPrefs = context.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+        val manualOffset = playerPrefs.getLong("lyric_offset_ms", 0L).coerceIn(-10_000L, 10_000L)
+        val hwAllowed = AppPermissionManager.isPermissionEnabled(AppPermissionType.AUDIO_HARDWARE)
+        val car = CarSessionManager.state.value
+        val isCarActive = CarSessionManager.isPhoneCarFeatureSupported() && car.isCarModeActive
+        val btEnabled = playerPrefs.getBoolean("bluetooth_lyric_offset_enabled", false)
+        val btOffset = playerPrefs.getLong("bluetooth_lyric_offset_ms", -200L).coerceIn(-5_000L, 5_000L)
+        val deviceOffset = when {
+            !hwAllowed -> 0L
+            isCarActive -> car.carLyricOffsetMs.coerceIn(
+                CarSessionManager.CAR_LYRIC_OFFSET_MIN_MS,
+                CarSessionManager.CAR_LYRIC_OFFSET_MAX_MS
+            )
+            btEnabled && PlaybackService.isBluetoothAudioOutputConnected -> btOffset
+            else -> 0L
+        }
+        val effective = (manualOffset + deviceOffset).coerceIn(-10_000L, 10_000L)
+        return manualOffset to effective
+    }
+
+    fun refreshBackgroundEffectiveOffset(context: Context? = appContext) {
+        val ctx = context ?: return
+        if (PlaybackCoordinator.onTogglePlayDelegate != null) return
+        val (manual, effective) = computePersistedBackgroundEffectiveOffset(ctx)
+        manualLyricOffsetMsSnapshot = manual
+        lyricOffsetMsSnapshot = effective
+    }
+
+    fun onEffectiveLyricOffsetUpdated(rawPositionMs: Long) {
+        val adjusted = (rawPositionMs + lyricOffsetMsSnapshot).coerceAtLeast(0L)
+        currentPositionMsSnapshot = adjusted
+        lastPositionSyncRealtimeMs = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrDefault(0L)
+        val lyric = currentLyricSnapshot
+        if (lyric.lines.isNotEmpty()) {
+            val idx = lyric.getLineIndexAt(adjusted)
+            if (idx >= 0) {
+                currentLineIndexSnapshot = idx
+            }
+        }
+        if (_state.value.floatingCapsuleEnabled && isScreenInteractive()) {
+            mainHandler.post {
+                overlayView?.onPlaybackUpdated()
+            }
+        }
+    }
 
     fun syncProgressFromService(positionMs: Long, isPlaying: Boolean) {
         currentPositionMsSnapshot = (positionMs + lyricOffsetMsSnapshot).coerceAtLeast(0L)

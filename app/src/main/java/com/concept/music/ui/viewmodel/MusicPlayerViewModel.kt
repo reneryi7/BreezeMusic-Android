@@ -115,6 +115,13 @@ data class PlaybackPositionSnapshot(
     val playbackSpeed: Float = 1.0f
 )
 
+const val MANUAL_LYRIC_OFFSET_MIN_MS = -10_000L
+const val MANUAL_LYRIC_OFFSET_MAX_MS = 10_000L
+const val BLUETOOTH_LYRIC_OFFSET_MIN_MS = -5_000L
+const val BLUETOOTH_LYRIC_OFFSET_MAX_MS = 5_000L
+const val EFFECTIVE_LYRIC_OFFSET_MIN_MS = -10_000L
+const val EFFECTIVE_LYRIC_OFFSET_MAX_MS = 10_000L
+
 @Immutable
 data class PlayerUiState(
     val currentSong: Song? = null,
@@ -201,7 +208,10 @@ data class PlayerUiState(
                 bluetoothLyricOffsetEnabled && isBluetoothAudioConnected -> bluetoothLyricOffsetMs
                 else -> 0L
             }
-            return (lyricOffsetMs + deviceOffset).coerceIn(-6000L, 6000L)
+            return (lyricOffsetMs + deviceOffset).coerceIn(
+                EFFECTIVE_LYRIC_OFFSET_MIN_MS,
+                EFFECTIVE_LYRIC_OFFSET_MAX_MS
+            )
         }
 }
 
@@ -308,7 +318,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private var lastCloudHandoffAtMs: Long = 0L
 
     private fun syncEffectiveLyricOffsetToBridge() {
-        SystemLyricBridge.lyricOffsetMsSnapshot = mutableState.value.effectiveLyricOffsetMs
+        val st = mutableState.value
+        SystemLyricBridge.manualLyricOffsetMsSnapshot = st.lyricOffsetMs
+        SystemLyricBridge.lyricOffsetMsSnapshot = st.effectiveLyricOffsetMs
     }
 
     fun notifyCarLyricOffsetChanged() {
@@ -321,7 +333,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             )
         }
         syncEffectiveLyricOffsetToBridge()
-        updateLyricIndex(currentSmoothPositionMs())
+        val curPos = currentSmoothPositionMs()
+        updateLyricIndex(curPos)
+        SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
         PlaybackService.notifyCarAvrcpLyricDataUpdated()
     }
 
@@ -329,6 +343,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val changed = isAppInForeground != inForeground
         isAppInForeground = inForeground
         if (inForeground && changed) {
+            val btConnectedNow = PlaybackService.refreshBluetoothConnectionSnapshot(getApplication())
+            if (mutableState.value.isBluetoothAudioConnected != btConnectedNow) {
+                mutableState.update { it.copy(isBluetoothAudioConnected = btConnectedNow) }
+                syncEffectiveLyricOffsetToBridge()
+                val curPos = currentSmoothPositionMs()
+                updateLyricIndex(curPos)
+                SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
+            }
             syncPlayer()
             if (mutableState.value.isPlaying || resolveJob?.isActive == true) {
                 startProgressUpdates()
@@ -703,7 +725,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                         )
                     }
                     syncEffectiveLyricOffsetToBridge()
-                    updateLyricIndex(currentSmoothPositionMs())
+                    val curPos = currentSmoothPositionMs()
+                    updateLyricIndex(curPos)
+                    SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
                     PlaybackService.notifyCarAvrcpLyricDataUpdated()
                 }
             }
@@ -827,9 +851,17 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 if (mutableState.value.isBluetoothAudioConnected != btConnected) {
                     mutableState.update { it.copy(isBluetoothAudioConnected = btConnected) }
                     syncEffectiveLyricOffsetToBridge()
-                    updateLyricIndex(currentSmoothPositionMs())
+                    val curPos = currentSmoothPositionMs()
+                    updateLyricIndex(curPos)
+                    SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
                 }
             }
+        }
+        // 立即回补同步一次蓝牙音频路由状态，消除冷启动时 Service 先于/晚于 ViewModel 初始化的竞态窗口
+        val initialBtConnected = PlaybackService.refreshBluetoothConnectionSnapshot(context)
+        if (mutableState.value.isBluetoothAudioConnected != initialBtConnected) {
+            mutableState.update { it.copy(isBluetoothAudioConnected = initialBtConnected) }
+            syncEffectiveLyricOffsetToBridge()
         }
         viewModelScope.launch {
             PlaybackService.sleepTimerState.collect { svcSleep ->
@@ -881,6 +913,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                                 bluetoothEnabled = st.autoPlayOnBluetoothConnect
                             )
                             PlaybackService.updateKeepPlayingOnTaskRemoved(st.keepPlayingOnTaskRemoved)
+                            val btConnectedOnBind = PlaybackService.refreshBluetoothConnectionSnapshot(context)
+                            if (mutableState.value.isBluetoothAudioConnected != btConnectedOnBind) {
+                                mutableState.update { it.copy(isBluetoothAudioConnected = btConnectedOnBind) }
+                                syncEffectiveLyricOffsetToBridge()
+                            }
                             syncPlayer()
                             startProgressUpdates()
                             if (!hasTriggeredStartupAutoPlay && st.autoPlayOnStartup && st.currentSong != null && !player.isPlaying) {
@@ -1055,7 +1092,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val savedBlurEnabled = prefs.getBoolean("lyric_blur_enabled", true)
         val savedBlurIntensity = prefs.getFloat("lyric_blur_intensity", 1.0f).coerceIn(0.3f, 2.0f)
         val savedLineSpacing = prefs.getFloat("lyric_line_spacing", 14f).coerceIn(6f, 26f)
-        val savedLyricOffset = prefs.getLong("lyric_offset_ms", 0L).coerceIn(-5000L, 5000L)
+        val savedLyricOffset = prefs.getLong("lyric_offset_ms", 0L)
+            .coerceIn(MANUAL_LYRIC_OFFSET_MIN_MS, MANUAL_LYRIC_OFFSET_MAX_MS)
         val savedHighlightTheme = runCatching {
             LyricHighlightTheme.valueOf(
                 prefs.getString("lyric_highlight_theme", LyricHighlightTheme.ICE_BLUE.name)
@@ -1095,7 +1133,8 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val savedAutoPlayWired = prefs.getBoolean("auto_play_on_wired_connect", true)
         val savedAutoPlayBt = prefs.getBoolean("auto_play_on_bluetooth_connect", true)
         val savedBtLyricOffsetEnabled = prefs.getBoolean("bluetooth_lyric_offset_enabled", false)
-        val savedBtLyricOffsetMs = prefs.getLong("bluetooth_lyric_offset_ms", -200L).coerceIn(-1000L, 1000L)
+        val savedBtLyricOffsetMs = prefs.getLong("bluetooth_lyric_offset_ms", -200L)
+            .coerceIn(BLUETOOTH_LYRIC_OFFSET_MIN_MS, BLUETOOTH_LYRIC_OFFSET_MAX_MS)
         val savedKeepPlayingTaskRemoved = prefs.getBoolean("keep_playing_on_task_removed", true)
 
         PlaybackService.updateAudioFocusMode(savedAudioFocusMode)
@@ -2389,10 +2428,12 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun setLyricOffsetMs(offsetMs: Long) {
-        val clamped = offsetMs.coerceIn(-5000L, 5000L)
+        val clamped = offsetMs.coerceIn(MANUAL_LYRIC_OFFSET_MIN_MS, MANUAL_LYRIC_OFFSET_MAX_MS)
         mutableState.value = mutableState.value.copy(lyricOffsetMs = clamped)
         syncEffectiveLyricOffsetToBridge()
-        updateLyricIndex(currentSmoothPositionMs())
+        val curPos = currentSmoothPositionMs()
+        updateLyricIndex(curPos)
+        SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
         PlaybackService.notifyCarAvrcpLyricDataUpdated()
         persistPlaybackStateAsync()
     }
@@ -2526,15 +2567,19 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun setBluetoothLyricOffsetEnabled(enabled: Boolean) {
         mutableState.value = mutableState.value.copy(bluetoothLyricOffsetEnabled = enabled)
         syncEffectiveLyricOffsetToBridge()
-        updateLyricIndex(currentSmoothPositionMs())
+        val curPos = currentSmoothPositionMs()
+        updateLyricIndex(curPos)
+        SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
         persistPlaybackStateAsync()
     }
 
     fun setBluetoothLyricOffsetMs(offsetMs: Long) {
-        val clamped = offsetMs.coerceIn(-1000L, 1000L)
+        val clamped = offsetMs.coerceIn(BLUETOOTH_LYRIC_OFFSET_MIN_MS, BLUETOOTH_LYRIC_OFFSET_MAX_MS)
         mutableState.value = mutableState.value.copy(bluetoothLyricOffsetMs = clamped)
         syncEffectiveLyricOffsetToBridge()
-        updateLyricIndex(currentSmoothPositionMs())
+        val curPos = currentSmoothPositionMs()
+        updateLyricIndex(curPos)
+        SystemLyricBridge.onEffectiveLyricOffsetUpdated(curPos)
         persistPlaybackStateAsync()
     }
 
