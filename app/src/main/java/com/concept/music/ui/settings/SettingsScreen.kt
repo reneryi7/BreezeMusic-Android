@@ -192,7 +192,7 @@ enum class SettingsCategory(
 ) {
     APPEARANCE(
         title = "外观与播放样式",
-        subtitle = "深浅主题 · 唱片样式 · 动态背景"
+        subtitle = "深浅主题 · 唱片样式 · 桌面小组件"
     ),
     AUDIO_QUALITY(
         title = "音质与音效",
@@ -1260,6 +1260,10 @@ fun SettingsScreen(
                                             onCheckedChange = { viewModel.setDynamicCoverAccentEnabled(it) }
                                         )
                                     }
+                                }
+
+                                item {
+                                    SettingsWidgetStudioSection(viewModel = viewModel)
                                 }
 
                                 item {

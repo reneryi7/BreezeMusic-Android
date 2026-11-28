@@ -39,6 +39,7 @@ class ConceptMusicApp : Application(), ImageLoaderFactory {
             runCatching { AmbientSoundManager.init(appCtx) }
             runCatching { FocusPodManager.init(appCtx) }
             runCatching { VipGuardianManager.init(appCtx) }
+            runCatching { com.concept.music.widget.BreezeWidgetPrefs.init(appCtx) }
         }
     }
 

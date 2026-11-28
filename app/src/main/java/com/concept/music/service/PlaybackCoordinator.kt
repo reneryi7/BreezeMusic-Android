@@ -90,12 +90,21 @@ object PlaybackCoordinator {
             putInt("saved_current_index", idx)
             putLong("saved_position_ms", 0L)
         }
-        ConceptMusicWidgetUpdater.updateState(
+        val next1 = if (queue.size > 1) queue[(idx + 1) % queue.size].takeIf { it.id != resolvedSong.id } else null
+        val next2 = if (queue.size > 2) queue[(idx + 2) % queue.size].takeIf { it.id != resolvedSong.id && it.id != next1?.id } else null
+        val likedList = runCatching { VipManager.discoverCache.getLikedSongs(userScopeKey.takeIf { it != "guest" }) }.getOrDefault(emptyList())
+        val isLikedNow = likedList.any { com.concept.music.data.repository.isSameMusicTrack(it, resolvedSong) } || resolvedSong.isFavorite
+        ConceptMusicWidgetUpdater.updateFromSong(
             context = appCtx,
-            songTitle = resolvedSong.title,
-            artist = resolvedSong.artist,
+            song = resolvedSong,
+            nextSong1 = next1,
+            nextSong2 = next2,
             isPlaying = true,
-            lyricLine = ""
+            isFavorite = isLikedNow,
+            playMode = playMode,
+            positionMs = 0L,
+            durationMs = resolvedSong.durationMs,
+            clearLyrics = true
         )
         SystemLyricBridge.updatePlaybackSnapshot(
             song = resolvedSong,
@@ -434,12 +443,21 @@ object PlaybackCoordinator {
                     }
                 }
                 AmbientSoundManager.onMusicPlayStateChanged(true)
-                ConceptMusicWidgetUpdater.updateState(
+                val next1 = if (queue.size > 1) queue[(targetIdx + 1) % queue.size].takeIf { it.id != targetSong.id } else null
+                val next2 = if (queue.size > 2) queue[(targetIdx + 2) % queue.size].takeIf { it.id != targetSong.id && it.id != next1?.id } else null
+                val likedList = runCatching { VipManager.discoverCache.getLikedSongs(userScopeKey.takeIf { it != "guest" }) }.getOrDefault(emptyList())
+                val isLikedNow = likedList.any { com.concept.music.data.repository.isSameMusicTrack(it, targetSong) } || targetSong.isFavorite
+                ConceptMusicWidgetUpdater.updateFromSong(
                     context = appCtx,
-                    songTitle = targetSong.title,
-                    artist = targetSong.artist,
+                    song = targetSong,
+                    nextSong1 = next1,
+                    nextSong2 = next2,
                     isPlaying = true,
-                    lyricLine = ""
+                    isFavorite = isLikedNow,
+                    playMode = playMode,
+                    positionMs = 0L,
+                    durationMs = targetSong.durationMs,
+                    clearLyrics = true
                 )
                 SystemLyricBridge.updatePlaybackSnapshot(
                     song = targetSong,
@@ -467,5 +485,69 @@ object PlaybackCoordinator {
             }
         }
         return true
+    }
+
+    /**
+     * 后台桌面小组件红心喜欢/取消喜欢兜底通道（当 App UI 未在前台时直接与云端「我喜欢」歌单同步）
+     */
+    fun handleToggleFavoriteFromWidget(context: Context) {
+        val appCtx = context.applicationContext
+        mainScope.launch(Dispatchers.IO) {
+            runCatching {
+                VipManager.initialize(appCtx)
+                val targetSong = SystemLyricBridge.currentSongSnapshot
+                    ?: cachedQueue.getOrNull(cachedIndex)
+                    ?: return@launch
+                val uid = VipManager.accounts.state.value.currentId ?: return@launch
+                if (VipManager.accounts.state.value.auth != com.concept.music.data.kugou.AuthState.READY) {
+                    return@launch
+                }
+                val likedPl = VipManager.music.userPlaylists().firstOrNull { it.isLiked } ?: return@launch
+                if (likedPl.listId <= 0L) return@launch
+                val cachedLiked = VipManager.discoverCache.getLikedSongs(uid)
+                val currentlyLiked = cachedLiked.any { com.concept.music.data.repository.isSameMusicTrack(it, targetSong) }
+                if (currentlyLiked) {
+                    val matched = cachedLiked.firstOrNull { com.concept.music.data.repository.isSameMusicTrack(it, targetSong) } ?: targetSong
+                    val ok = runCatching { VipManager.music.removeSongFromPlaylist(likedPl.listId, matched) }.getOrDefault(false)
+                    if (ok) {
+                        val updated = cachedLiked.filterNot { com.concept.music.data.repository.isSameMusicTrack(it, targetSong) }
+                        VipManager.discoverCache.saveLikedSongs(uid, updated)
+                        ConceptMusicWidgetUpdater.updateState(appCtx, isFavorite = false)
+                    }
+                } else {
+                    val ok = runCatching { VipManager.music.addSongToPlaylist(likedPl.listId, targetSong) }.getOrDefault(false)
+                    if (ok) {
+                        val added = targetSong.copy(isFavorite = true)
+                        VipManager.discoverCache.saveLikedSongs(uid, listOf(added) + cachedLiked)
+                        ConceptMusicWidgetUpdater.updateState(appCtx, isFavorite = true)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 后台桌面小组件切换播放模式兜底通道（4×4 沉浸台）
+     */
+    fun handleCyclePlayModeFromWidget(context: Context, player: Player?) {
+        val appCtx = context.applicationContext
+        val prefs = appCtx.getSharedPreferences("concept_player_prefs", Context.MODE_PRIVATE)
+        val curMode = runCatching {
+            PlayMode.valueOf(prefs.getString("play_mode", cachedPlayModeName) ?: cachedPlayModeName)
+        }.getOrDefault(PlayMode.REPEAT_ALL)
+        val nextMode = when (curMode) {
+            PlayMode.REPEAT_ALL -> PlayMode.REPEAT_ONE
+            PlayMode.REPEAT_ONE -> PlayMode.SHUFFLE
+            PlayMode.SHUFFLE -> PlayMode.REPEAT_ALL
+        }
+        cachedPlayModeName = nextMode.name
+        persistAsync(prefs) {
+            putString("play_mode", nextMode.name)
+        }
+        mainScope.launch(Dispatchers.Main) {
+            player?.repeatMode = if (nextMode == PlayMode.REPEAT_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        }
+        SystemLyricBridge.syncFromAppSettings(playMode = nextMode)
+        ConceptMusicWidgetUpdater.updateState(appCtx, playMode = nextMode)
     }
 }

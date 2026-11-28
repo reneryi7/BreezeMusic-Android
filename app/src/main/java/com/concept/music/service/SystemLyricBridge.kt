@@ -891,11 +891,17 @@ object SystemLyricBridge {
         lastLineIndex = lineIndex
 
         val cleanText = line.text.trim()
+        val lines = currentLyricSnapshot.lines
+        val prevText = lines.getOrNull(lineIndex - 1)?.text?.trim().orEmpty()
+        val nextText = lines.getOrNull(lineIndex + 1)?.text?.trim().orEmpty()
+            .ifBlank { line.translation?.trim().orEmpty() }
         ConceptMusicWidgetUpdater.updateState(
             context = context,
             songTitle = song.title,
             artist = song.artist,
+            prevLyricLine = prevText,
             lyricLine = cleanText,
+            nextLyricLine = nextText,
             isPlaying = isPlaying
         )
     }

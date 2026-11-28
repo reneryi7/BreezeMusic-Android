@@ -765,6 +765,9 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 }
             }
         }
+        ConceptMusicWidgetUpdater.onCyclePlayMode = {
+            viewModelScope.launch(Dispatchers.Main) { cyclePlayMode() }
+        }
 
         SystemLyricBridge.onTogglePlayCallback = {
             viewModelScope.launch(Dispatchers.Main) { togglePlayPause() }
@@ -1284,11 +1287,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     }
                     runCatching { VipManager.music.prewarmSongsPlayback(warmList, savedQuality, maxCount = 2) }
                 }
-                ConceptMusicWidgetUpdater.updateState(
-                    context = getApplication(),
-                    songTitle = restoredSong.title,
-                    artist = restoredSong.artist,
-                    isPlaying = false
+                pushWidgetSongSnapshot(
+                    song = restoredSong,
+                    queue = sanitizedQueue,
+                    currentIndex = savedIndex,
+                    isPlaying = false,
+                    positionMs = initialPos,
+                    durationMs = initialDur,
+                    clearLyrics = false
                 )
                 if (!hasTriggeredStartupAutoPlay && savedAutoPlay) {
                     withContext(Dispatchers.Main) {
@@ -1486,12 +1492,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         loadComments(isRefresh = true)
         persistPlaybackStateAsync()
         lastWidgetSongId = song.id
-        ConceptMusicWidgetUpdater.updateState(
-            context = getApplication(),
-            songTitle = song.title,
-            artist = song.artist,
-            lyricLine = "",
-            isPlaying = true
+        pushWidgetSongSnapshot(
+            song = song,
+            queue = mutableState.value.playlistQueue,
+            currentIndex = mutableState.value.currentIndex,
+            isPlaying = true,
+            positionMs = seekToPositionMs,
+            durationMs = song.durationMs,
+            clearLyrics = true
         )
         PlaybackService.clearViewModelTrackEndStopAck()
 
@@ -1882,6 +1890,10 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
         mutableState.value = mutableState.value.copy(playMode = nextMode)
         SystemLyricBridge.syncFromAppSettings(playMode = nextMode)
+        ConceptMusicWidgetUpdater.updateState(
+            context = getApplication(),
+            playMode = nextMode
+        )
         persistPlaybackStateAsync()
         activePlayer?.repeatMode = if (nextMode == PlayMode.REPEAT_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         if (nextMode == PlayMode.REPEAT_ONE) {
@@ -2105,12 +2117,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             activeQueueId = ""
         )
         lastWidgetSongId = ""
-        ConceptMusicWidgetUpdater.updateState(
+        ConceptMusicWidgetUpdater.updateFromSong(
             context = getApplication(),
-            songTitle = "",
-            artist = "",
-            lyricLine = "",
-            isPlaying = false
+            song = null,
+            isPlaying = false,
+            clearLyrics = true
         )
         persistPlaybackStateAsync()
     }
@@ -3301,12 +3312,21 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
         if (song != null && (st.isPlaying != isPlayingNow || songChangedForWidget)) {
             lastWidgetSongId = song.id
-            ConceptMusicWidgetUpdater.updateState(
+            pushWidgetSongSnapshot(
+                song = song,
+                queue = st.playlistQueue,
+                currentIndex = st.currentIndex,
+                isPlaying = isPlayingNow,
+                positionMs = pos,
+                durationMs = dur,
+                clearLyrics = songChangedForWidget
+            )
+        } else if (song != null && isPlayingNow && dur > 0L) {
+            ConceptMusicWidgetUpdater.updateProgressThrottled(
                 context = getApplication(),
-                songTitle = song.title,
-                artist = song.artist,
-                lyricLine = if (songChangedForWidget) "" else null,
-                isPlaying = isPlayingNow
+                positionMs = pos,
+                durationMs = dur,
+                isPlaying = true
             )
         }
 
@@ -3509,6 +3529,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         climaxFadeInJob?.cancel()
         playPauseFadeJob?.cancel()
         ConceptMusicWidgetUpdater.onWidgetCommand = null
+        ConceptMusicWidgetUpdater.onCyclePlayMode = null
         PlaybackCoordinator.onTogglePlayDelegate = null
         PlaybackCoordinator.onExplicitPlayDelegate = null
         PlaybackCoordinator.onExplicitPauseDelegate = null
@@ -3527,5 +3548,41 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         activePlayer?.removeListener(listener)
         controllerFuture?.let(MediaController::releaseFuture)
         super.onCleared()
+    }
+
+    private fun pushWidgetSongSnapshot(
+        song: Song,
+        queue: List<Song>,
+        currentIndex: Int,
+        isPlaying: Boolean,
+        positionMs: Long,
+        durationMs: Long,
+        clearLyrics: Boolean
+    ) {
+        val next1 = if (queue.size > 1 && currentIndex in queue.indices) {
+            queue[(currentIndex + 1) % queue.size].takeIf { it.id != song.id }
+        } else null
+        val next2 = if (queue.size > 2 && currentIndex in queue.indices) {
+            queue[(currentIndex + 2) % queue.size].takeIf { it.id != song.id && it.id != next1?.id }
+        } else null
+        val uid = runCatching { VipManager.accounts.state.value.currentId }.getOrNull()
+        val cachedLiked = runCatching { VipManager.discoverCache.getLikedSongs(uid) }.getOrDefault(emptyList())
+        val isLikedNow = if (cachedLiked.isNotEmpty()) {
+            cachedLiked.any { com.concept.music.data.repository.isSameMusicTrack(it, song) }
+        } else {
+            song.isFavorite
+        }
+        ConceptMusicWidgetUpdater.updateFromSong(
+            context = getApplication(),
+            song = song,
+            nextSong1 = next1,
+            nextSong2 = next2,
+            isPlaying = isPlaying,
+            isFavorite = isLikedNow,
+            playMode = mutableState.value.playMode,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            clearLyrics = clearLyrics
+        )
     }
 }

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="72dp"
+    android:viewportWidth="96"
+    android:viewportHeight="72">
+    <!-- 探出式黑胶唱盘预览 -->
+    <path
+        android:fillColor="#0E121B"
+        android:pathData="M62,36m-27,0a27,27 0,1 1,54 0a27,27 0,1 1,-54 0" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="0.9"
+        android:strokeColor="#28FFFFFF"
+        android:pathData="M62,36m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="0.9"
+        android:strokeColor="#22FFFFFF"
+        android:pathData="M62,36m-16,0a16,16 0,1 1,32 0a16,16 0,1 1,-32 0" />
+    <path
+        android:fillColor="#2B8CFF"
+        android:pathData="M62,36m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0" />
+    <path
+        android:fillColor="#141C2B"
+        android:pathData="M62,36m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+    <!-- 方形圆角封套预览 -->
+    <path
+        android:fillColor="#1F4E8C"
+        android:pathData="M18,6 L54,6 Q66,6 66,18 L66,54 Q66,66 54,66 L18,66 Q6,66 6,54 L6,18 Q6,6 18,6 Z" />
+    <path
+        android:fillColor="#00C4A7"
+        android:fillAlpha="0.35"
+        android:pathData="M18,6 L54,6 Q66,6 66,18 L66,34 Q42,46 6,36 L6,18 Q6,6 18,6 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.92"
+        android:pathData="M33,44.5a5,5 0,1 1,-0.1 -10a5,5 0,0 1,0.1 10z M36,39.5 L36,24.5 L45,27.5 L45,32 L39,30 L39,39.5 Z" />
+</vector>

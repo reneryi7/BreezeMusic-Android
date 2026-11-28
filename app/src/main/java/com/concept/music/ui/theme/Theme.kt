@@ -258,6 +258,7 @@ object ThemeManager {
         _themeMode.value = mode
         prefs?.edit()?.putString("theme_mode", mode.name)?.apply()
         syncSystemSplashAndNightMode(context, mode, forcePersist = true)
+        runCatching { com.concept.music.widget.BreezeWidgetManager.onAppThemeChanged(context) }
     }
 
     fun setDynamicColor(enabled: Boolean) {

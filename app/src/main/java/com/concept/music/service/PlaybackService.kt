@@ -2063,6 +2063,7 @@ class PlaybackService : MediaLibraryService() {
                     if (player?.isPlaying == true && SystemLyricBridge.state.value.floatingCapsuleEnabled) {
                         startBackgroundDesktopLyricProgressTicker()
                     }
+                    com.concept.music.widget.BreezeWidgetManager.onScreenInteractiveResumed(applicationContext)
                 }
             }
         }
@@ -2199,6 +2200,8 @@ class PlaybackService : MediaLibraryService() {
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_TOGGLE_PLAY,
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_NEXT,
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_PREV,
+                ConceptMusicWidgetUpdater.ACTION_WIDGET_TOGGLE_FAVORITE,
+                ConceptMusicWidgetUpdater.ACTION_WIDGET_CYCLE_PLAY_MODE,
                 ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC,
                 ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC_LOCK
             )
@@ -2216,6 +2219,12 @@ class PlaybackService : MediaLibraryService() {
                 }
                 ConceptMusicWidgetUpdater.ACTION_WIDGET_PREV -> {
                     PlaybackCoordinator.handleSkipToPrevious(applicationContext, player)
+                }
+                ConceptMusicWidgetUpdater.ACTION_WIDGET_TOGGLE_FAVORITE -> {
+                    PlaybackCoordinator.handleToggleFavoriteFromWidget(applicationContext)
+                }
+                ConceptMusicWidgetUpdater.ACTION_WIDGET_CYCLE_PLAY_MODE -> {
+                    PlaybackCoordinator.handleCyclePlayModeFromWidget(applicationContext, player)
                 }
                 ACTION_CUSTOM_TOGGLE_DESKTOP_LYRIC -> {
                     SystemLyricBridge.handleNotificationToggleDesktopLyric(applicationContext)

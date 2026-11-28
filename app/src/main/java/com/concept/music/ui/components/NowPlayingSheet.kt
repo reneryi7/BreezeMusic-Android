@@ -3056,6 +3056,214 @@ internal val coverPaletteMemoryCache: MutableMap<String, CoverExtractedPalette> 
         }
     )
 
+internal fun extractCoverMeshColorsFromPixels(
+    pixels: IntArray,
+    width: Int,
+    height: Int
+): CoverExtractedPalette? {
+    if (width <= 0 || height <= 0 || pixels.size < width * height) return null
+
+    var r1 = 0L; var g1 = 0L; var b1 = 0L; var count1 = 0L
+    var r2 = 0L; var g2 = 0L; var b2 = 0L; var count2 = 0L
+    var r3 = 0L; var g3 = 0L; var b3 = 0L; var count3 = 0L
+
+    // 24-bin hue histogram for 3-color vivid accent extraction
+    val hueWeights = FloatArray(24)
+    val hueSatSum = FloatArray(24)
+    val hueValSum = FloatArray(24)
+
+    fun rgbToHsvPure(r: Int, g: Int, b: Int, out: FloatArray) {
+        val rf = r / 255f
+        val gf = g / 255f
+        val bf = b / 255f
+        val max = maxOf(rf, gf, bf)
+        val minVal = minOf(rf, gf, bf)
+        val delta = max - minVal
+        val hRaw = when {
+            delta <= 1e-5f -> 0f
+            max == rf -> 60f * (((gf - bf) / delta) % 6f)
+            max == gf -> 60f * (((bf - rf) / delta) + 2f)
+            else -> 60f * (((rf - gf) / delta) + 4f)
+        }
+        out[0] = if (hRaw < 0f) hRaw + 360f else hRaw
+        out[1] = if (max <= 1e-5f) 0f else delta / max
+        out[2] = max
+    }
+
+    fun hsvToComposePure(h: Float, s: Float, v: Float): Color {
+        val cleanH = ((h % 360f) + 360f) % 360f
+        val cleanS = s.coerceIn(0f, 1f)
+        val cleanV = v.coerceIn(0f, 1f)
+        val c = cleanV * cleanS
+        val x = c * (1f - abs(((cleanH / 60f) % 2f) - 1f))
+        val m = cleanV - c
+        val sector = (cleanH / 60f).toInt().coerceIn(0, 5)
+        val (r1f, g1f, b1f) = when (sector) {
+            0 -> Triple(c, x, 0f)
+            1 -> Triple(x, c, 0f)
+            2 -> Triple(0f, c, x)
+            3 -> Triple(0f, x, c)
+            4 -> Triple(x, 0f, c)
+            else -> Triple(c, 0f, x)
+        }
+        return Color(
+            red = (r1f + m).coerceIn(0f, 1f),
+            green = (g1f + m).coerceIn(0f, 1f),
+            blue = (b1f + m).coerceIn(0f, 1f),
+            alpha = 1f
+        )
+    }
+
+    val hsv = FloatArray(3)
+    for (y in 0 until height) {
+        val rowOffset = y * width
+        for (x in 0 until width) {
+            val pixel = pixels[rowOffset + x]
+            val r = (pixel ushr 16) and 0xFF
+            val g = (pixel ushr 8) and 0xFF
+            val b = pixel and 0xFF
+            when {
+                x + y < (width + height) / 3 -> {
+                    r1 += r; g1 += g; b1 += b; count1++
+                }
+                x + y < ((width + height) * 2) / 3 -> {
+                    r2 += r; g2 += g; b2 += b; count2++
+                }
+                else -> {
+                    r3 += r; g3 += g; b3 += b; count3++
+                }
+            }
+
+            rgbToHsvPure(r, g, b, hsv)
+            val hue = hsv[0]
+            val sat = hsv[1]
+            val v = hsv[2]
+            if (sat >= 0.16f && v in 0.18f..0.97f) {
+                val bin = ((hue / 15f).toInt()).coerceIn(0, 23)
+                val centerBias = 1f - 0.28f * (abs(x - width * 0.5f) / (width * 0.5f).coerceAtLeast(1f))
+                val weight = (sat * sat + 0.12f) * (v * 0.85f + 0.15f) * centerBias
+                hueWeights[bin] += weight
+                hueSatSum[bin] += sat * weight
+                hueValSum[bin] += v * weight
+            }
+        }
+    }
+
+    fun normalizeForDarkMesh(rAvg: Int, gAvg: Int, bAvg: Int, hueShift: Float): Color {
+        val tmpHsv = FloatArray(3)
+        rgbToHsvPure(rAvg, gAvg, bAvg, tmpHsv)
+        val h = (tmpHsv[0] + hueShift + 360f) % 360f
+        val s = tmpHsv[1].coerceIn(0.38f, 0.74f)
+        val v = tmpHsv[2].coerceIn(0.15f, 0.28f)
+        return hsvToComposePure(h, s, v)
+    }
+
+    val c1 = if (count1 > 0) {
+        normalizeForDarkMesh((r1 / count1).toInt(), (g1 / count1).toInt(), (b1 / count1).toInt(), 0f)
+    } else Color(0xFF1A2C38)
+
+    val c2 = if (count2 > 0) {
+        normalizeForDarkMesh((r2 / count2).toInt(), (g2 / count2).toInt(), (b2 / count2).toInt(), 24f)
+    } else Color(0xFF1B1932)
+
+    val c3 = if (count3 > 0) {
+        normalizeForDarkMesh((r3 / count3).toInt(), (g3 / count3).toInt(), (b3 / count3).toInt(), -28f)
+    } else Color(0xFF162238)
+
+    var bestBin = -1
+    var bestWeight = 0f
+    for (i in 0 until 24) {
+        if (hueWeights[i] > bestWeight) {
+            bestWeight = hueWeights[i]
+            bestBin = i
+        }
+    }
+
+    val dominantAccent: Color
+    val secondaryAccent: Color
+    val tertiaryAccent: Color
+    if (bestBin != -1) {
+        val domHue = (bestBin * 15f + 7.5f) % 360f
+        val domSat = (hueSatSum[bestBin] / hueWeights[bestBin]).coerceIn(0.58f, 0.88f)
+        val domVal = (hueValSum[bestBin] / hueWeights[bestBin]).coerceIn(0.82f, 0.96f)
+        dominantAccent = hsvToComposePure(domHue, domSat, domVal)
+
+        var secondBin = -1
+        var secondWeight = 0f
+        for (i in 0 until 24) {
+            val dist = min(abs(i - bestBin), 24 - abs(i - bestBin))
+            if (dist >= 2 && hueWeights[i] > secondWeight) {
+                secondWeight = hueWeights[i]
+                secondBin = i
+            }
+        }
+        val secHue = if (secondBin != -1 && secondWeight > bestWeight * 0.16f) {
+            (secondBin * 15f + 7.5f) % 360f
+        } else {
+            (domHue + 36f) % 360f
+        }
+        val secSat = if (secondBin != -1 && hueWeights[secondBin] > 0f) {
+            (hueSatSum[secondBin] / hueWeights[secondBin]).coerceIn(0.55f, 0.90f)
+        } else (domSat * 0.95f).coerceIn(0.55f, 0.90f)
+        secondaryAccent = hsvToComposePure(secHue, secSat, 0.95f)
+
+        var thirdBin = -1
+        var thirdWeight = 0f
+        for (i in 0 until 24) {
+            val dist1 = min(abs(i - bestBin), 24 - abs(i - bestBin))
+            val dist2 = if (secondBin != -1) min(abs(i - secondBin), 24 - abs(i - secondBin)) else 12
+            if (dist1 >= 2 && dist2 >= 2 && hueWeights[i] > thirdWeight) {
+                thirdWeight = hueWeights[i]
+                thirdBin = i
+            }
+        }
+        val terHue = if (thirdBin != -1 && thirdWeight > bestWeight * 0.10f) {
+            (thirdBin * 15f + 7.5f) % 360f
+        } else {
+            (domHue + 288f) % 360f
+        }
+        val terSat = if (thirdBin != -1 && hueWeights[thirdBin] > 0f) {
+            (hueSatSum[thirdBin] / hueWeights[thirdBin]).coerceIn(0.54f, 0.88f)
+        } else (domSat * 0.92f).coerceIn(0.54f, 0.88f)
+        tertiaryAccent = hsvToComposePure(terHue, terSat, 0.94f)
+    } else {
+        dominantAccent = ConceptPrimary
+        secondaryAccent = ConceptCyanAccent
+        tertiaryAccent = ConceptVioletAccent
+    }
+
+    return CoverExtractedPalette(
+        meshPrimary = c1,
+        meshSecondary = c2,
+        meshTertiary = c3,
+        dominantAccent = dominantAccent,
+        secondaryAccent = secondaryAccent,
+        tertiaryAccent = tertiaryAccent
+    )
+}
+
+internal fun extractCoverMeshColorsFromBitmap(bitmap: Bitmap): CoverExtractedPalette? {
+    val srcW = bitmap.width
+    val srcH = bitmap.height
+    if (srcW <= 0 || srcH <= 0) return null
+    val sampleBmp = if (srcW > 48 || srcH > 48) {
+        Bitmap.createScaledBitmap(bitmap, 48, 48, true)
+    } else {
+        bitmap
+    }
+    return try {
+        val w = sampleBmp.width
+        val h = sampleBmp.height
+        val pixels = IntArray(w * h)
+        sampleBmp.getPixels(pixels, 0, w, 0, 0, w, h)
+        extractCoverMeshColorsFromPixels(pixels, w, h)
+    } finally {
+        if (sampleBmp !== bitmap && !sampleBmp.isRecycled) {
+            sampleBmp.recycle()
+        }
+    }
+}
+
 internal suspend fun extractCoverMeshColors(
     context: Context,
     coverUrl: String
@@ -3073,145 +3281,7 @@ internal suspend fun extractCoverMeshColors(
         val result = context.imageLoader.execute(request)
         val bitmap = ((result as? SuccessResult)?.drawable as? BitmapDrawable)?.bitmap
             ?: return null
-
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width <= 0 || height <= 0) return null
-
-        var r1 = 0L; var g1 = 0L; var b1 = 0L; var count1 = 0L
-        var r2 = 0L; var g2 = 0L; var b2 = 0L; var count2 = 0L
-        var r3 = 0L; var g3 = 0L; var b3 = 0L; var count3 = 0L
-
-        // 24-bin hue histogram for 3-color vivid accent extraction
-        val hueWeights = FloatArray(24)
-        val hueSatSum = FloatArray(24)
-        val hueValSum = FloatArray(24)
-        val hsv = FloatArray(3)
-
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val pixel = bitmap.getPixel(x, y)
-                val r = android.graphics.Color.red(pixel)
-                val g = android.graphics.Color.green(pixel)
-                val b = android.graphics.Color.blue(pixel)
-                when {
-                    x + y < (width + height) / 3 -> {
-                        r1 += r; g1 += g; b1 += b; count1++
-                    }
-                    x + y < ((width + height) * 2) / 3 -> {
-                        r2 += r; g2 += g; b2 += b; count2++
-                    }
-                    else -> {
-                        r3 += r; g3 += g; b3 += b; count3++
-                    }
-                }
-
-                android.graphics.Color.RGBToHSV(r, g, b, hsv)
-                val hue = hsv[0]
-                val sat = hsv[1]
-                val v = hsv[2]
-                if (sat >= 0.16f && v in 0.18f..0.97f) {
-                    val bin = ((hue / 15f).toInt()).coerceIn(0, 23)
-                    val centerBias = 1f - 0.28f * (abs(x - width * 0.5f) / (width * 0.5f).coerceAtLeast(1f))
-                    val weight = (sat * sat + 0.12f) * (v * 0.85f + 0.15f) * centerBias
-                    hueWeights[bin] += weight
-                    hueSatSum[bin] += sat * weight
-                    hueValSum[bin] += v * weight
-                }
-            }
-        }
-
-        fun normalizeForDarkMesh(rAvg: Int, gAvg: Int, bAvg: Int, hueShift: Float): Color {
-            val tmpHsv = FloatArray(3)
-            android.graphics.Color.RGBToHSV(rAvg, gAvg, bAvg, tmpHsv)
-            tmpHsv[0] = (tmpHsv[0] + hueShift + 360f) % 360f
-            tmpHsv[1] = tmpHsv[1].coerceIn(0.38f, 0.74f)
-            tmpHsv[2] = tmpHsv[2].coerceIn(0.15f, 0.28f)
-            return Color(android.graphics.Color.HSVToColor(tmpHsv))
-        }
-
-        val c1 = if (count1 > 0) {
-            normalizeForDarkMesh((r1 / count1).toInt(), (g1 / count1).toInt(), (b1 / count1).toInt(), 0f)
-        } else Color(0xFF1A2C38)
-
-        val c2 = if (count2 > 0) {
-            normalizeForDarkMesh((r2 / count2).toInt(), (g2 / count2).toInt(), (b2 / count2).toInt(), 24f)
-        } else Color(0xFF1B1932)
-
-        val c3 = if (count3 > 0) {
-            normalizeForDarkMesh((r3 / count3).toInt(), (g3 / count3).toInt(), (b3 / count3).toInt(), -28f)
-        } else Color(0xFF162238)
-
-        var bestBin = -1
-        var bestWeight = 0f
-        for (i in 0 until 24) {
-            if (hueWeights[i] > bestWeight) {
-                bestWeight = hueWeights[i]
-                bestBin = i
-            }
-        }
-
-        val dominantAccent: Color
-        val secondaryAccent: Color
-        val tertiaryAccent: Color
-        if (bestBin != -1) {
-            val domHue = (bestBin * 15f + 7.5f) % 360f
-            val domSat = (hueSatSum[bestBin] / hueWeights[bestBin]).coerceIn(0.58f, 0.88f)
-            val domVal = (hueValSum[bestBin] / hueWeights[bestBin]).coerceIn(0.82f, 0.96f)
-            dominantAccent = Color(android.graphics.Color.HSVToColor(floatArrayOf(domHue, domSat, domVal)))
-
-            var secondBin = -1
-            var secondWeight = 0f
-            for (i in 0 until 24) {
-                val dist = min(abs(i - bestBin), 24 - abs(i - bestBin))
-                if (dist >= 2 && hueWeights[i] > secondWeight) {
-                    secondWeight = hueWeights[i]
-                    secondBin = i
-                }
-            }
-            val secHue = if (secondBin != -1 && secondWeight > bestWeight * 0.16f) {
-                (secondBin * 15f + 7.5f) % 360f
-            } else {
-                (domHue + 36f) % 360f
-            }
-            val secSat = if (secondBin != -1 && hueWeights[secondBin] > 0f) {
-                (hueSatSum[secondBin] / hueWeights[secondBin]).coerceIn(0.55f, 0.90f)
-            } else (domSat * 0.95f).coerceIn(0.55f, 0.90f)
-            secondaryAccent = Color(android.graphics.Color.HSVToColor(floatArrayOf(secHue, secSat, 0.95f)))
-
-            var thirdBin = -1
-            var thirdWeight = 0f
-            for (i in 0 until 24) {
-                val dist1 = min(abs(i - bestBin), 24 - abs(i - bestBin))
-                val dist2 = if (secondBin != -1) min(abs(i - secondBin), 24 - abs(i - secondBin)) else 12
-                if (dist1 >= 2 && dist2 >= 2 && hueWeights[i] > thirdWeight) {
-                    thirdWeight = hueWeights[i]
-                    thirdBin = i
-                }
-            }
-            val terHue = if (thirdBin != -1 && thirdWeight > bestWeight * 0.10f) {
-                (thirdBin * 15f + 7.5f) % 360f
-            } else {
-                (domHue + 288f) % 360f
-            }
-            val terSat = if (thirdBin != -1 && hueWeights[thirdBin] > 0f) {
-                (hueSatSum[thirdBin] / hueWeights[thirdBin]).coerceIn(0.54f, 0.88f)
-            } else (domSat * 0.92f).coerceIn(0.54f, 0.88f)
-            tertiaryAccent = Color(android.graphics.Color.HSVToColor(floatArrayOf(terHue, terSat, 0.94f)))
-        } else {
-            dominantAccent = ConceptPrimary
-            secondaryAccent = ConceptCyanAccent
-            tertiaryAccent = ConceptVioletAccent
-        }
-
-        CoverExtractedPalette(
-            meshPrimary = c1,
-            meshSecondary = c2,
-            meshTertiary = c3,
-            dominantAccent = dominantAccent,
-            secondaryAccent = secondaryAccent,
-            tertiaryAccent = tertiaryAccent
-        ).also { palette ->
+        extractCoverMeshColorsFromBitmap(bitmap)?.also { palette ->
             coverPaletteMemoryCache[coverUrl] = palette
         }
     } catch (_: Exception) {

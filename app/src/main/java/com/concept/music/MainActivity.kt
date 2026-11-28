@@ -114,6 +114,20 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         internal val incomingSharedTextFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+        internal val openNowPlayingRequestFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    }
+
+    private fun handleIncomingWidgetIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        val wantsNowPlaying = runCatching {
+            intent.getBooleanExtra(com.concept.music.service.ConceptMusicWidgetUpdater.EXTRA_OPEN_NOW_PLAYING, false)
+        }.getOrDefault(false)
+        if (wantsNowPlaying && com.concept.music.util.SecurityGuards.verifyInternalIntent(this, intent)) {
+            openNowPlayingRequestFlow.value = System.nanoTime()
+            runCatching {
+                intent.removeExtra(com.concept.music.service.ConceptMusicWidgetUpdater.EXTRA_OPEN_NOW_PLAYING)
+            }
+        }
     }
 
     private fun handleIncomingShareIntent(intent: android.content.Intent?) {
@@ -137,6 +151,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        handleIncomingWidgetIntent(intent)
         handleIncomingShareIntent(intent)
     }
 
@@ -166,6 +181,7 @@ class MainActivity : ComponentActivity() {
         }
         com.concept.music.ui.theme.ThemeManager.syncSystemSplashAndNightMode(this, activeThemeMode)
         super.onCreate(savedInstanceState)
+        handleIncomingWidgetIntent(intent)
         handleIncomingShareIntent(intent)
         // 严格区分手机版安装包 (phone) 与平板版安装包 (tablet)：
         // - 平板版安装包 (BuildConfig.IS_TABLET_FLAVOR == true)：遵循 Android 16 (API 36) 大屏规范，支持全方向自由旋转与分屏多窗口
@@ -344,6 +360,44 @@ fun MainContent(
     val mainScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val incomingIntentShareText by MainActivity.incomingSharedTextFlow.collectAsState()
+    val openNowPlayingRequestToken by MainActivity.openNowPlayingRequestFlow.collectAsState()
+
+    // 0. 响应桌面小组件点击：直达全屏沉浸播放页（支持冷启动等待队列水合后自动滑出）
+    LaunchedEffect(openNowPlayingRequestToken, currentSong) {
+        if (openNowPlayingRequestToken == 0L) return@LaunchedEffect
+        if (currentSong != null) {
+            showNowPlaying = true
+            MainActivity.openNowPlayingRequestFlow.value = 0L
+        } else {
+            kotlinx.coroutines.delay(2200L)
+            if (MainActivity.openNowPlayingRequestFlow.value == openNowPlayingRequestToken) {
+                MainActivity.openNowPlayingRequestFlow.value = 0L
+            }
+        }
+    }
+
+    // 绑定桌面小组件红心喜欢回调，确保前台与「我喜欢」歌单双向实时同步
+    DisposableEffect(musicPlayerViewModel, libraryViewModel, context) {
+        com.concept.music.service.ConceptMusicWidgetUpdater.onToggleFavorite = {
+            val target = musicPlayerViewModel.uiState.value.currentSong
+            if (target != null) {
+                mainScope.launch {
+                    libraryViewModel.toggleFavorite(target) { _, isLikedNow, msg ->
+                        com.concept.music.service.ConceptMusicWidgetUpdater.updateState(
+                            context = context.applicationContext,
+                            isFavorite = isLikedNow
+                        )
+                        if (msg.isNotBlank()) {
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
+        onDispose {
+            com.concept.music.service.ConceptMusicWidgetUpdater.onToggleFavorite = null
+        }
+    }
 
     // 1. 响应系统分享菜单 (ACTION_SEND) 传入的酷狗分享链接
     LaunchedEffect(incomingIntentShareText) {
@@ -1749,6 +1803,34 @@ fun MainContent(
             visible = !showViperEffectOverlay,
             onDecisionApplied = { musicPlayerViewModel.notifyCarLyricOffsetChanged() }
         )
+
+        // 独立隔离状态订阅的桌面小组件红心状态同步叶子组件（避免在 MainContent 根层订阅 likedSongs）
+        IsolatedWidgetFavoriteSyncHost(
+            musicPlayerViewModel = musicPlayerViewModel,
+            libraryViewModel = libraryViewModel
+        )
+    }
+}
+
+@Composable
+private fun IsolatedWidgetFavoriteSyncHost(
+    musicPlayerViewModel: MusicPlayerViewModel,
+    libraryViewModel: LibraryViewModel
+) {
+    val context = LocalContext.current
+    val playerState by musicPlayerViewModel.uiState.collectAsState()
+    val likedSongs by libraryViewModel.likedSongs.collectAsState()
+    val currentSong = playerState.currentSong
+    val isLiked = remember(currentSong?.id, likedSongs) {
+        libraryViewModel.isSongLiked(currentSong, likedSongs)
+    }
+    LaunchedEffect(currentSong?.id, isLiked) {
+        if (currentSong != null) {
+            com.concept.music.service.ConceptMusicWidgetUpdater.updateState(
+                context = context.applicationContext,
+                isFavorite = isLiked
+            )
+        }
     }
 }
 

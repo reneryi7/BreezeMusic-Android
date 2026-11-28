@@ -14,4 +14,19 @@
     <string name="vip_auto_checkin">每日静默自动续期</string>
     <string name="vip_claim_now">立即补领</string>
     <string name="search_hint">搜索音乐、歌手、歌单</string>
+    <string name="widget_label_card_4x2">微风 · 经典黑胶卡 (4×2)</string>
+    <string name="widget_desc_card_4x2">黑胶封套、流光封面与水彩叠层三风格自由切换，支持实时歌词与红心喜欢</string>
+    <string name="widget_label_capsule_4x1">微风 · 灵动胶囊条 (4×1)</string>
+    <string name="widget_desc_capsule_4x1">迷你播放条同源大圆角悬浮胶囊，单行极简播控不占桌面空间</string>
+    <string name="widget_label_square_2x2">微风 · 精致方卡 (2×2)</string>
+    <string name="widget_desc_square_2x2">百搭桌面图标网格的方形艺术封套与饱满播放按钮</string>
+    <string name="widget_label_stage_4x4">微风 · 沉浸歌词台 (4×4)</string>
+    <string name="widget_desc_stage_4x4">手机大屏与平板专属沉浸舞台，三行居中歌词配完整五键控台</string>
+    <string name="widget_idle_subtitle">耳畔微风起 · 轻点开启无损听歌</string>
+    <string name="widget_idle_lyric">轻触封面直达全屏沉浸播放页</string>
+    <string name="widget_cd_favorite">喜欢或取消喜欢</string>
+    <string name="widget_cd_prev">上一首</string>
+    <string name="widget_cd_play_pause">播放或暂停</string>
+    <string name="widget_cd_next">下一首</string>
+    <string name="widget_cd_play_mode">切换播放模式</string>
 </resources>
