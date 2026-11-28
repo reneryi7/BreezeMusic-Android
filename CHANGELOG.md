@@ -10,6 +10,34 @@
 
 ---
 
+## [1.5.1] - 2026-11-28
+
+### 新增 (Added)
+- **独立车机版（`BreezeMusic-car`）正式发布与五大座舱性能治理**：
+  - 新增独立 `car` Product Flavor（独立包名 `com.concept.music.car`、版本后缀 `-car`、独立签名证书 `carSign` 且无本地密钥自动回退 `debug`），与手机版、平板版三端同机共存零冲突；依托源码集物理隔离的 `AppRootEntry` 实现 R8 自动摇树裁剪，车机正式包体积精简约 25%，同时将 `ACTION_SEND` 分享入口与悬浮窗/蓝牙/多余小组件权限严格隔离。
+  - 打造全新流光玻璃座舱 UI（`CarCockpitRoot` / `CarCockpitStage` / `CarSourceGlassDrawer` / `CarCabinAcousticCard` / `CarMinimalSettingsAndQrLogin`），支持 **21:9 超宽带鱼屏、16:9/16:10 主流中控横屏、比亚迪 DiLink 旋转竖屏、高德/百度 1/3 导航分屏** 四大窗口形态自适应（`CarAdaptiveLayout`）；集成 64-bit 座舱声学卡、夜间护眼防眩光模式、大屏酷狗/QQ 双扫码极速登录、静默 VIP 守护、只读 U 盘/本地无损直播与 4×2 车机专属小组件。
+  - 落地车机五大性能治理支柱：冷启动极简瘦身（跳过悬浮窗/下载/白噪音/专注舱，VIP 守护错峰延后 8 秒）、三档硬件算力与高温热降频自适应渲染（`CarPerformanceProfile`：高配座舱 / 均衡流畅 / 极简省电）、车机调优 Coil 缓存与 `onTrimMemory` 主动清理、默认 2GB 隧道/地库音频缓存（45s–180s 长缓冲 + 下一首预缓存）以及 DSP 律动遥测按需门控。
+  - 新增车载语音点歌（`MEDIA_PLAY_FROM_SEARCH` / `onSearch` / 结构化歌手曲名槽位解析）与受控车辆点火自动续播（`CarBootAutoResumeReceiver`，毫秒级恢复上次队列与进度），并支持车机版在线更新精准匹配 `BreezeMusic-car-*.apk`。
+- **全新四规格三风格微风桌面小组件、交互工作台与全厂商适配**：
+  - 零外部依赖，基于原生 `RemoteViews` + 离屏 `Canvas` 渲染管线彻底重构桌面小组件（`com.concept.music.widget.*`），保留 `ConceptMusicWidgetProvider` 原地无缝升级，全面提供 **4×2 经典黑胶卡 / 4×1 灵动胶囊条 / 2×2 精致方卡 / 4×4 杂志级沉浸唱片台** 四种尺寸与 **黑胶封套 / 流光封面 / 水彩叠层** 三大微风同源美学风格。
+  - 复用 24-bin 封面取色与 `CoverTonalPalette`（全风格全主题保障 WCAG AA 文字对比度），支持「跟随应用 / 幽邃微蓝 / 水彩浸润」主题及透明度调节；支持点击直达全屏播放页、红心收藏与播放模式双向同步（含后台服务兜底）及熄屏低功耗节流。
+  - 「设置 → 外观与播放样式」新增交互式「桌面小组件工作台」（`SettingsWidgetStudioSection`），支持四规格三风格实时预览与一键添加至桌面；新增全厂商桌面小组件添加适配器（`BreezeWidgetPinAdapter`，适配 ColorOS / 小米澎湃OS / vivo OriginOS / 华为 HarmonyOS / 荣耀 MagicOS / 三星 One UI / 魅族 Flyme），内置静态 WebP `previewImage` 与轻量 `previewLayout` 消除桌面插件页卡顿，采用 ColorOS 零载荷标准通道、`FLAG_IMMUTABLE` 签名回调（兼容 Android 14+）、极简直通兜底与机型精准权限指引。
+- **蓝牙与车载歌词大范围校准弹窗**：将蓝牙耳机与车载/仪表盘歌词延迟校准范围统一扩展至 `-5000ms ~ +5000ms`（叠加手动偏移总生效上限 `±10000ms`），并在蓝牙设置页、播放页车载快捷卡与独立车机设置卡同步提供精确毫秒手动输入弹窗（`LyricOffsetCustomInputDialog`）与快捷微调档位。
+
+### 优化 (Changed)
+- **桌面小组件视觉精修与 4×4 增量滚动歌词引擎**：收敛四规格圆角规范（4×1 为 `16dp`、2×2 与 4×2 为 `18dp`、4×4 为 `20dp`），按桌面网格真实宽高比动态生成离屏画布防拉伸畸变并加厚圆润触控图标；重构 4×4 为杂志级唱片台（展示专辑名、双行大字歌词、时间轴与五键控台），并采用 `ViewFlipper` 垂直滚动动效 + `partiallyUpdateAppWidget` 局部增量更新配合精确到期后台歌词调度器实现丝滑省电滚词。
+- **车载蓝牙 AVRCP 歌词推送时序与路由优化**：将车载 AVRCP 歌词唤醒下限由 `260ms` 降至 `40ms`，将限流切行由直接丢弃改为延迟补发，消除偏移快照竞态并在切换播放倍速时即时刷新调度器；优化活跃蓝牙音频路由探测与后台桌面歌词偏移恢复。
+
+### 修复 (Fixed)
+- **修复播放页多歌手选择弹窗重复弹出**：修复 `IsolatedNowPlayingHost` 转发原始多歌手歌曲导致选中单个歌手后二次弹窗的缺陷，改为通过 `onOpenSingleArtist` 直达目标歌手详情页并在切歌时自动复位弹窗状态。
+- **修复车载互联设置页提前/延后微调按钮反转**：修正车载歌词延迟微调按钮的增减方向与文案提示保持严格一致。
+- **修复后台点击桌面小组件返回直退桌面**：将 `MainActivity` 升级为 `singleTask` 启动模式、移除多余的 `FLAG_ACTIVITY_CLEAR_TOP` 标记并在根级提升 `NowPlayingSheet` 的 `BackHandler` 拦截，确保从后台点小组件直达播放页后按返回键正确回到应用主页而非直退桌面。
+
+### 安全 (Security)
+- **桌面小组件与车机独立包权限隔离**：全部 4 款桌面小组件播控操作继续强制校验 `SecurityGuards` 256-bit 硬件加密内部 IPC 能力令牌，严禁以隐式 `IntentFilter` 暴露自定义播控 Action；车机版清单通过 `tools:node="remove"` 显式剥离 `SYSTEM_ALERT_WINDOW` 等无关敏感权限，大屏双扫码登录页全程启用 `FLAG_SECURE` 敏感窗口防截屏保护。
+
+---
+
 ## [1.5.0] - 2026-11-28
 
 ### 新增 (Added)
@@ -127,7 +155,8 @@
 - **v1.0.1**（2026-10-28）：新增系统级穿透桌面歌词、有线耳机线控定制、音频焦点策略、缓存分项清理与透明权限中心。
 - **v1.0.0**（2026-10-28）：首个正式版发布，完成端侧直连、高解析播放、64-bit 母带调音、KRC 逐字歌词与 2K 海报、动态取色及 120Hz 高刷播放舞台。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/reneryi7/BreezeMusic-Android/compare/v1.4.0...v1.4.1
