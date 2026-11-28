@@ -155,7 +155,7 @@ internal val PROJECT_CHANGELOG_HISTORY = listOf(
                 points = listOf(
                     "PlaybackService 升级至 Media3 MediaLibraryService，内置 UID 校验车联媒体浏览树（支持 Android Auto、HiCar、CarWith、Carlink、CarLife 及纯本地歌单浏览）；双轨蓝牙识别配合首次连接一键白名单确认、默认关闭上车自动续播与上下车日常音效快照原子自愈还原",
                     "64-bit 母带引擎新增四大座舱声学模式：主驾皇帝位（2.25ms 左声道 ITD 微延迟 + 右侧声压补偿 + 仪表台声像抬升 + 胎噪低频补偿）、全车均衡环绕、车载重低音炮、原车音响直通；配套非对称导航平滑闪避包络 + 1.85kHz 谱闪避、AVRCP 去鸣谢呼吸歌词与本机通知栏双轨隔离、方向盘按键 0ms 直通及手机专属「车载互联」设置页与播放页快捷胶囊",
-                    "根治 Release 模式下 R8 泛型擦除引发的退出车载崩溃隐患：在 proguard-rules.pro 保留车载互联与本地歌单持久化模型并增强类型安全清洗，优化临时退出车载会话不破坏白名单、投屏多连接引用计数、原车直通恢复与焦点自动还原"
+                    "根治 Release 模式下 R8 泛型擦除引发的退出车载崩溃及播放器监听事件转发缺陷：在 proguard-rules.pro 保留车载互联与本地歌单持久化模型并增强类型安全清洗；改用全量显式 Player.Listener 转发彻底杜绝播放态与进度条同步断链，优化临时退出车载会话不破坏白名单、投屏多连接引用计数、原车直通恢复与焦点自动还原"
                 )
             ),
             ChangelogModuleGroup(

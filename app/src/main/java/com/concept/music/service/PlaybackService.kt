@@ -17,13 +17,23 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.AuxEffectInfo
 import androidx.media3.common.C
+import androidx.media3.common.DeviceInfo
 import androidx.media3.common.FlagSet
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Metadata
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
+import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
+import androidx.media3.common.text.Cue
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -260,6 +270,201 @@ class HeadsetMediaButtonController(
 }
 
 // 64-bit 纯线性双二阶母带级音频处理器已独立拆分至 ConceptMasteringAudioProcessor.kt (支持 10段 PEQ 与 hasActiveEqBands 零开销短路)
+
+internal fun mergeCarNavigationCommands(base: Player.Commands): Player.Commands {
+    return base.buildUpon()
+        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+        .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        .add(Player.COMMAND_SEEK_TO_NEXT)
+        .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        .build()
+}
+
+/**
+ * 显式全量转发的 Media3 `Player.Listener` 包装器：
+ * - 严禁使用 Kotlin 接口委托（`Player.Listener by delegate`），因为 `Player.Listener` 是全部回调均为 Java `default` 方法的 Java 接口，
+ *   Kotlin 类委托不会为 Java `default` 方法生成转发存根，会导致 `onIsPlayingChanged` / `onPlaybackStateChanged` / `onTimelineChanged` 等
+ *   全部播放状态与进度事件被吞噬，令 `MediaController` 永久停留在暂停/空闲态。
+ * - 显式逐一覆写并转发全部 37 个回调，同时在车载蓝牙呼吸歌词激活时拦截 `onMediaMetadataChanged`，并在 `onAvailableCommandsChanged` 中保持上下曲可用。
+ */
+@OptIn(UnstableApi::class)
+internal class CarLyricForwardingListener(
+    private val forwardingPlayer: Player,
+    private val delegate: Player.Listener,
+    private val isCarBluetoothLyricActive: () -> Boolean,
+    private val resolveEffectiveMetadata: () -> MediaMetadata,
+    private val transformAvailableCommands: (Player.Commands) -> Player.Commands = ::mergeCarNavigationCommands
+) : Player.Listener {
+
+    override fun onEvents(player: Player, events: Player.Events) {
+        delegate.onEvents(forwardingPlayer, events)
+    }
+
+    override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+        delegate.onTimelineChanged(timeline, reason)
+    }
+
+    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+        delegate.onMediaItemTransition(mediaItem, reason)
+    }
+
+    override fun onTracksChanged(tracks: Tracks) {
+        delegate.onTracksChanged(tracks)
+    }
+
+    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+        val effectiveMeta = if (isCarBluetoothLyricActive()) resolveEffectiveMetadata() else mediaMetadata
+        delegate.onMediaMetadataChanged(effectiveMeta)
+    }
+
+    override fun onPlaylistMetadataChanged(mediaMetadata: MediaMetadata) {
+        delegate.onPlaylistMetadataChanged(mediaMetadata)
+    }
+
+    override fun onIsLoadingChanged(isLoading: Boolean) {
+        delegate.onIsLoadingChanged(isLoading)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onLoadingChanged(isLoading: Boolean) {
+        delegate.onLoadingChanged(isLoading)
+    }
+
+    override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
+        delegate.onAvailableCommandsChanged(transformAvailableCommands(availableCommands))
+    }
+
+    override fun onTrackSelectionParametersChanged(parameters: TrackSelectionParameters) {
+        delegate.onTrackSelectionParametersChanged(parameters)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onPlayerStateChanged(playWhenReady: Boolean, playbackState: Int) {
+        delegate.onPlayerStateChanged(playWhenReady, playbackState)
+    }
+
+    override fun onPlaybackStateChanged(playbackState: Int) {
+        delegate.onPlaybackStateChanged(playbackState)
+    }
+
+    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+        delegate.onPlayWhenReadyChanged(playWhenReady, reason)
+    }
+
+    override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+        delegate.onPlaybackSuppressionReasonChanged(playbackSuppressionReason)
+    }
+
+    override fun onIsPlayingChanged(isPlaying: Boolean) {
+        delegate.onIsPlayingChanged(isPlaying)
+    }
+
+    override fun onRepeatModeChanged(repeatMode: Int) {
+        delegate.onRepeatModeChanged(repeatMode)
+    }
+
+    override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+        delegate.onShuffleModeEnabledChanged(shuffleModeEnabled)
+    }
+
+    override fun onPlayerError(error: PlaybackException) {
+        delegate.onPlayerError(error)
+    }
+
+    override fun onPlayerErrorChanged(error: PlaybackException?) {
+        delegate.onPlayerErrorChanged(error)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onPositionDiscontinuity(reason: Int) {
+        delegate.onPositionDiscontinuity(reason)
+    }
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int
+    ) {
+        delegate.onPositionDiscontinuity(oldPosition, newPosition, reason)
+    }
+
+    override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+        delegate.onPlaybackParametersChanged(playbackParameters)
+    }
+
+    override fun onSeekBackIncrementChanged(seekBackIncrementMs: Long) {
+        delegate.onSeekBackIncrementChanged(seekBackIncrementMs)
+    }
+
+    override fun onSeekForwardIncrementChanged(seekForwardIncrementMs: Long) {
+        delegate.onSeekForwardIncrementChanged(seekForwardIncrementMs)
+    }
+
+    override fun onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs: Long) {
+        delegate.onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs)
+    }
+
+    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+        delegate.onAudioSessionIdChanged(audioSessionId)
+    }
+
+    override fun onAudioAttributesChanged(audioAttributes: AudioAttributes) {
+        delegate.onAudioAttributesChanged(audioAttributes)
+    }
+
+    override fun onVolumeChanged(volume: Float) {
+        delegate.onVolumeChanged(volume)
+    }
+
+    override fun onSkipSilenceEnabledChanged(skipSilenceEnabled: Boolean) {
+        delegate.onSkipSilenceEnabledChanged(skipSilenceEnabled)
+    }
+
+    override fun onDeviceInfoChanged(deviceInfo: DeviceInfo) {
+        delegate.onDeviceInfoChanged(deviceInfo)
+    }
+
+    override fun onDeviceVolumeChanged(volume: Int, muted: Boolean) {
+        delegate.onDeviceVolumeChanged(volume, muted)
+    }
+
+    override fun onVideoSizeChanged(videoSize: VideoSize) {
+        delegate.onVideoSizeChanged(videoSize)
+    }
+
+    override fun onSurfaceSizeChanged(width: Int, height: Int) {
+        delegate.onSurfaceSizeChanged(width, height)
+    }
+
+    override fun onRenderedFirstFrame() {
+        delegate.onRenderedFirstFrame()
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onCues(cues: MutableList<Cue>) {
+        delegate.onCues(cues)
+    }
+
+    override fun onCues(cueGroup: CueGroup) {
+        delegate.onCues(cueGroup)
+    }
+
+    override fun onMetadata(metadata: Metadata) {
+        delegate.onMetadata(metadata)
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is CarLyricForwardingListener) return false
+        return forwardingPlayer === other.forwardingPlayer && delegate == other.delegate
+    }
+
+    override fun hashCode(): Int {
+        var result = System.identityHashCode(forwardingPlayer)
+        result = 31 * result + delegate.hashCode()
+        return result
+    }
+}
 
 /**
  * AndroidX Media3 官方后台播放与车载媒体树服务 (`MediaLibraryService`)
@@ -1559,46 +1764,30 @@ class PlaybackService : MediaLibraryService() {
         private var lastPushedAvrTitle: String = ""
         private var lastPushedAvrArtist: String = ""
         private var lastPushElapsedMs: Long = 0L
+        private var wasCarBluetoothLyricActive: Boolean = false
 
-        private inner class CarLyricForwardingListener(
-            private val delegate: Player.Listener
-        ) : Player.Listener by delegate {
-            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                val effectiveMeta = if (isCarBluetoothLyricActive()) getMediaMetadata() else mediaMetadata
-                delegate.onMediaMetadataChanged(effectiveMeta)
-            }
-
-            override fun onEvents(player: Player, events: Player.Events) {
-                delegate.onEvents(this@CarLyricForwardingPlayer, events)
-            }
-
-            override fun equals(other: Any?): Boolean {
-                if (this === other) return true
-                if (other !is CarLyricForwardingListener) return false
-                return delegate == other.delegate
-            }
-
-            override fun hashCode(): Int = delegate.hashCode()
+        private fun wrapListener(listener: Player.Listener): Player.Listener {
+            return CarLyricForwardingListener(
+                forwardingPlayer = this,
+                delegate = listener,
+                isCarBluetoothLyricActive = { isCarBluetoothLyricActive() },
+                resolveEffectiveMetadata = { getMediaMetadata() },
+                transformAvailableCommands = ::mergeCarNavigationCommands
+            )
         }
 
         override fun addListener(listener: Player.Listener) {
             sessionListeners.add(listener)
-            super.addListener(CarLyricForwardingListener(listener))
+            super.addListener(wrapListener(listener))
         }
 
         override fun removeListener(listener: Player.Listener) {
             sessionListeners.remove(listener)
-            super.removeListener(CarLyricForwardingListener(listener))
+            super.removeListener(wrapListener(listener))
         }
 
         override fun getAvailableCommands(): Player.Commands {
-            return super.getAvailableCommands()
-                .buildUpon()
-                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
-                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                .add(Player.COMMAND_SEEK_TO_NEXT)
-                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-                .build()
+            return mergeCarNavigationCommands(super.getAvailableCommands())
         }
 
         override fun isCommandAvailable(command: Int): Boolean {
@@ -1664,6 +1853,28 @@ class PlaybackService : MediaLibraryService() {
         }
 
         fun pushAvrcpMetadataIfChanged(force: Boolean = false) {
+            val carLyricActive = isCarBluetoothLyricActive()
+            if (!carLyricActive) {
+                if (!wasCarBluetoothLyricActive) {
+                    return
+                }
+                wasCarBluetoothLyricActive = false
+                lastPushedAvrTitle = ""
+                lastPushedAvrArtist = ""
+                lastPushElapsedMs = 0L
+                val restoredMeta = super.getMediaMetadata()
+                val events = Player.Events(
+                    FlagSet.Builder().add(Player.EVENT_MEDIA_METADATA_CHANGED).build()
+                )
+                for (listener in sessionListeners) {
+                    runCatching {
+                        listener.onMediaMetadataChanged(restoredMeta)
+                        listener.onEvents(this, events)
+                    }
+                }
+                return
+            }
+            wasCarBluetoothLyricActive = true
             val nowElapsed = safeServiceElapsedRealtime()
             if (!force && lastPushElapsedMs > 0L && (nowElapsed - lastPushElapsedMs) < 400L) {
                 return

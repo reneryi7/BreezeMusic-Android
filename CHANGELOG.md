@@ -35,7 +35,7 @@
 - **分类切换虚化范围与二级页动效优化**：将一级 Tab 运动虚化精准限定在曲目/内容列表区域，修复 `ConceptSlidingCategoryTabs` 首项标签左边缘裁切问题，并为二级下钻视图补齐空间感 `AnimatedContent` 过渡动画。
 
 ### 修复 (Fixed)
-- **根治 Release 模式下退出车载模式崩溃与车载生命周期边界问题**：修复 R8 full-mode 泛型擦除导致退出车载模式还原音效快照时发生 `ClassCastException` 的崩溃；修复临时退出车载不破坏已确认车机白名单并支持退出投屏/车机 UI 会话；修复 `AudioEffectManager` 同步初始化竞态、`CarSessionManager.init` 幂等性、投屏宿主按包名引用计数与白名单控制器追踪、`DIRECT_BYPASS` 瞬态音量均衡还原、关闭导航闪避后日常音频焦点还原（不误持久化瞬态 `DUCK`）、`PlaybackService` 通知栏标题/正文覆写、`CarLyricForwardingPlayer` 元数据监听包装、`TYPE_BUS` 监听、ViewModel 回调清理及 DSP ITD/声场状态复位。
+- **根治 Release 模式下退出车载模式崩溃、播放器监听事件丢失与车载生命周期边界问题**：修复 R8 full-mode 泛型擦除导致退出车载模式还原音效快照时发生 `ClassCastException` 的崩溃；修复 `CarLyricForwardingListener` 使用 Kotlin 接口委托导致 Media3 `Player.Listener` 的 Java `default` 回调（`onIsPlayingChanged` / `onPlaybackStateChanged` / `onTimelineChanged` 等）未被转发、进而引起播控显示暂停与进度条静止的缺陷，改为全量显式转发并同步合并上下曲可用命令与非车载零冗余元数据推送；修复临时退出车载不破坏已确认车机白名单并支持退出投屏/车机 UI 会话；修复 `AudioEffectManager` 同步初始化竞态、`CarSessionManager.init` 幂等性、投屏宿主按包名引用计数与白名单控制器追踪、`DIRECT_BYPASS` 瞬态音量均衡还原、关闭导航闪避后日常音频焦点还原（不误持久化瞬态 `DUCK`）、`PlaybackService` 通知栏标题/正文覆写、`TYPE_BUS` 监听、ViewModel 回调清理及 DSP ITD/声场状态复位。
 - **修复横屏退回竖屏标题跑马灯停滞**：修复从横屏沉浸播放页退出返回竖屏播放页后，长歌曲标题跑马灯停止滚动的缺陷。
 
 ### 安全 (Security)

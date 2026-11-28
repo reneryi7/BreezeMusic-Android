@@ -2,6 +2,14 @@ package com.concept.music
 
 import android.content.SharedPreferences
 import android.view.KeyEvent
+import androidx.media3.common.FlagSet
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.audio.AudioProcessor
 import com.concept.music.data.model.LyricData
 import com.concept.music.data.model.LyricLine
@@ -12,6 +20,8 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
@@ -645,5 +655,203 @@ class CarInterconnectTest {
         ).forEach { cls ->
             assertTrue("proguard-rules.pro 必须保留 $cls 防止 R8 Full Mode 剥离泛型与字段名", content.contains(cls))
         }
+    }
+
+    @Test
+    fun `CarLyricForwardingListener必须显式覆写PlayerListener全部回调防止Kotlin委托吞噬事件`() {
+        fun methodKey(m: java.lang.reflect.Method): String =
+            "${m.name}(${m.parameterTypes.joinToString(",") { it.name }})"
+
+        val expectedInterfaceMethods = Player.Listener::class.java.declaredMethods
+            .filter { !it.isSynthetic && !it.isBridge && !Modifier.isStatic(it.modifiers) }
+            .map(::methodKey)
+            .toSet()
+
+        val actualDeclaredMethods = CarLyricForwardingListener::class.java.declaredMethods
+            .filter { !it.isSynthetic && !it.isBridge && !Modifier.isStatic(it.modifiers) }
+            .map(::methodKey)
+            .toSet()
+
+        val missing = expectedInterfaceMethods - actualDeclaredMethods
+        assertTrue(
+            "CarLyricForwardingListener 漏实现 Player.Listener 回调，会导致 MediaSession 收不到播放状态/进度变更: $missing",
+            missing.isEmpty()
+        )
+    }
+
+    @Test
+    fun `CarLyricForwardingListener完整透传播放状态进度命令与车载元数据且支持精确removeListener`() {
+        val registeredListeners = mutableListOf<Player.Listener>()
+        val rawPlayer = Proxy.newProxyInstance(
+            Player::class.java.classLoader,
+            arrayOf(Player::class.java)
+        ) { _, method, args ->
+            when (method.name) {
+                "addListener" -> {
+                    registeredListeners.add(args[0] as Player.Listener)
+                    null
+                }
+                "removeListener" -> {
+                    registeredListeners.remove(args[0] as Player.Listener)
+                    null
+                }
+                "getAvailableCommands" -> Player.Commands.EMPTY
+                "getMediaMetadata" -> MediaMetadata.EMPTY
+                else -> when (method.returnType) {
+                    Boolean::class.javaPrimitiveType -> false
+                    Int::class.javaPrimitiveType -> 0
+                    Long::class.javaPrimitiveType -> 0L
+                    Float::class.javaPrimitiveType -> 0f
+                    else -> null
+                }
+            }
+        } as Player
+
+        var carLyricActive = false
+        val carMetadata = MediaMetadata.Builder()
+            .setTitle("故事的小黄花")
+            .setArtist("晴天 · 周杰伦")
+            .setDisplayTitle("晴天")
+            .setSubtitle("周杰伦")
+            .build()
+        val expectedMergedCommands = mergeCarNavigationCommands(Player.Commands.EMPTY)
+        var capturedCommandTransformInput: Player.Commands? = null
+
+        val forwardingPlayer = object : ForwardingPlayer(rawPlayer) {
+            override fun addListener(listener: Player.Listener) {
+                super.addListener(
+                    CarLyricForwardingListener(
+                        forwardingPlayer = this,
+                        delegate = listener,
+                        isCarBluetoothLyricActive = { carLyricActive },
+                        resolveEffectiveMetadata = { carMetadata },
+                        transformAvailableCommands = { incoming ->
+                            capturedCommandTransformInput = incoming
+                            expectedMergedCommands
+                        }
+                    )
+                )
+            }
+
+            override fun removeListener(listener: Player.Listener) {
+                super.removeListener(
+                    CarLyricForwardingListener(
+                        forwardingPlayer = this,
+                        delegate = listener,
+                        isCarBluetoothLyricActive = { carLyricActive },
+                        resolveEffectiveMetadata = { carMetadata },
+                        transformAvailableCommands = { incoming ->
+                            capturedCommandTransformInput = incoming
+                            expectedMergedCommands
+                        }
+                    )
+                )
+            }
+        }
+
+        val observedIsPlaying = mutableListOf<Boolean>()
+        val observedStates = mutableListOf<Int>()
+        val observedPlayWhenReady = mutableListOf<Pair<Boolean, Int>>()
+        var timelineChangedCount = 0
+        var transitionedMediaId: String? = null
+        var discontinuityReason: Int? = null
+        var observedSpeed = 0f
+        var observedCommands: Player.Commands? = null
+        var observedErrorCode: Int? = null
+        val observedMetadataTitles = mutableListOf<String>()
+        var eventsPlayerRef: Player? = null
+
+        val downstreamListener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                observedIsPlaying.add(isPlaying)
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                observedStates.add(playbackState)
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                observedPlayWhenReady.add(playWhenReady to reason)
+            }
+
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                timelineChangedCount++
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                transitionedMediaId = mediaItem?.mediaId
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                discontinuityReason = reason
+            }
+
+            override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+                observedSpeed = playbackParameters.speed
+            }
+
+            override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
+                observedCommands = availableCommands
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                observedErrorCode = error.errorCode
+            }
+
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                observedMetadataTitles.add(mediaMetadata.title?.toString().orEmpty())
+            }
+
+            override fun onEvents(player: Player, events: Player.Events) {
+                eventsPlayerRef = player
+            }
+        }
+
+        forwardingPlayer.addListener(downstreamListener)
+        assertEquals("向 ForwardingPlayer 注册后底层应挂接 1 个包装监听", 1, registeredListeners.size)
+
+        val wrappedOnRawPlayer = registeredListeners.first()
+        val sampleItem = MediaItem.Builder().setMediaId("song_150").build()
+        val posInfo = Player.PositionInfo(null, 0, sampleItem, null, 0, 12_000L, 12_000L, -1, -1)
+        val rawMetadata = MediaMetadata.Builder().setTitle("晴天").setArtist("周杰伦").build()
+        val sampleEvents = Player.Events(FlagSet.Builder().add(Player.EVENT_IS_PLAYING_CHANGED).build())
+
+        wrappedOnRawPlayer.onTimelineChanged(Timeline.EMPTY, Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED)
+        wrappedOnRawPlayer.onMediaItemTransition(sampleItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
+        wrappedOnRawPlayer.onPlaybackStateChanged(Player.STATE_BUFFERING)
+        wrappedOnRawPlayer.onPlaybackStateChanged(Player.STATE_READY)
+        wrappedOnRawPlayer.onPlayWhenReadyChanged(true, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+        wrappedOnRawPlayer.onIsPlayingChanged(true)
+        wrappedOnRawPlayer.onPositionDiscontinuity(posInfo, posInfo, Player.DISCONTINUITY_REASON_SEEK)
+        wrappedOnRawPlayer.onPlaybackParametersChanged(PlaybackParameters(1.25f))
+        wrappedOnRawPlayer.onAvailableCommandsChanged(Player.Commands.EMPTY)
+        wrappedOnRawPlayer.onPlayerError(
+            PlaybackException("test", null, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+        )
+        wrappedOnRawPlayer.onMediaMetadataChanged(rawMetadata)
+        carLyricActive = true
+        wrappedOnRawPlayer.onMediaMetadataChanged(rawMetadata)
+        wrappedOnRawPlayer.onEvents(rawPlayer, sampleEvents)
+
+        assertEquals(listOf(true), observedIsPlaying)
+        assertEquals(listOf(Player.STATE_BUFFERING, Player.STATE_READY), observedStates)
+        assertEquals(listOf(true to Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST), observedPlayWhenReady)
+        assertEquals(1, timelineChangedCount)
+        assertEquals("song_150", transitionedMediaId)
+        assertEquals(Player.DISCONTINUITY_REASON_SEEK, discontinuityReason)
+        assertEquals(1.25f, observedSpeed, 0.001f)
+        assertSame(Player.Commands.EMPTY, capturedCommandTransformInput)
+        assertSame(expectedMergedCommands, observedCommands)
+        assertEquals(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, observedErrorCode)
+        assertEquals(listOf("晴天", "故事的小黄花"), observedMetadataTitles)
+        assertSame("onEvents 必须将 ForwardingPlayer 作为事件源传递给下游", forwardingPlayer, eventsPlayerRef)
+
+        // 验证 removeListener 依赖 equals/hashCode 精确解绑，不再产生重复或残留监听
+        forwardingPlayer.removeListener(downstreamListener)
+        assertTrue("调用 removeListener 后底层监听列表必须清空", registeredListeners.isEmpty())
     }
 }
