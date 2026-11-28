@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 4×2 黄金主力卡（保留原文件名实现旧版小组件无缝升级） -->
+<!-- 4×2 黄金主力卡（克制 18dp 圆角 + 圆润饱满四键播控；保留原文件名保障无缝升级） -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
@@ -33,13 +33,13 @@
             <!-- 左侧视觉大舞台：黑胶封套 / 菱形棱镜光晕 / 水彩三叠卡 -->
             <ImageView
                 android:id="@+id/widget_artwork_stage"
-                android:layout_width="110dp"
-                android:layout_height="84dp"
+                android:layout_width="114dp"
+                android:layout_height="88dp"
                 android:contentDescription="@string/app_name"
                 android:scaleType="fitCenter"
                 android:src="@drawable/bg_widget_stage_art_preview" />
 
-            <!-- 右侧元信息 + 实时歌词 + 圆润四键播控 -->
+            <!-- 右侧元信息 + 实时歌词 + 圆润饱满四键播控 -->
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
@@ -109,8 +109,8 @@
 
                     <ImageView
                         android:id="@+id/widget_btn_favorite"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
                         android:contentDescription="@string/widget_cd_favorite"
                         android:scaleType="fitCenter"
                         android:src="@drawable/ic_widget_heart_preview" />
@@ -122,26 +122,26 @@
 
                     <ImageView
                         android:id="@+id/widget_btn_prev"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
                         android:contentDescription="@string/widget_cd_prev"
                         android:scaleType="fitCenter"
                         android:src="@drawable/ic_widget_prev_preview" />
 
                     <ImageView
                         android:id="@+id/widget_btn_play"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:layout_marginStart="8dp"
-                        android:layout_marginEnd="8dp"
+                        android:layout_width="46dp"
+                        android:layout_height="46dp"
+                        android:layout_marginStart="6dp"
+                        android:layout_marginEnd="6dp"
                         android:contentDescription="@string/widget_cd_play_pause"
                         android:scaleType="fitCenter"
                         android:src="@drawable/ic_widget_play_preview" />
 
                     <ImageView
                         android:id="@+id/widget_btn_next"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
+                        android:layout_width="36dp"
+                        android:layout_height="36dp"
                         android:contentDescription="@string/widget_cd_next"
                         android:scaleType="fitCenter"
                         android:src="@drawable/ic_widget_next_preview" />
@@ -149,11 +149,11 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- 底部极简胶囊进度条 -->
+        <!-- 底部圆润饱满胶囊进度条 -->
         <ImageView
             android:id="@+id/widget_progress_image"
             android:layout_width="match_parent"
-            android:layout_height="6dp"
+            android:layout_height="8dp"
             android:layout_marginTop="6dp"
             android:contentDescription="@null"
             android:scaleType="fitXY"

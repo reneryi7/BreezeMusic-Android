@@ -93,6 +93,26 @@ object ConceptMusicWidgetUpdater {
         )
     }
 
+    fun updateLyricLine(
+        context: Context,
+        songTitle: String?,
+        artist: String?,
+        prevLyricLine: String,
+        lyricLine: String,
+        nextLyricLine: String,
+        isPlaying: Boolean
+    ) {
+        BreezeWidgetManager.updateLyricLine(
+            context = context,
+            songTitle = songTitle,
+            artist = artist,
+            prevLyric = prevLyricLine,
+            currentLyric = lyricLine,
+            nextLyric = nextLyricLine,
+            isPlaying = isPlaying
+        )
+    }
+
     fun updateProgressThrottled(
         context: Context,
         positionMs: Long,

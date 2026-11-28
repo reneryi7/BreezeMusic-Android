@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 零嵌套极速选择器预览布局：避免 ColorOS 等桌面插件页展开时多卡同步 inflate 矢量造成卡顿 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/widget_label_card_4x2"
+        android:scaleType="fitCenter"
+        android:src="@drawable/preview_widget_4x2" />
+</FrameLayout>

@@ -51,6 +51,42 @@ internal object BreezeWidgetArtPipeline {
         }
     )
 
+    /**
+     * 0ms 纯内存缓存窥探（供点击添加小组件与弹窗预览零阻塞首帧直出，彻底消除 ColorOS 插件页卡顿）
+     */
+    fun peekCachedArtwork(
+        snapshot: BreezeWidgetPlaybackSnapshot,
+        needStackedNextCovers: Boolean
+    ): Pair<WidgetLoadedArtwork, Boolean> {
+        val primaryKey = buildPrimaryArtKey(snapshot)
+        val primaryCached = if (primaryKey.isNotBlank()) {
+            bitmapCache.get(primaryKey)?.takeIf { !it.isRecycled }
+        } else null
+        val paletteCached = when {
+            primaryKey.isBlank() -> null
+            extractedPaletteMap[primaryKey] != null -> extractedPaletteMap[primaryKey]
+            snapshot.coverUrl.isNotBlank() -> coverPaletteMemoryCache[snapshot.coverUrl]
+            else -> null
+        }
+
+        val next1Key = if (needStackedNextCovers && snapshot.nextCoverUrl1.isNotBlank()) "stack:${snapshot.nextCoverUrl1}" else ""
+        val next2Key = if (needStackedNextCovers && snapshot.nextCoverUrl2.isNotBlank()) "stack:${snapshot.nextCoverUrl2}" else ""
+        val next1Cached = if (next1Key.isNotBlank()) bitmapCache.get(next1Key)?.takeIf { !it.isRecycled } else null
+        val next2Cached = if (next2Key.isNotBlank()) bitmapCache.get(next2Key)?.takeIf { !it.isRecycled } else null
+
+        val primaryMissing = primaryKey.isNotBlank() && primaryCached == null
+        val next1Missing = next1Key.isNotBlank() && next1Cached == null
+        val next2Missing = next2Key.isNotBlank() && next2Cached == null
+        val fullyReady = !primaryMissing && !next1Missing && !next2Missing
+
+        return WidgetLoadedArtwork(
+            primaryCover = primaryCached,
+            nextCover1 = next1Cached,
+            nextCover2 = next2Cached,
+            extractedPalette = paletteCached
+        ) to fullyReady
+    }
+
     suspend fun loadArtwork(
         context: Context,
         snapshot: BreezeWidgetPlaybackSnapshot,

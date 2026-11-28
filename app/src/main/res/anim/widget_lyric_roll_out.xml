@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 4×4 歌词旧句平滑上移淡出（260ms 轻柔离场，与新句形成连续滚动感） -->
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:interpolator="@android:anim/accelerate_interpolator"
+    android:shareInterpolator="true">
+    <translate
+        android:duration="260"
+        android:fromYDelta="0%p"
+        android:toYDelta="-42%p" />
+    <alpha
+        android:duration="240"
+        android:fromAlpha="1.0"
+        android:toAlpha="0.0" />
+</set>

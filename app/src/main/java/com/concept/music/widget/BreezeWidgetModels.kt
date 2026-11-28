@@ -105,21 +105,91 @@ enum class BreezeWidgetSizeClass(
     CAPSULE_4X1(
         label = "灵动胶囊条",
         gridSpec = "4×1",
-        subtitle = "迷你播放条同源 · 单行轻盈不占桌面",
+        subtitle = "迷你播放条同源 · 精致圆角轻盈不占桌面",
         previewAspectRatio = 4.35f
     ),
     SQUARE_2X2(
         label = "精致方卡",
         gridSpec = "2×2",
-        subtitle = "方形大舞台 + 饱满主色大播放按钮",
+        subtitle = "方形大舞台 + 饱满立体大播放钮",
         previewAspectRatio = 1.0f
     ),
     STAGE_4X4(
-        label = "沉浸歌词台",
+        label = "沉浸唱片台",
         gridSpec = "4×4",
-        subtitle = "大屏与平板专属 · 三行居中歌词 + 完整五键控台",
+        subtitle = "杂志级黑胶舞台 · 双行大字歌词 · 时间轴与五键控台",
         previewAspectRatio = 0.98f
     )
+}
+
+/**
+ * 离屏背景渲染画布尺寸与圆角规格（按桌面网格实际宽高比动态适配，避免 fitXY 拉伸导致圆角变形）
+ */
+@Immutable
+data class BreezeWidgetCanvasSpec(
+    val widthPx: Int,
+    val heightPx: Int,
+    val cornerRadiusPx: Float,
+    val cornerRadiusDp: Float
+)
+
+/**
+ * 统一解析四规格小组件的克制圆角幅度与等比离屏像素尺寸：
+ * - 4×1：16dp（摆脱过度膨胀的全半圆胶囊，与桌面图标网格协调）
+ * - 2×2 / 4×2：18dp（现代 Android 主流桌面圆角黄金区间）
+ * - 4×4：20dp（大画幅克制圆角，舒展大气不显笨重）
+ */
+fun resolveWidgetBackgroundSpec(
+    sizeClass: BreezeWidgetSizeClass,
+    hostWidthDp: Int = 0,
+    hostHeightDp: Int = 0
+): BreezeWidgetCanvasSpec {
+    val (defaultW, defaultH, targetCornerDp, maxEdgePx, minAspect, maxAspect) = when (sizeClass) {
+        BreezeWidgetSizeClass.CAPSULE_4X1 -> CanvasPreset(320f, 68f, 16f, 460, 2.6f, 6.2f)
+        BreezeWidgetSizeClass.SQUARE_2X2 -> CanvasPreset(160f, 160f, 18f, 300, 0.72f, 1.45f)
+        BreezeWidgetSizeClass.CARD_4X2 -> CanvasPreset(320f, 154f, 18f, 460, 1.45f, 3.1f)
+        BreezeWidgetSizeClass.STAGE_4X4 -> CanvasPreset(320f, 326f, 20f, 460, 0.72f, 1.45f)
+    }
+
+    val useHostSize = hostWidthDp >= 72 && hostHeightDp >= 40
+    val effectiveW = if (useHostSize) hostWidthDp.toFloat().coerceIn(80f, 640f) else defaultW
+    val rawH = if (useHostSize) hostHeightDp.toFloat().coerceIn(44f, 640f) else defaultH
+    val clampedAspect = (effectiveW / rawH).coerceIn(minAspect, maxAspect)
+    val effectiveH = (effectiveW / clampedAspect).coerceAtLeast(44f)
+
+    val scale = maxEdgePx.toFloat() / kotlin.math.max(effectiveW, effectiveH)
+    val widthPx = (effectiveW * scale).toInt().coerceIn(80, 520)
+    val heightPx = (effectiveH * scale).toInt().coerceIn(56, 520)
+
+    val maxCornerRatio = if (sizeClass == BreezeWidgetSizeClass.CAPSULE_4X1) 0.28f else 0.16f
+    val maxCornerPx = kotlin.math.min(widthPx, heightPx) * maxCornerRatio
+    val cornerPx = (targetCornerDp * scale).coerceIn(10f, maxCornerPx)
+
+    return BreezeWidgetCanvasSpec(
+        widthPx = widthPx,
+        heightPx = heightPx,
+        cornerRadiusPx = cornerPx,
+        cornerRadiusDp = targetCornerDp
+    )
+}
+
+private data class CanvasPreset(
+    val defaultWidthDp: Float,
+    val defaultHeightDp: Float,
+    val cornerDp: Float,
+    val maxEdgePx: Int,
+    val minAspect: Float,
+    val maxAspect: Float
+)
+
+/**
+ * 格式化小组件播放进度时间戳（mm:ss）
+ */
+fun formatWidgetDuration(durationMs: Long): String {
+    val totalSeconds = (durationMs.coerceAtLeast(0L) / 1000L).toInt()
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%02d:%02d".format(minutes, seconds)
 }
 
 /**
@@ -356,8 +426,8 @@ fun resolveBreezeWidgetPalette(
             playButtonStart = playStart,
             playButtonEnd = playEnd,
             playButtonIcon = if (useCoverSeed) playIcon else Color.White,
-            controlIconTint = Color(0xFFE7EFFA),
-            controlButtonBg = Color.White.copy(alpha = 0.11f),
+            controlIconTint = Color(0xFFEEF4FC),
+            controlButtonBg = Color.White.copy(alpha = 0.14f),
             badgeBg = (if (useCoverSeed) roles.palette.tone30 else Color(0xFF19355E)).copy(alpha = 0.72f),
             badgeText = badgeTextColor,
             favoriteActive = Color(0xFFFF6B8B),
@@ -409,8 +479,8 @@ fun resolveBreezeWidgetPalette(
             playButtonStart = playStart,
             playButtonEnd = playEnd,
             playButtonIcon = Color.White,
-            controlIconTint = Color(0xFF1F324D),
-            controlButtonBg = if (useCoverSeed) roles.palette.tone90.copy(alpha = 0.80f) else ConceptElevatedCardLight,
+            controlIconTint = Color(0xFF1B2E48),
+            controlButtonBg = if (useCoverSeed) roles.palette.tone90.copy(alpha = 0.88f) else Color(0xFFFFFFFF),
             badgeBg = badgeBgColor,
             badgeText = if (useCoverSeed) roles.onPrimaryContainer else Color(0xFF0F4C97),
             favoriteActive = ConceptRoseAccent,

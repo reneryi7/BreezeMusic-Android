@@ -946,7 +946,7 @@ object SystemLyricBridge {
         val prevText = lines.getOrNull(lineIndex - 1)?.text?.trim().orEmpty()
         val nextText = lines.getOrNull(lineIndex + 1)?.text?.trim().orEmpty()
             .ifBlank { line.translation?.trim().orEmpty() }
-        ConceptMusicWidgetUpdater.updateState(
+        ConceptMusicWidgetUpdater.updateLyricLine(
             context = context,
             songTitle = song.title,
             artist = song.artist,

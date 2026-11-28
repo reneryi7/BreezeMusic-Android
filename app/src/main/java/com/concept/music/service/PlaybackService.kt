@@ -1042,6 +1042,18 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        fun refreshWidgetLyricTickerIfActive() {
+            val svc = activeServiceInstance ?: return
+            runCatching {
+                val mainLooper = Looper.getMainLooper()
+                if (mainLooper == null || Looper.myLooper() == mainLooper) {
+                    svc.refreshWidgetLyricTicker()
+                } else {
+                    mainHandler?.post { svc.refreshWidgetLyricTicker() }
+                }
+            }
+        }
+
         fun updateHeadsetAutoPlayConfig(
             enabled: Boolean,
             wiredEnabled: Boolean = autoPlayOnWiredConnectEnabled,
@@ -2211,6 +2223,7 @@ class PlaybackService : MediaLibraryService() {
     internal fun refreshCarAvrcpLyricTickerAndMetadata(forceImmediatePush: Boolean = false) {
         val h = mainHandler
         h?.removeCallbacks(carAvrcpLyricRunnable)
+        refreshWidgetLyricTicker()
         val retryThrottleDelayMs = carForwardingPlayer?.pushAvrcpMetadataIfChanged(force = forceImmediatePush) ?: 0L
         val p = player ?: return
         if (p.isPlaying && isCarBluetoothLyricActive()) {
@@ -2284,14 +2297,16 @@ class PlaybackService : MediaLibraryService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    // 手机熄屏锁屏后立即停止后台桌面歌词 160ms 主线程 Ticker，消除熄屏待机耗电
+                    // 手机熄屏锁屏后立即停止后台桌面歌词与小组件精确换行调度，消除熄屏待机耗电
                     stopBackgroundDesktopLyricProgressTicker()
+                    stopWidgetLyricTicker()
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     if (player?.isPlaying == true && SystemLyricBridge.state.value.floatingCapsuleEnabled) {
                         startBackgroundDesktopLyricProgressTicker()
                     }
                     com.concept.music.widget.BreezeWidgetManager.onScreenInteractiveResumed(applicationContext)
+                    refreshWidgetLyricTicker()
                 }
             }
         }
@@ -2341,6 +2356,59 @@ class PlaybackService : MediaLibraryService() {
 
     private fun stopBackgroundDesktopLyricProgressTicker() {
         mainHandler?.removeCallbacks(bgLyricProgressRunnable)
+    }
+
+    /**
+     * 桌面小组件精准歌词换行低功耗调度器：
+     * - 仅在播放中 + 亮屏 + 桌面存在开启歌词的小组件（4×4 / 4×2 / 4×1）时运行；
+     * - 精确计算至下一句歌词 startTimeMs 的剩余毫秒数休眠唤醒（零轮询空转），
+     *   配合 ViewFlipper + partiallyUpdateAppWidget 实现后台同样跟手丝滑的 4×4 歌词滚动。
+     */
+    private val widgetLyricTickRunnable = object : Runnable {
+        override fun run() {
+            val p = player ?: return
+            if (!p.isPlaying || !SystemLyricBridge.isScreenInteractive(applicationContext)) return
+            if (!com.concept.music.widget.BreezeWidgetManager.hasActiveLyricWidget(applicationContext)) return
+
+            val lyric = SystemLyricBridge.currentLyricSnapshot
+            val song = SystemLyricBridge.currentSongSnapshot
+            if (lyric.lines.isEmpty() || song == null) return
+
+            val rawPos = p.currentPosition.coerceAtLeast(0L)
+            val adjustedPos = (rawPos + SystemLyricBridge.lyricOffsetMsSnapshot).coerceAtLeast(0L)
+            val idx = lyric.getLineIndexAt(adjustedPos)
+            if (idx >= 0) {
+                val line = lyric.lines.getOrNull(idx)
+                SystemLyricBridge.onLyricLineUpdated(
+                    context = applicationContext,
+                    song = song,
+                    lineIndex = idx,
+                    line = line,
+                    isPlaying = true
+                )
+            }
+
+            val nextLine = lyric.lines.getOrNull(idx + 1) ?: return
+            val speed = p.playbackParameters.speed.coerceIn(0.5f, 2.0f)
+            val remainRawMs = (nextLine.startTimeMs - adjustedPos).coerceAtLeast(0L)
+            val nextDelayMs = ((remainRawMs / speed).toLong() + 18L).coerceIn(45L, 2_500L)
+            mainHandler?.postDelayed(this, nextDelayMs)
+        }
+    }
+
+    internal fun refreshWidgetLyricTicker() {
+        if (com.concept.music.BuildConfig.IS_CAR_FLAVOR) return
+        ensureScreenStateReceiverRegistered()
+        val h = mainHandler ?: return
+        h.removeCallbacks(widgetLyricTickRunnable)
+        val p = player ?: return
+        if (!p.isPlaying || !SystemLyricBridge.isScreenInteractive(applicationContext)) return
+        if (!com.concept.music.widget.BreezeWidgetManager.hasActiveLyricWidget(applicationContext)) return
+        h.post(widgetLyricTickRunnable)
+    }
+
+    private fun stopWidgetLyricTicker() {
+        mainHandler?.removeCallbacks(widgetLyricTickRunnable)
     }
 
     private fun buildFallbackSongFromMediaItem(
@@ -2507,6 +2575,7 @@ class PlaybackService : MediaLibraryService() {
         carNetworkRetryCount = 0
         stopCarAvrcpLyricTicker()
         stopBackgroundDesktopLyricProgressTicker()
+        stopWidgetLyricTicker()
         stopListenStatsTick()
         ListenStatsCoordinator.onServiceDestroyed()
         if (screenStateReceiverRegistered) {

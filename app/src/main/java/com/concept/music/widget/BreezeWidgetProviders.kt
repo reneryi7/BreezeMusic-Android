@@ -16,11 +16,17 @@ abstract class BaseBreezeWidgetProvider(
     private val sizeClass: BreezeWidgetSizeClass
 ) : AppWidgetProvider() {
 
+    override fun onEnabled(context: Context) {
+        super.onEnabled(context)
+        BreezeWidgetManager.onProviderWidgetsUpdated(context, sizeClass)
+    }
+
     override fun onUpdate(
         context: Context,
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray
     ) {
+        BreezeWidgetManager.onProviderWidgetsUpdated(context, sizeClass)
         BreezeWidgetManager.requestUpdateProvider(
             context = context,
             sizeClass = sizeClass,
@@ -50,6 +56,11 @@ abstract class BaseBreezeWidgetProvider(
             super.onReceive(context, intent)
             val action = intent.action ?: return
             when (action) {
+                BreezeWidgetActions.ACTION_WIDGET_PINNED -> {
+                    if (SecurityGuards.verifyInternalIntent(context, intent)) {
+                        BreezeWidgetManager.onWidgetPinnedConfirmed(context, sizeClass)
+                    }
+                }
                 BreezeWidgetActions.ACTION_TOGGLE_PLAY,
                 BreezeWidgetActions.ACTION_NEXT,
                 BreezeWidgetActions.ACTION_PREV,

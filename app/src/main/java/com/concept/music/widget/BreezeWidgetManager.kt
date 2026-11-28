@@ -19,7 +19,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
 object BreezeWidgetActions {
@@ -30,14 +34,15 @@ object BreezeWidgetActions {
     const val ACTION_CYCLE_PLAY_MODE = "com.concept.music.ACTION_WIDGET_CYCLE_PLAY_MODE"
     const val ACTION_OPEN_NOW_PLAYING = "com.concept.music.ACTION_WIDGET_OPEN_NOW_PLAYING"
     const val EXTRA_OPEN_NOW_PLAYING = "extra_widget_open_now_playing"
+    const val ACTION_WIDGET_PINNED = "com.concept.music.ACTION_WIDGET_PINNED"
+    const val EXTRA_PINNED_SIZE_CLASS = "extra_widget_pinned_size_class"
 }
 
 /**
  * 微风音乐桌面小组件全局调度中枢：
- * - 管理 4 款独立尺寸卡片（4×2 / 4×1 / 2×2 / 4×4）的统一状态同步与离屏渲染；
- * - 无已添加小组件时 O(1) 短路零开销；
- * - 熄屏期间挂起 IPC 渲染推送，亮屏恢复时一次性补齐；
- * - 进度更新采用 12 秒节流 + 跳变穿透，杜绝频繁唤醒耗电。
+ * - 管理 4 款独立尺寸卡片（4×2 / 4×1 / 2×2 / 4×4）的统一状态同步与两阶段秒绘（缓存/占位 0ms 直出 + 异步补封面）；
+ * - 歌词换行走 AppWidgetManager.partiallyUpdateAppWidget 零闪烁轻量局部刷新，触发 4×4 原生 ViewFlipper 平滑滚动过渡；
+ * - 无已添加小组件时 O(1) 短路零开销；熄屏期间挂起 IPC 推送，亮屏恢复时一次性补齐。
  */
 object BreezeWidgetManager {
     private const val STATE_PREFS_NAME = "breeze_widget_playback_snapshot_v2"
@@ -63,6 +68,25 @@ object BreezeWidgetManager {
 
     @Volatile
     private var scheduledRefreshJob: Job? = null
+
+    @Volatile
+    private var lyricFlipJob: Job? = null
+
+    private val stageFlipperSlot = AtomicInteger(0)
+
+    private val _widgetPinnedEvents = MutableSharedFlow<BreezeWidgetSizeClass>(extraBufferCapacity = 4)
+    val widgetPinnedEvents: SharedFlow<BreezeWidgetSizeClass> = _widgetPinnedEvents.asSharedFlow()
+
+    private val pinConfirmLock = Any()
+
+    @Volatile
+    private var pendingPinBaselineCount: Int = -1
+
+    @Volatile
+    private var pendingPinTimestampMs: Long = 0L
+
+    @Volatile
+    private var lastPinnedEmitElapsedMs: Long = 0L
 
     @Volatile
     var onWidgetCommand: ((String) -> Unit)? = null
@@ -107,20 +131,106 @@ object BreezeWidgetManager {
 
     fun hasAnyActiveWidgets(context: Context): Boolean = countActiveWidgets(context) > 0
 
+    /**
+     * 判断当前桌面是否存在需要实时歌词同步的小组件（4×4 / 4×2 / 4×1 且配置已开启歌词显示）
+     */
+    fun hasActiveLyricWidget(context: Context): Boolean {
+        val appCtx = context.applicationContext
+        BreezeWidgetPrefs.init(appCtx)
+        if (!BreezeWidgetPrefs.config.value.showLyric) return false
+        return runCatching {
+            val manager = AppWidgetManager.getInstance(appCtx)
+            providerSpecs.any { (sizeClass, cls) ->
+                sizeClass != BreezeWidgetSizeClass.SQUARE_2X2 &&
+                    (manager.getAppWidgetIds(ComponentName(appCtx, cls))?.isNotEmpty() == true)
+            }
+        }.getOrDefault(false)
+    }
+
     fun isPinAppWidgetSupported(context: Context): Boolean {
         return runCatching {
-            AppWidgetManager.getInstance(context.applicationContext).isRequestPinAppWidgetSupported
+            val host = BreezeWidgetPinAdapter.findHostActivity(context) ?: context.applicationContext
+            AppWidgetManager.getInstance(host).isRequestPinAppWidgetSupported
         }.getOrDefault(false)
     }
 
     fun requestPinWidget(context: Context, sizeClass: BreezeWidgetSizeClass): Boolean {
-        return runCatching {
-            val appCtx = context.applicationContext
-            val manager = AppWidgetManager.getInstance(appCtx)
-            if (!manager.isRequestPinAppWidgetSupported) return@runCatching false
-            val component = ComponentName(appCtx, providerClassFor(sizeClass))
-            manager.requestPinAppWidget(component, null, null)
-        }.getOrDefault(false)
+        return requestPinWidgetAdapted(context, sizeClass).requestAccepted
+    }
+
+    /**
+     * 全厂商适配的一键添加入口：
+     * 使用前台 Activity 上下文 + extras = null（避免大 Bitmap RemoteViews 导致 ColorOS 桌面跨进程异步丢弃）发起请求，
+     * 并记录添加前小组件基线数量，确保即使系统丢弃 successCallback 或走极简直通通道也能准确感知落地。
+     */
+    fun requestPinWidgetAdapted(
+        context: Context,
+        sizeClass: BreezeWidgetSizeClass,
+        strategy: WidgetPinStrategy = WidgetPinStrategy.STANDARD_CLEAN
+    ): WidgetPinAttemptResult {
+        val result = BreezeWidgetPinAdapter.requestPinWidgetAdapted(
+            context = context,
+            sizeClass = sizeClass,
+            previewRemoteViews = null,
+            strategy = strategy
+        )
+        if (result.requestAccepted) {
+            synchronized(pinConfirmLock) {
+                val now = SystemClock.elapsedRealtime()
+                if (pendingPinBaselineCount < 0 || (now - pendingPinTimestampMs) > 45_000L) {
+                    pendingPinBaselineCount = result.beforeWidgetCount
+                }
+                pendingPinTimestampMs = now
+            }
+        }
+        return result
+    }
+
+    internal fun onWidgetPinnedConfirmed(context: Context, sizeClass: BreezeWidgetSizeClass) {
+        emitWidgetPinnedOnce(sizeClass)
+        requestRefreshAll(context.applicationContext)
+        PlaybackService.refreshWidgetLyricTickerIfActive()
+    }
+
+    /**
+     * 当桌面完成绑定触发 Provider.onEnabled / onUpdate 时，若处于近期一键添加窗口且桌面实例数量增加，
+     * 立即通知工坊页面添加成功（兼容 successCallback = null 极简通道以及不回调 PendingIntent 的国产 ROM）。
+     */
+    internal fun onProviderWidgetsUpdated(context: Context, sizeClass: BreezeWidgetSizeClass) {
+        val shouldCheck = synchronized(pinConfirmLock) {
+            pendingPinBaselineCount >= 0 && (SystemClock.elapsedRealtime() - pendingPinTimestampMs) <= 60_000L
+        }
+        if (!shouldCheck) return
+        val nowCount = countActiveWidgets(context)
+        val detectedAdded = synchronized(pinConfirmLock) {
+            if (pendingPinBaselineCount >= 0 && nowCount > pendingPinBaselineCount) {
+                pendingPinBaselineCount = -1
+                pendingPinTimestampMs = 0L
+                true
+            } else {
+                false
+            }
+        }
+        if (detectedAdded) {
+            emitWidgetPinnedOnce(sizeClass)
+        }
+    }
+
+    private fun emitWidgetPinnedOnce(sizeClass: BreezeWidgetSizeClass) {
+        val shouldEmit = synchronized(pinConfirmLock) {
+            pendingPinBaselineCount = -1
+            pendingPinTimestampMs = 0L
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastPinnedEmitElapsedMs < 1_800L) {
+                false
+            } else {
+                lastPinnedEmitElapsedMs = now
+                true
+            }
+        }
+        if (shouldEmit) {
+            _widgetPinnedEvents.tryEmit(sizeClass)
+        }
     }
 
     private fun ensureSnapshotLoaded(context: Context) {
@@ -260,9 +370,98 @@ object BreezeWidgetManager {
             playMode = playMode ?: prev.playMode
         )
         if (next == prev) return
+
+        val onlyLyricsChanged = next.title == prev.title &&
+            next.artist == prev.artist &&
+            next.isPlaying == prev.isPlaying &&
+            next.isFavorite == prev.isFavorite &&
+            next.playMode == prev.playMode &&
+            (next.prevLyric != prev.prevLyric || next.currentLyric != prev.currentLyric || next.nextLyric != prev.nextLyric)
+
         cachedSnapshot = next
         persistSnapshot(appCtx, next)
-        scheduleRefreshAll(appCtx, debounceMs = 60L)
+
+        if (onlyLyricsChanged) {
+            pushPartialLyricTransition(appCtx, next)
+        } else {
+            scheduleRefreshAll(appCtx, debounceMs = 60L)
+        }
+    }
+
+    /**
+     * 歌词换行专属极速局部推送通道：
+     * 仅更新歌词槽并切换 4×4 ViewFlipper 触发丝滑上推滚动动画，不重建背景与封面，彻底杜绝闪烁与卡顿。
+     */
+    fun updateLyricLine(
+        context: Context,
+        songTitle: String?,
+        artist: String?,
+        prevLyric: String,
+        currentLyric: String,
+        nextLyric: String,
+        isPlaying: Boolean
+    ) {
+        updatePartialState(
+            context = context,
+            songTitle = songTitle,
+            artist = artist,
+            prevLyric = prevLyric,
+            currentLyric = currentLyric,
+            nextLyric = nextLyric,
+            isPlaying = isPlaying
+        )
+    }
+
+    private fun pushPartialLyricTransition(
+        appCtx: Context,
+        snap: BreezeWidgetPlaybackSnapshot
+    ) {
+        if (!isScreenInteractive(appCtx)) {
+            pendingRefreshWhileScreenOff = true
+            return
+        }
+        if (!hasActiveLyricWidget(appCtx)) return
+        lyricFlipJob?.cancel()
+        lyricFlipJob = scope.launch {
+            runCatching {
+                BreezeWidgetPrefs.init(appCtx)
+                val config = BreezeWidgetPrefs.config.value
+                if (!config.showLyric) return@launch
+                val isAppDark = ThemeManager.isDarkTheme(appCtx)
+                val (cachedArt, _) = BreezeWidgetArtPipeline.peekCachedArtwork(snap, needStackedNextCovers = false)
+                val palette = resolveBreezeWidgetPalette(
+                    config = config,
+                    isAppDark = isAppDark,
+                    coverSeedColor = cachedArt.extractedPalette?.dominantAccent,
+                    coverSecondaryColor = cachedArt.extractedPalette?.secondaryAccent,
+                    coverTertiaryColor = cachedArt.extractedPalette?.tertiaryAccent
+                )
+                val manager = AppWidgetManager.getInstance(appCtx)
+                val nextSlot = stageFlipperSlot.updateAndGet { (it + 1) and 1 }
+                providerSpecs.forEach { (sizeClass, cls) ->
+                    if (sizeClass == BreezeWidgetSizeClass.SQUARE_2X2) return@forEach
+                    val ids = runCatching {
+                        manager.getAppWidgetIds(ComponentName(appCtx, cls))
+                    }.getOrNull() ?: return@forEach
+                    if (ids.isEmpty()) return@forEach
+                    ids.forEach { id ->
+                        val options = runCatching { manager.getAppWidgetOptions(id) }.getOrNull()
+                        val deltaViews = BreezeWidgetRemoteViewsBuilder.buildPartialLyricUpdate(
+                            context = appCtx,
+                            sizeClass = sizeClass,
+                            config = config,
+                            snapshot = snap,
+                            palette = palette,
+                            widgetOptions = options,
+                            targetStageSlotIndex = nextSlot
+                        )
+                        if (deltaViews != null) {
+                            manager.partiallyUpdateAppWidget(id, deltaViews)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -312,6 +511,7 @@ object BreezeWidgetManager {
         val appCtx = context.applicationContext
         if (!hasAnyActiveWidgets(appCtx)) return
         scheduleRefreshAll(appCtx, debounceMs = 20L, bypassScreenCheck = true)
+        PlaybackService.refreshWidgetLyricTickerIfActive()
     }
 
     fun onScreenInteractiveResumed(context: Context) {
@@ -338,6 +538,7 @@ object BreezeWidgetManager {
         val appCtx = context.applicationContext
         scope.launch {
             renderAndPushWidgets(appCtx, listOf(Triple(sizeClass, providerClass, appWidgetIds)))
+            PlaybackService.refreshWidgetLyricTickerIfActive()
         }
     }
 
@@ -436,6 +637,11 @@ object BreezeWidgetManager {
         }
     }
 
+    /**
+     * 两阶段秒绘推送：
+     * - 阶段一（< 12ms，零网络等待）：若内存无封面缓存，先用缓存/占位瞬间推给桌面，彻底消除 ColorOS 添加卡顿；
+     * - 阶段二（异步 IO）：拉取真实专辑封面并提取 24-bin 配色后静默刷新为完整形态。
+     */
     private suspend fun renderAndPushWidgets(
         appCtx: Context,
         targets: List<Triple<BreezeWidgetSizeClass, Class<*>, IntArray>>
@@ -446,35 +652,64 @@ object BreezeWidgetManager {
             val config = BreezeWidgetPrefs.config.value
             val snap = cachedSnapshot
             val isAppDark = ThemeManager.isDarkTheme(appCtx)
-            val artwork = BreezeWidgetArtPipeline.loadArtwork(
-                context = appCtx,
-                snapshot = snap,
-                needStackedNextCovers = config.style == BreezeWidgetStyle.WATERCOLOR_STACK
-            )
-            val palette = resolveBreezeWidgetPalette(
-                config = config,
-                isAppDark = isAppDark,
-                coverSeedColor = artwork.extractedPalette?.dominantAccent,
-                coverSecondaryColor = artwork.extractedPalette?.secondaryAccent,
-                coverTertiaryColor = artwork.extractedPalette?.tertiaryAccent
-            )
+            val needStacked = config.style == BreezeWidgetStyle.WATERCOLOR_STACK
             val manager = AppWidgetManager.getInstance(appCtx)
-            targets.forEach { (sizeClass, cls, ids) ->
-                ids.forEach { id ->
-                    val options = runCatching { manager.getAppWidgetOptions(id) }.getOrNull()
-                    val remoteViews = BreezeWidgetRemoteViewsBuilder.build(
-                        context = appCtx,
-                        sizeClass = sizeClass,
-                        providerClass = cls,
-                        appWidgetId = id,
-                        config = config,
-                        snapshot = snap,
-                        palette = palette,
-                        artwork = artwork,
-                        widgetOptions = options
-                    )
-                    manager.updateAppWidget(id, remoteViews)
+            val currentSlot = stageFlipperSlot.get() and 1
+
+            val (cachedArt, fullyReady) = BreezeWidgetArtPipeline.peekCachedArtwork(snap, needStacked)
+            pushTargetsWithArtwork(appCtx, manager, targets, config, snap, isAppDark, cachedArt, currentSlot)
+
+            if (!fullyReady) {
+                val loadedArtwork = BreezeWidgetArtPipeline.loadArtwork(
+                    context = appCtx,
+                    snapshot = snap,
+                    needStackedNextCovers = needStacked
+                )
+                if (loadedArtwork.primaryCover != null || loadedArtwork.nextCover1 != null || loadedArtwork.nextCover2 != null) {
+                    val latestSnap = cachedSnapshot
+                    if (latestSnap.songId == snap.songId && latestSnap.coverUrl == snap.coverUrl) {
+                        pushTargetsWithArtwork(
+                            appCtx, manager, targets, config, latestSnap, isAppDark, loadedArtwork, stageFlipperSlot.get() and 1
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    private fun pushTargetsWithArtwork(
+        appCtx: Context,
+        manager: AppWidgetManager,
+        targets: List<Triple<BreezeWidgetSizeClass, Class<*>, IntArray>>,
+        config: BreezeWidgetConfig,
+        snap: BreezeWidgetPlaybackSnapshot,
+        isAppDark: Boolean,
+        artwork: WidgetLoadedArtwork,
+        stageSlot: Int
+    ) {
+        val palette = resolveBreezeWidgetPalette(
+            config = config,
+            isAppDark = isAppDark,
+            coverSeedColor = artwork.extractedPalette?.dominantAccent,
+            coverSecondaryColor = artwork.extractedPalette?.secondaryAccent,
+            coverTertiaryColor = artwork.extractedPalette?.tertiaryAccent
+        )
+        targets.forEach { (sizeClass, cls, ids) ->
+            ids.forEach { id ->
+                val options = runCatching { manager.getAppWidgetOptions(id) }.getOrNull()
+                val remoteViews = BreezeWidgetRemoteViewsBuilder.build(
+                    context = appCtx,
+                    sizeClass = sizeClass,
+                    providerClass = cls,
+                    appWidgetId = id,
+                    config = config,
+                    snapshot = snap,
+                    palette = palette,
+                    artwork = artwork,
+                    widgetOptions = options,
+                    stageLyricSlotIndex = stageSlot
+                )
+                manager.updateAppWidget(id, remoteViews)
             }
         }
     }
@@ -492,32 +727,49 @@ object BreezeWidgetManager {
             val config = BreezeWidgetPrefs.config.value
             val snap = cachedSnapshot
             val isAppDark = ThemeManager.isDarkTheme(appCtx)
-            val artwork = BreezeWidgetArtPipeline.loadArtwork(
-                context = appCtx,
-                snapshot = snap,
-                needStackedNextCovers = config.style == BreezeWidgetStyle.WATERCOLOR_STACK
-            )
-            val palette = resolveBreezeWidgetPalette(
-                config = config,
-                isAppDark = isAppDark,
-                coverSeedColor = artwork.extractedPalette?.dominantAccent,
-                coverSecondaryColor = artwork.extractedPalette?.secondaryAccent,
-                coverTertiaryColor = artwork.extractedPalette?.tertiaryAccent
-            )
+            val needStacked = config.style == BreezeWidgetStyle.WATERCOLOR_STACK
             val manager = AppWidgetManager.getInstance(appCtx)
             val resolvedOptions = options ?: runCatching { manager.getAppWidgetOptions(appWidgetId) }.getOrNull()
-            val remoteViews = BreezeWidgetRemoteViewsBuilder.build(
-                context = appCtx,
-                sizeClass = sizeClass,
-                providerClass = providerClass,
-                appWidgetId = appWidgetId,
-                config = config,
-                snapshot = snap,
-                palette = palette,
-                artwork = artwork,
-                widgetOptions = resolvedOptions
-            )
-            manager.updateAppWidget(appWidgetId, remoteViews)
+
+            fun pushOnce(art: WidgetLoadedArtwork, activeSnap: BreezeWidgetPlaybackSnapshot) {
+                val palette = resolveBreezeWidgetPalette(
+                    config = config,
+                    isAppDark = isAppDark,
+                    coverSeedColor = art.extractedPalette?.dominantAccent,
+                    coverSecondaryColor = art.extractedPalette?.secondaryAccent,
+                    coverTertiaryColor = art.extractedPalette?.tertiaryAccent
+                )
+                val remoteViews = BreezeWidgetRemoteViewsBuilder.build(
+                    context = appCtx,
+                    sizeClass = sizeClass,
+                    providerClass = providerClass,
+                    appWidgetId = appWidgetId,
+                    config = config,
+                    snapshot = activeSnap,
+                    palette = palette,
+                    artwork = art,
+                    widgetOptions = resolvedOptions,
+                    stageLyricSlotIndex = stageFlipperSlot.get() and 1
+                )
+                manager.updateAppWidget(appWidgetId, remoteViews)
+            }
+
+            val (cachedArt, fullyReady) = BreezeWidgetArtPipeline.peekCachedArtwork(snap, needStacked)
+            pushOnce(cachedArt, snap)
+
+            if (!fullyReady) {
+                val loadedArtwork = BreezeWidgetArtPipeline.loadArtwork(
+                    context = appCtx,
+                    snapshot = snap,
+                    needStackedNextCovers = needStacked
+                )
+                if (loadedArtwork.primaryCover != null || loadedArtwork.nextCover1 != null || loadedArtwork.nextCover2 != null) {
+                    val latestSnap = cachedSnapshot
+                    if (latestSnap.songId == snap.songId && latestSnap.coverUrl == snap.coverUrl) {
+                        pushOnce(loadedArtwork, latestSnap)
+                    }
+                }
+            }
         }
     }
 

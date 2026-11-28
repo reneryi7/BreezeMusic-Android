@@ -341,6 +341,7 @@ fun MainContent(
     // 将 likedSongs / playlists / followedArtists 下沉至实际消费的叶子作用域订阅，避免冷启动曲库水合触发 MainContent 根级重组
 
     var showNowPlaying by remember { mutableStateOf(false) }
+    var nowPlayingInnerBackInterceptor by remember { mutableStateOf<(() -> Boolean)?>(null) }
     var showGlobalQueueSheet by remember { mutableStateOf(false) }
     var showCommentsScreen by remember { mutableStateOf(false) }
     var activeResourceCommentTarget by remember { mutableStateOf<ResourceCommentOverlayTarget?>(null) }
@@ -397,10 +398,19 @@ fun MainContent(
     val incomingIntentShareText by MainActivity.incomingSharedTextFlow.collectAsState()
     val openNowPlayingRequestToken by MainActivity.openNowPlayingRequestFlow.collectAsState()
 
-    // 0. 响应桌面小组件点击：直达全屏沉浸播放页（支持冷启动等待队列水合后自动滑出）
+    // 0. 响应桌面小组件点击：直达全屏沉浸播放页（清理残留浮层与陈旧返回标记，支持冷启动等待队列水合后自动滑出）
     LaunchedEffect(openNowPlayingRequestToken, currentSong) {
         if (openNowPlayingRequestToken == 0L) return@LaunchedEffect
         if (currentSong != null) {
+            showCommentsScreen = false
+            showViperEffectOverlay = false
+            activeResourceCommentTarget = null
+            showGlobalQueueSheet = false
+            actionSheetSong = null
+            detailSheetSong = null
+            multiArtistPickerSong = null
+            reopenNowPlayingAtBackStackId = null
+            reopenNowPlayingOnSameRouteBack = false
             showNowPlaying = true
             MainActivity.openNowPlayingRequestFlow.value = 0L
         } else {
@@ -1456,6 +1466,33 @@ fun MainContent(
             )
         }
 
+        // 常驻根层级播放页返回拦截器（脱离 AnimatedVisibility 生命周期）：
+        // 彻底修复后台点击小组件经 onNewIntent 打开播放页后，ColorOS / Android 14+ 预测性返回漏截直接退回桌面的问题，
+        // 确保按返回键先逐级收起内部面板，再平滑收起播放页停留在微风音乐主界面内。
+        androidx.activity.compose.BackHandler(
+            enabled = showNowPlaying &&
+                currentSong != null &&
+                !showCommentsScreen &&
+                !showViperEffectOverlay &&
+                activeResourceCommentTarget == null &&
+                actionSheetSong == null &&
+                songToAddToPlaylist == null &&
+                !showCreatePlaylistFromGlobal &&
+                detailSheetSong == null &&
+                songToDownload == null &&
+                songToShare == null &&
+                playlistToShare == null &&
+                detectedSharedTarget == null &&
+                multiArtistPickerSong == null
+        ) {
+            val consumedByInner = nowPlayingInnerBackInterceptor?.invoke() == true
+            if (!consumedByInner) {
+                showNowPlaying = false
+                reopenNowPlayingAtBackStackId = null
+                reopenNowPlayingOnSameRouteBack = false
+            }
+        }
+
         // 沉浸式全屏 Edge-to-Edge 播放器（100% 满屏宽度零缩放 + 450ms/390ms 无过冲柔顺曲线，彻底杜绝进出抖动与四周白边）
         AnimatedVisibility(
             visible = showNowPlaying && currentSong != null,
@@ -1486,7 +1523,10 @@ fun MainContent(
                 },
                 onOpenArtist = navigateToSongArtist,
                 onOpenSingleArtist = navigateToSingleArtist,
-                onOpenAlbum = navigateToSongAlbum
+                onOpenAlbum = navigateToSongAlbum,
+                onRegisterInnerBackHandler = { interceptor ->
+                    nowPlayingInnerBackInterceptor = interceptor
+                }
             )
         }
 
@@ -1939,7 +1979,8 @@ private fun IsolatedNowPlayingHost(
     onOpenViperEffectPage: () -> Unit,
     onOpenArtist: (Song) -> Unit = {},
     onOpenSingleArtist: ((artistName: String, resolvedArtistId: String?) -> Unit)? = null,
-    onOpenAlbum: (Song) -> Unit = {}
+    onOpenAlbum: (Song) -> Unit = {},
+    onRegisterInnerBackHandler: (((() -> Boolean))?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val playerUiState by musicPlayerViewModel.uiState.collectAsState()
@@ -2048,6 +2089,8 @@ private fun IsolatedNowPlayingHost(
         onOpenSingleArtist = onOpenSingleArtist,
         onOpenAlbum = { selectedSong -> onOpenAlbum(selectedSong) },
         onSyncCarLyricOffset = { musicPlayerViewModel.notifyCarLyricOffsetChanged() },
+        useHoistedBackHandler = true,
+        onRegisterInnerBackHandler = onRegisterInnerBackHandler,
         motionOrientationPermissionEnabled = playerUiState.motionOrientationPermissionEnabled
     )
 }

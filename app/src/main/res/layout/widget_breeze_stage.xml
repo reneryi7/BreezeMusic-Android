@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 4×4 大屏与平板沉浸歌词舞台 -->
+<!-- 4×4 杂志级沉浸唱片台：上排非对称大片封面与大字曲目 + 中央双槽 ViewFlipper 丝滑滚动歌词舞台 + 底部时间轴与饱满五键控台 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
@@ -17,132 +17,283 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:paddingLeft="18dp"
-        android:paddingTop="16dp"
-        android:paddingRight="18dp"
-        android:paddingBottom="16dp">
+        android:paddingLeft="15dp"
+        android:paddingTop="14dp"
+        android:paddingRight="15dp"
+        android:paddingBottom="12dp">
 
-        <!-- 顶部曲名 + 音质胶囊 -->
+        <!-- 区域一：上排杂志级非对称 Hero 唱片舞台（左大舞台 + 右立体排版元信息） -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center"
+            android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/widget_song_title"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:text="@string/app_name"
-                android:textColor="#EEF3FA"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
             <ImageView
-                android:id="@+id/widget_quality_badge_img"
-                android:layout_width="wrap_content"
-                android:layout_height="17dp"
-                android:layout_marginStart="6dp"
-                android:adjustViewBounds="true"
-                android:contentDescription="@null"
+                android:id="@+id/widget_artwork_stage"
+                android:layout_width="132dp"
+                android:layout_height="104dp"
+                android:contentDescription="@string/app_name"
                 android:scaleType="fitCenter"
-                android:visibility="gone" />
+                android:src="@drawable/bg_widget_stage_art_preview" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:gravity="center_vertical"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/widget_song_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:lineSpacingMultiplier="0.98"
+                    android:maxLines="2"
+                    android:text="@string/app_name"
+                    android:textColor="#EEF3FA"
+                    android:textSize="17.5sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/widget_song_artist"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="@string/widget_idle_subtitle"
+                    android:textColor="#B7C5D9"
+                    android:textSize="12.5sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="7dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:id="@+id/widget_quality_badge_img"
+                        android:layout_width="wrap_content"
+                        android:layout_height="18dp"
+                        android:layout_marginEnd="6dp"
+                        android:adjustViewBounds="true"
+                        android:contentDescription="@null"
+                        android:scaleType="fitCenter"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/widget_song_album"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textColor="#8FA2BC"
+                        android:textSize="11sp"
+                        android:visibility="gone" />
+                </LinearLayout>
+            </LinearLayout>
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/widget_song_artist"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:ellipsize="end"
-            android:gravity="center"
-            android:maxLines="1"
-            android:text="@string/widget_idle_subtitle"
-            android:textColor="#B7C5D9"
-            android:textSize="12sp" />
-
-        <!-- 中央大视觉舞台（黑胶封套 / 菱形棱镜光晕 / 水彩三叠卡） -->
-        <ImageView
-            android:id="@+id/widget_artwork_stage"
+        <!-- 区域二：中央双槽 ViewFlipper 丝滑滚动歌词舞台（换行触发原生 GPU 上推渐变过渡，零整卡闪烁） -->
+        <ViewFlipper
+            android:id="@+id/widget_lyric_flipper"
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_marginTop="10dp"
-            android:layout_marginBottom="8dp"
             android:layout_weight="1"
-            android:contentDescription="@string/app_name"
-            android:scaleType="fitCenter"
-            android:src="@drawable/bg_widget_stage_art_preview" />
+            android:autoStart="false"
+            android:inAnimation="@anim/widget_lyric_roll_in"
+            android:outAnimation="@anim/widget_lyric_roll_out"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp">
 
-        <!-- 三行居中沉浸歌词区 -->
+            <!-- 歌词双缓冲槽位 0 -->
+            <LinearLayout
+                android:id="@+id/widget_lyric_slot_0"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center_vertical"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/widget_lyric_prev_0"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="2dp"
+                    android:textColor="#8094A3B8"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/widget_lyric_active_row_0"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:layout_marginBottom="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:id="@+id/widget_lyric_accent_bar_0"
+                        android:layout_width="4dp"
+                        android:layout_height="26dp"
+                        android:layout_marginEnd="8dp"
+                        android:contentDescription="@null"
+                        android:scaleType="fitXY"
+                        android:src="@drawable/bg_widget_lyric_accent_preview" />
+
+                    <TextView
+                        android:id="@+id/widget_lyric_line_0"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:lineSpacingMultiplier="1.05"
+                        android:maxLines="2"
+                        android:text="@string/widget_idle_lyric"
+                        android:textColor="#8CC8FF"
+                        android:textSize="15.5sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/widget_lyric_next_0"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="2dp"
+                    android:textColor="#8094A3B8"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- 歌词双缓冲槽位 1 -->
+            <LinearLayout
+                android:id="@+id/widget_lyric_slot_1"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center_vertical"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/widget_lyric_prev_1"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="2dp"
+                    android:textColor="#8094A3B8"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/widget_lyric_active_row_1"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:layout_marginBottom="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:id="@+id/widget_lyric_accent_bar_1"
+                        android:layout_width="4dp"
+                        android:layout_height="26dp"
+                        android:layout_marginEnd="8dp"
+                        android:contentDescription="@null"
+                        android:scaleType="fitXY"
+                        android:src="@drawable/bg_widget_lyric_accent_preview" />
+
+                    <TextView
+                        android:id="@+id/widget_lyric_line_1"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:lineSpacingMultiplier="1.05"
+                        android:maxLines="2"
+                        android:text="@string/widget_idle_lyric"
+                        android:textColor="#8CC8FF"
+                        android:textSize="15.5sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/widget_lyric_next_1"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="2dp"
+                    android:textColor="#8094A3B8"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+        </ViewFlipper>
+
+        <!-- 区域三：圆润胶囊进度条 + 等宽数字时间轴 -->
         <LinearLayout
+            android:id="@+id/widget_progress_row"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_horizontal"
-            android:orientation="vertical">
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
 
             <TextView
-                android:id="@+id/widget_lyric_prev"
-                android:layout_width="match_parent"
+                android:id="@+id/widget_time_current"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:gravity="center"
-                android:maxLines="1"
-                android:textColor="#8094A3B8"
-                android:textSize="11.5sp"
-                android:visibility="gone" />
+                android:fontFeatureSettings="tnum"
+                android:text="00:00"
+                android:textColor="#94A3B8"
+                android:textSize="10.5sp" />
+
+            <ImageView
+                android:id="@+id/widget_progress_image"
+                android:layout_width="0dp"
+                android:layout_height="10dp"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:contentDescription="@null"
+                android:scaleType="fitXY" />
 
             <TextView
-                android:id="@+id/widget_lyric_line"
-                android:layout_width="match_parent"
+                android:id="@+id/widget_time_total"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:layout_marginBottom="2dp"
-                android:ellipsize="end"
-                android:gravity="center"
-                android:maxLines="1"
-                android:text="@string/widget_idle_lyric"
-                android:textColor="#8CC8FF"
-                android:textSize="13.5sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_lyric_next"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:gravity="center"
-                android:maxLines="1"
-                android:textColor="#8094A3B8"
-                android:textSize="11.5sp"
-                android:visibility="gone" />
+                android:fontFeatureSettings="tnum"
+                android:text="00:00"
+                android:textColor="#94A3B8"
+                android:textSize="10.5sp" />
         </LinearLayout>
 
-        <!-- 胶囊进度条 -->
-        <ImageView
-            android:id="@+id/widget_progress_image"
-            android:layout_width="match_parent"
-            android:layout_height="8dp"
-            android:layout_marginTop="10dp"
-            android:contentDescription="@null"
-            android:scaleType="fitXY"
-            android:visibility="gone" />
-
-        <!-- 底部完整五键播控台：模式 / 上一首 / 播放暂停 / 下一首 / 红心喜欢 -->
+        <!-- 区域四：圆润饱满立体五键播控台（模式 / 上一首 / 主播放大钮 / 下一首 / 红心喜欢） -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
-            android:gravity="center"
+            android:gravity="center_vertical"
             android:orientation="horizontal">
 
             <ImageView
                 android:id="@+id/widget_btn_play_mode"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
+                android:layout_width="38dp"
+                android:layout_height="38dp"
                 android:contentDescription="@string/widget_cd_play_mode"
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_widget_mode_preview" />
@@ -154,26 +305,26 @@
 
             <ImageView
                 android:id="@+id/widget_btn_prev"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
                 android:contentDescription="@string/widget_cd_prev"
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_widget_prev_preview" />
 
             <ImageView
                 android:id="@+id/widget_btn_play"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="14dp"
-                android:layout_marginEnd="14dp"
+                android:layout_width="54dp"
+                android:layout_height="54dp"
+                android:layout_marginStart="11dp"
+                android:layout_marginEnd="11dp"
                 android:contentDescription="@string/widget_cd_play_pause"
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_widget_play_preview" />
 
             <ImageView
                 android:id="@+id/widget_btn_next"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
                 android:contentDescription="@string/widget_cd_next"
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_widget_next_preview" />
@@ -185,8 +336,8 @@
 
             <ImageView
                 android:id="@+id/widget_btn_favorite"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
+                android:layout_width="38dp"
+                android:layout_height="38dp"
                 android:contentDescription="@string/widget_cd_favorite"
                 android:scaleType="fitCenter"
                 android:src="@drawable/ic_widget_heart_preview" />

@@ -7,11 +7,16 @@ import com.concept.music.ui.components.extractCoverMeshColorsFromPixels
 import com.concept.music.ui.theme.wcagContrastRatio
 import com.concept.music.widget.BreezeWidgetActions
 import com.concept.music.widget.BreezeWidgetConfig
+import com.concept.music.widget.BreezeWidgetPinAdapter
 import com.concept.music.widget.BreezeWidgetPlaybackSnapshot
+import com.concept.music.widget.BreezeWidgetSizeClass
 import com.concept.music.widget.BreezeWidgetStyle
 import com.concept.music.widget.BreezeWidgetThemeMode
+import com.concept.music.widget.WidgetHostRom
+import com.concept.music.widget.formatWidgetDuration
 import com.concept.music.widget.resolveBreezeWidgetPalette
 import com.concept.music.widget.resolveQualityBadgeColorPair
+import com.concept.music.widget.resolveWidgetBackgroundSpec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -162,5 +167,118 @@ class BreezeWidgetTest {
         assertEquals(BreezeWidgetActions.ACTION_PREV, ConceptMusicWidgetUpdater.ACTION_WIDGET_PREV)
         assertEquals(BreezeWidgetActions.ACTION_TOGGLE_FAVORITE, ConceptMusicWidgetUpdater.ACTION_WIDGET_TOGGLE_FAVORITE)
         assertEquals(BreezeWidgetActions.ACTION_CYCLE_PLAY_MODE, ConceptMusicWidgetUpdater.ACTION_WIDGET_CYCLE_PLAY_MODE)
+    }
+
+    @Test
+    fun `resolveWidgetBackgroundSpec keeps restrained corner radii and preserves host aspect ratio`() {
+        for (size in BreezeWidgetSizeClass.entries) {
+            val spec = resolveWidgetBackgroundSpec(size)
+            assertTrue("画布宽应合理 size=$size", spec.widthPx in 80..520)
+            assertTrue("画布高应合理 size=$size", spec.heightPx in 56..520)
+            val minEdge = minOf(spec.widthPx, spec.heightPx).toFloat()
+            val ratio = spec.cornerRadiusPx / minEdge
+            if (size == BreezeWidgetSizeClass.CAPSULE_4X1) {
+                assertEquals(16f, spec.cornerRadiusDp, 0.01f)
+                assertTrue("4x1 圆角不得回退为夸张半圆胶囊 ratio=$ratio", ratio <= 0.281f)
+            } else {
+                assertTrue("卡片圆角应克制在 18dp..20dp 之间 dp=${spec.cornerRadiusDp}", spec.cornerRadiusDp in 18f..20f)
+                assertTrue("卡片圆角占比应克制 size=$size ratio=$ratio", ratio <= 0.161f)
+            }
+        }
+
+        // 传入桌面网格实际宽高时应按真实宽高比生成画布，避免 fitXY 拉伸圆角畸变
+        val wide4x2 = resolveWidgetBackgroundSpec(BreezeWidgetSizeClass.CARD_4X2, hostWidthDp = 360, hostHeightDp = 150)
+        val aspect = wide4x2.widthPx.toFloat() / wide4x2.heightPx.toFloat()
+        assertEquals(2.4f, aspect, 0.08f)
+
+        assertEquals("00:00", formatWidgetDuration(-100L))
+        assertEquals("00:00", formatWidgetDuration(0L))
+        assertEquals("01:34", formatWidgetDuration(94_000L))
+        assertEquals("04:06", formatWidgetDuration(246_000L))
+    }
+
+    @Test
+    fun `4x4 editorial stage layout and preview drawables match redesigned structure and restrained corners`() {
+        val root = resolveProjectRoot()
+        val stageXml = File(root, "app/src/main/res/layout/widget_breeze_stage.xml").readText(Charsets.UTF_8)
+        assertTrue(stageXml.contains("widget_song_album"))
+        assertTrue(stageXml.contains("widget_lyric_flipper"))
+        assertTrue(stageXml.contains("widget_lyric_roll_in"))
+        assertTrue(stageXml.contains("widget_lyric_roll_out"))
+        assertTrue(stageXml.contains("widget_lyric_accent_bar_0"))
+        assertTrue(stageXml.contains("widget_lyric_accent_bar_1"))
+        assertTrue(stageXml.contains("widget_lyric_line_0"))
+        assertTrue(stageXml.contains("widget_lyric_line_1"))
+        assertTrue(stageXml.contains("widget_progress_row"))
+        assertTrue(stageXml.contains("widget_time_current"))
+        assertTrue(stageXml.contains("widget_time_total"))
+        assertTrue(stageXml.contains("""android:maxLines="2""""))
+
+        assertTrue(File(root, "app/src/main/res/anim/widget_lyric_roll_in.xml").exists())
+        assertTrue(File(root, "app/src/main/res/anim/widget_lyric_roll_out.xml").exists())
+
+        val cardBgXml = File(root, "app/src/main/res/drawable/bg_widget_concept.xml").readText(Charsets.UTF_8)
+        val capsuleBgXml = File(root, "app/src/main/res/drawable/bg_widget_capsule_preview.xml").readText(Charsets.UTF_8)
+        assertTrue("4x2/2x2/4x4 预览圆角应收敛至 18dp", cardBgXml.contains("""android:radius="18dp""""))
+        assertTrue("4x1 预览圆角应收敛至 16dp", capsuleBgXml.contains("""android:radius="16dp""""))
+
+        // 验证四规格均同时声明静态 previewImage WebP 与零卡顿 previewLayout（兼容 ColorOS/MIUI/OriginOS 插件页）
+        val providerChecks = listOf(
+            Triple("app/src/main/res/xml/concept_music_widget_info.xml", "preview_widget_4x2", "widget_preview_4x2"),
+            Triple("app/src/main/res/xml/breeze_widget_compact_info.xml", "preview_widget_4x1", "widget_preview_4x1"),
+            Triple("app/src/main/res/xml/breeze_widget_square_info.xml", "preview_widget_2x2", "widget_preview_2x2"),
+            Triple("app/src/main/res/xml/breeze_widget_stage_info.xml", "preview_widget_4x4", "widget_preview_4x4")
+        )
+        providerChecks.forEach { (infoPath, previewImg, previewLayout) ->
+            val xml = File(root, infoPath).readText(Charsets.UTF_8)
+            assertTrue("$infoPath 必须声明 android:previewImage", xml.contains("""android:previewImage="@drawable/$previewImg""""))
+            assertTrue("$infoPath 必须声明轻量 android:previewLayout", xml.contains("""android:previewLayout="@layout/$previewLayout""""))
+            assertTrue("缺少静态预览 WebP 资源 $previewImg", File(root, "app/src/main/res/drawable-nodpi/$previewImg.webp").exists())
+            assertTrue("缺少极简预览布局 $previewLayout", File(root, "app/src/main/res/layout/$previewLayout.xml").exists())
+        }
+    }
+
+    @Test
+    fun `OEM widget pin adapter detects major ROMs and widget deep link preserves singleTask back stack`() {
+        assertEquals(WidgetHostRom.COLOR_OS, BreezeWidgetPinAdapter.detectWidgetHostRom("OPPO", "OPPO", oplusProp = "V15.0"))
+        assertEquals(WidgetHostRom.COLOR_OS, BreezeWidgetPinAdapter.detectWidgetHostRom("OnePlus", "OnePlus"))
+        assertEquals(WidgetHostRom.COLOR_OS, BreezeWidgetPinAdapter.detectWidgetHostRom("realme", "realme"))
+        assertEquals(WidgetHostRom.HYPER_OS_MIUI, BreezeWidgetPinAdapter.detectWidgetHostRom("Xiaomi", "Redmi", miuiProp = "V816"))
+        assertEquals(WidgetHostRom.ORIGIN_OS, BreezeWidgetPinAdapter.detectWidgetHostRom("vivo", "iQOO", vivoProp = "5.0"))
+        assertEquals(WidgetHostRom.HARMONY_EMUI, BreezeWidgetPinAdapter.detectWidgetHostRom("HUAWEI", "HUAWEI", harmonyProp = "4.2.0"))
+        assertEquals(WidgetHostRom.MAGIC_OS, BreezeWidgetPinAdapter.detectWidgetHostRom("HONOR", "HONOR", magicProp = "8.0"))
+        assertEquals(WidgetHostRom.ONE_UI, BreezeWidgetPinAdapter.detectWidgetHostRom("samsung", "samsung"))
+        assertEquals(WidgetHostRom.FLYME, BreezeWidgetPinAdapter.detectWidgetHostRom("meizu", "meizu", flymeProp = "Flyme 11"))
+        assertEquals(WidgetHostRom.AOSP_OTHER, BreezeWidgetPinAdapter.detectWidgetHostRom("Google", "google"))
+
+        for (rom in WidgetHostRom.entries) {
+            val guidance = BreezeWidgetPinAdapter.buildOemPinGuidance(rom, BreezeWidgetSizeClass.STAGE_4X4)
+            assertTrue(guidance.title.isNotBlank())
+            assertTrue(guidance.manualSteps.size >= 3)
+        }
+
+        val colorOsGuidance = BreezeWidgetPinAdapter.buildOemPinGuidance(WidgetHostRom.COLOR_OS, BreezeWidgetSizeClass.CARD_4X2)
+        assertTrue("ColorOS 权限说明应匹配真实选项「使用时允许」", colorOsGuidance.permissionTip.contains("使用时允许"))
+        assertFalse("ColorOS 权限说明不应误导用户寻找不存在的「始终允许」", colorOsGuidance.permissionTip.contains("始终允许"))
+        assertTrue("ColorOS 指引应提示检查「锁定桌面布局」", colorOsGuidance.permissionTip.contains("锁定桌面布局"))
+
+        val root = resolveProjectRoot()
+        val manifest = File(root, "app/src/main/AndroidManifest.xml").readText(Charsets.UTF_8)
+        assertTrue("MainActivity 应声明 singleTask 防止后台点组件返回直退桌面", manifest.contains("""android:launchMode="singleTask""""))
+        assertTrue("Manifest 应声明 INSTALL_SHORTCUT 权限以便国产桌面展示并放行桌面快捷方式开关", manifest.contains("com.android.launcher.permission.INSTALL_SHORTCUT"))
+
+        val pinAdapterCode = File(root, "app/src/main/java/com/concept/music/widget/BreezeWidgetPinAdapter.kt").readText(Charsets.UTF_8)
+        assertTrue("回调 PendingIntent 应使用 FLAG_IMMUTABLE 兼容 Android 14+ / ColorOS", pinAdapterCode.contains("PendingIntent.FLAG_IMMUTABLE"))
+        assertFalse("回调 PendingIntent 不应再使用 FLAG_MUTABLE", pinAdapterCode.contains("PendingIntent.FLAG_MUTABLE"))
+
+        val widgetManagerCode = File(root, "app/src/main/java/com/concept/music/widget/BreezeWidgetManager.kt").readText(Charsets.UTF_8)
+        assertTrue("一键添加默认应传 previewRemoteViews = null 避免 ColorOS 桌面因 Binder 载荷过载丢弃弹窗", widgetManagerCode.contains("previewRemoteViews = null"))
+        assertFalse("一键添加不应向 EXTRA_APPWIDGET_PREVIEW 传入含多张大 Bitmap 的动态预览", widgetManagerCode.contains("buildPinPreview("))
+
+        val builderCode = File(root, "app/src/main/java/com/concept/music/widget/BreezeWidgetRemoteViewsBuilder.kt").readText(Charsets.UTF_8)
+        assertFalse("singleTask 下点击小组件跳转不应附带 Intent.FLAG_ACTIVITY_CLEAR_TOP", builderCode.contains("Intent.FLAG_ACTIVITY_CLEAR_TOP"))
+
+        val mainActivityCode = File(root, "app/src/main/java/com/concept/music/MainActivity.kt").readText(Charsets.UTF_8)
+        assertTrue("MainActivity 应在根级提升播放页 BackHandler 并托管内部返回拦截", mainActivityCode.contains("useHoistedBackHandler = true"))
     }
 }

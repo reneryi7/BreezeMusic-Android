@@ -346,6 +346,8 @@ fun NowPlayingSheet(
     onRemoveFromQueue: (Song) -> Unit,
     onClearQueue: () -> Unit,
     onSyncCarLyricOffset: () -> Unit = {},
+    useHoistedBackHandler: Boolean = false,
+    onRegisterInnerBackHandler: (((() -> Boolean))?) -> Unit = {},
     positionProvider: () -> Long = { currentPositionMs }
 ) {
     if (song == null) return
@@ -575,17 +577,35 @@ fun NowPlayingSheet(
         }
     }
 
-    // 系统返回键：优先关闭已打开的子面板（队列/歌词设置），若正处于横屏播放页则退回竖屏，若处于歌词页则退回封面，否则收起播放页
-    BackHandler {
+    // 内部子面板/横屏/歌词页返回拦截器：供 MainActivity 根级 BackHandler 优先调用（规避 Android 14+ / ColorOS 嵌套 AnimatedVisibility 返回漏截）
+    val consumeInnerBackState = rememberUpdatedState<() -> Boolean> {
         when {
-            showCarQuickControlSheet -> showCarQuickControlSheet = false
-            showArtistPickerDialog -> showArtistPickerDialog = false
-            showCoverPreviewDialog -> showCoverPreviewDialog = false
-            showQueueSheet -> showQueueSheet = false
-            showLyricSettingsDialog -> showLyricSettingsDialog = false
-            effectiveLandscape -> exitLandscape()
-            showLyricView -> showLyricView = false
-            else -> onDismiss()
+            showCarQuickControlSheet -> { showCarQuickControlSheet = false; true }
+            showArtistPickerDialog -> { showArtistPickerDialog = false; true }
+            showCoverPreviewDialog -> { showCoverPreviewDialog = false; true }
+            showQueueSheet -> { showQueueSheet = false; true }
+            showLyricSettingsDialog -> { showLyricSettingsDialog = false; true }
+            effectiveLandscape -> { exitLandscape(); true }
+            showLyricView -> { showLyricView = false; true }
+            else -> false
+        }
+    }
+
+    DisposableEffect(useHoistedBackHandler) {
+        if (useHoistedBackHandler) {
+            onRegisterInnerBackHandler { consumeInnerBackState.value() }
+        }
+        onDispose {
+            if (useHoistedBackHandler) {
+                onRegisterInnerBackHandler(null)
+            }
+        }
+    }
+
+    // 独立使用场景下保留局部 BackHandler；由 MainActivity 托管时统一由常驻根级 BackHandler 接管
+    BackHandler(enabled = !useHoistedBackHandler) {
+        if (!consumeInnerBackState.value()) {
+            onDismiss()
         }
     }
 
